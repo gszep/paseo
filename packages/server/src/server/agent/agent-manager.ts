@@ -1,5 +1,7 @@
 import { projectTimelineRows } from "./timeline-projection.js";
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
+import { ChiConnection, type ChiConnectionOptions } from "../chi/connection.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
@@ -292,6 +294,7 @@ export interface CreateAgentOptions {
 }
 
 export interface AgentManagerOptions {
+  chi?: ChiConnectionOptions;
   pluginLifecycle?: PluginLifecycle;
   clients?: ProviderClientMap;
   providerDefinitions?: ProviderEnabledMap;
@@ -733,8 +736,9 @@ export class AgentManager {
   private acceptingAgentRegistrations = true;
 
   constructor(options: AgentManagerOptions) {
+    this.chi = options.chi ? new ChiConnection(this, options.chi) : null;
     this.pluginLifecycle = options.pluginLifecycle;
-    this.idFactory = options?.idFactory ?? (() => randomUUID());
+    this.idFactory = options.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
@@ -770,6 +774,7 @@ export class AgentManager {
     this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
     this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
   }
+  readonly chi: ChiConnection | null;
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
     this.clients.set(provider, client);
@@ -1066,6 +1071,15 @@ export class AgentManager {
         error: message,
       };
     }
+  }
+  async withNativeRuntime<T>(
+    sessionId: string | null,
+    operation: (runtime: NativeRuntime) => Promise<T>,
+  ): Promise<T> {
+    const client = this.clients.get("opencode");
+    if (!client?.withNativeRuntime)
+      throw new Error("Chi continuation requires the OpenCode V2 provider");
+    return client.withNativeRuntime(sessionId, operation);
   }
 
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
@@ -4929,6 +4943,12 @@ export class AgentManager {
       "agent.manager.dispatch_stream",
     );
     this.dispatch({ type: "agent_stream", agentId, event, ...metadata });
+    if (
+      event.type === "turn_completed" ||
+      event.type === "turn_failed" ||
+      event.type === "turn_canceled"
+    )
+      this.chi?.afterTurn(agentId);
     if (this.pluginLifecycle && agent && !agent.internal && event.type !== "timeline") {
       publishAgentStream(
         this.pluginLifecycle,

@@ -35,6 +35,18 @@ function outboundMessage(type: SessionOutboundMessage["type"]): SessionOutboundM
 }
 
 describe("SessionAuthorization", () => {
+  test("Chi native mutations require workspace.write, not daemon.manage or workspace.read", () => {
+    for (const type of ["chi.native.continue.request", "chi.native.share.request"] as const) {
+      expect(
+        new SessionAuthorization(["workspace.write"]).allowsInbound(inboundMessage(type)),
+      ).toBe(true);
+      expect(
+        new SessionAuthorization(["daemon.manage", "workspace.read"]).allowsInbound(
+          inboundMessage(type),
+        ),
+      ).toBe(false);
+    }
+  });
   test("owner authority covers every session operation", () => {
     const authorization = new SessionAuthorization(OWNER_PERMISSIONS);
 

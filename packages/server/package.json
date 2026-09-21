@@ -111,6 +111,7 @@
     "@getpaseo/plugin": "0.9.0-beta.2",
     "@getpaseo/protocol": "0.9.0-beta.2",
     "@getpaseo/relay": "0.9.0-beta.2",
+    "@henkaku-center/chi-native": "file:../../vendor/henkaku-center-chi-native-0.0.0.tgz",
     "@isaacs/ttlcache": "^2.1.4",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@opencode-ai/sdk": "1.14.46",

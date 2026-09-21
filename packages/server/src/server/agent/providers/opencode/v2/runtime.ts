@@ -16,15 +16,20 @@ import type { ManagedProcessRegistry } from "../../../../managed-processes/manag
 import { resolveOpenCodeHomeDir } from "../paths.js";
 import { OpenCodeHttpError } from "../http-error.js";
 import { raceProviderRefreshAbort } from "../../../provider-refresh-deadline.js";
+import { httpRuntime } from "@henkaku-center/chi-native/runtime-http";
+import { boundedText } from "@henkaku-center/chi-native/http";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 
 export interface V2Connection {
   client: V2Api;
+  transfer?: NativeRuntime;
   release(): Promise<void>;
   retain(): V2Connection;
   readonly exited: Promise<Error>;
 }
 interface Generation {
   client: V2Api;
+  transfer: NativeRuntime;
   users: number;
   stop(): Promise<void>;
   exited: Promise<Error>;
@@ -113,6 +118,7 @@ export class V2Runtime {
     };
     return {
       client: generation.client,
+      transfer: generation.transfer,
       release,
       retain: () => this.lease(generation, pending),
       exited: generation.exited,
@@ -232,20 +238,56 @@ export class V2Runtime {
           Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`,
         },
         fetch: async (request, init) => {
+          const requestUrl = request instanceof Request ? request.url : String(request);
+          const nativeTransfer =
+            /^\/api\/experimental\/session\/(?:import|[^/]+\/export)$|^\/api\/session\/[^/]+\/fork$/.test(
+              new URL(requestUrl).pathname,
+            );
           const signal = init?.signal
             ? AbortSignal.any([init.signal, processAbort.signal])
             : processAbort.signal;
-          const response = await fetch(request, { ...init, signal });
+          const response = await fetch(request, {
+            ...init,
+            signal: nativeTransfer ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : signal,
+            ...(nativeTransfer ? { redirect: "error" as const } : {}),
+          });
           const html = response.headers.get("content-type")?.includes("text/html") ?? false;
           if (!response.ok || html) {
-            const requestUrl = request instanceof Request ? request.url : String(request);
+            await response.body?.cancel();
             throw new OpenCodeHttpError(new URL(requestUrl).pathname, response.status, html);
           }
+          if (nativeTransfer)
+            return new Response(await boundedText(response, 16 * 1024 * 1024), {
+              status: response.status,
+              headers: { "content-type": "application/json" },
+            });
           return response;
         },
       });
       await client.server.info({ signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
-      const generation: Generation = { client, users: 0, stop, exited };
+      // The transfer adapter shares this owner's credential and never exposes it
+      // to the daemon protocol, Chi, or another process.
+      const boundedTransfer = httpRuntime(url, password);
+      const transfer: NativeRuntime = {
+        identity: boundedTransfer.identity,
+        schema: boundedTransfer.schema,
+        info: () => client.server.info(),
+        async get(sessionId) {
+          try {
+            return await client.session.get({ sessionID: sessionId });
+          } catch (error) {
+            if (error instanceof OpenCodeHttpError && error.status === 404) return null;
+            throw error;
+          }
+        },
+        export: (sessionId) => client.session.export({ sessionID: sessionId }),
+        import: (data, directory) =>
+          client.session.import({ ...data, location: { directory } } as Parameters<
+            typeof client.session.import
+          >[0]),
+        fork: (sessionId) => client.session.fork({ sessionID: sessionId }),
+      };
+      const generation: Generation = { client, transfer, users: 0, stop, exited };
       this.generations.add(generation);
       process.once("exit", () => {
         this.generations.delete(generation);

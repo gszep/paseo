@@ -33,6 +33,16 @@ Your code never leaves your machine. Paseo is local-first.
 
 ## Components at a glance
 
+Chi native continuation uses the existing OpenCode V2 runtime owner. The app's
+`/chi` intake carries exact repository/source/snapshot coordinates, selects a
+paired host and workspace, and invokes a workspace-write operation. Share to Chi
+associates one agent explicitly; only associated agents capture settled turns.
+Chi credentials come from an in-memory GitHub CLI exchange, independent of native
+runtime credentials. `chiNative` is the server feature gate. The packed
+`vendor/henkaku-center-chi-native-0.0.0.tgz` dependency is built from the Chi
+repository's `packages/chi-native` at `a8b2d6e`; rebuild and repack it after shared operation
+changes. It is a source-integration artifact, not a published package release.
+
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.
 - **CLI:** Terminal interface for agent workflows that can also start and manage the daemon.

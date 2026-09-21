@@ -38,6 +38,7 @@ import type { OpenCodeBridge } from "../bridge.js";
 import { resolveOpenCodeHomeDir } from "../paths.js";
 import { V2Runtime, type V2Connection } from "./runtime.js";
 import { modelRef, modesFromV2, modelsFromV2 } from "./mapping.js";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 
 interface V2AgentOptions {
   logger: Logger;
@@ -63,6 +64,19 @@ export class OpenCodeV2AgentClient implements AgentClient {
   }
   async isAvailable() {
     return true;
+  }
+  async withNativeRuntime<T>(
+    sessionId: string | null,
+    operation: (runtime: NativeRuntime) => Promise<T>,
+  ): Promise<T> {
+    const attached = sessionId ? this.connections.get(sessionId) : undefined;
+    const connection = attached ? attached.retain() : await this.runtime.acquire();
+    try {
+      if (!connection.transfer) throw new Error("Native transfer is unavailable on this runtime");
+      return await operation(connection.transfer);
+    } finally {
+      await connection.release();
+    }
   }
   async shutdown() {
     await this.runtime.shutdown();

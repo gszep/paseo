@@ -19,6 +19,7 @@ import {
 import { execCommand } from "../../../../utils/spawn.js";
 import { OpenCodeAgentClient } from "../opencode-agent.js";
 import { OpenCodeV2AgentClient } from "./v2/agent.js";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 
 // Keep the minimum aligned with the SDK and binary exercised by CI.
 const MINIMUM_V2: readonly [number, number] = [0, 10];
@@ -85,6 +86,15 @@ export class OpenCodeRuntimeClient implements AgentClient {
   }
   async isAvailable() {
     return this.legacy.isAvailable();
+  }
+  async withNativeRuntime<T>(
+    sessionId: string | null,
+    operation: (runtime: NativeRuntime) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.client();
+    if (!(client instanceof OpenCodeV2AgentClient))
+      throw new Error("Chi continuation requires OpenCode V2");
+    return client.withNativeRuntime(sessionId, operation);
   }
   async getDiagnostic() {
     return this.legacy.getDiagnostic();

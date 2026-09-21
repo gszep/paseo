@@ -473,6 +473,7 @@ export interface PaseoDaemon {
 }
 
 export interface PaseoDaemonDependencies {
+  chiAuthority?: import("./chi/connection.js").ChiAuthority;
   hubRelationshipRemote?: HubRelationshipRemote;
   hubRelationshipClock?: HubRelationshipClock;
   hubRelationshipRetryPolicy?: HubRelationshipRetryPolicy;
@@ -920,6 +921,7 @@ export async function createPaseoDaemon(
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
+    chi: { home: config.paseoHome, serverId, authority: dependencies.chiAuthority },
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,

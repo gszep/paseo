@@ -1781,6 +1781,47 @@ export const ResumeAgentRequestMessageSchema = z.object({
   requestId: z.string(),
 });
 
+export const ChiContinueRequestSchema = z.object({
+  type: z.literal("chi.native.continue.request"),
+  requestId: z.string(),
+  workspaceId: z.string(),
+  repo: z.string().max(4096),
+  sourceId: z.string().regex(/^[a-f0-9]{64}$/),
+  snapshotId: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export const ChiShareRequestSchema = z.object({
+  type: z.literal("chi.native.share.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  repo: z.string().max(4096).optional(),
+});
+export const ChiContinueResponseSchema = z.object({
+  type: z.literal("chi.native.continue.response"),
+  payload: z.discriminatedUnion("outcome", [
+    z.object({
+      requestId: z.string(),
+      outcome: z.literal("ready"),
+      agent: AgentSnapshotPayloadSchema,
+      nativeSessionId: z.string(),
+      turnStarted: z.literal(false),
+    }),
+    z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
+  ]),
+});
+export const ChiShareResponseSchema = z.object({
+  type: z.literal("chi.native.share.response"),
+  payload: z.discriminatedUnion("outcome", [
+    z.object({
+      requestId: z.string(),
+      outcome: z.literal("ready"),
+      sourceId: z.string(),
+      snapshotId: z.string(),
+      actor: z.string(),
+    }),
+    z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
+  ]),
+});
+
 export const ImportAgentRequestMessageSchema = z.object({
   type: z.literal("import_agent_request"),
   provider: AgentProviderSchema.optional(),
@@ -3151,6 +3192,8 @@ export const SubscriptionReleaseResponseSchema = z.object({
 });
 
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
+  ChiContinueRequestSchema,
+  ChiShareRequestSchema,
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
   SessionEventsSetSubscriptionRequestSchema,
@@ -3526,6 +3569,7 @@ export const ServerInfoStatusPayloadSchema = z
     features: z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
+        chiNative: z.boolean().optional(),
         agentRequestReceipts: z.boolean().optional(),
         // COMPAT(workspaceRequestReceipts): added in v0.8.0; remove gate after 2027-03-07.
         workspaceRequestReceipts: z.boolean().optional(),
@@ -6717,6 +6761,8 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 });
 
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
+  ChiContinueResponseSchema,
+  ChiShareResponseSchema,
   BrowserHostRegisterResponseSchema,
   SubscriptionReleaseResponseSchema,
   SessionEventsSetSubscriptionResponseSchema,

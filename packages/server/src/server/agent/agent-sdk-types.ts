@@ -7,6 +7,7 @@ import type {
 } from "@getpaseo/protocol/agent-types";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 import type { PaseoToolCatalog } from "./tools/types.js";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 
 export type { AgentProviderNotice, AgentTaskItem };
 
@@ -735,6 +736,10 @@ export interface ResolveAgentDefaultModeInput {
 }
 
 export interface AgentClient {
+  withNativeRuntime?<T>(
+    sessionId: string | null,
+    operation: (runtime: NativeRuntime) => Promise<T>,
+  ): Promise<T>;
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
   createSession(

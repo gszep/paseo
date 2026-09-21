@@ -255,6 +255,7 @@ import {
 import { archiveByScope, type ActiveWorkspaceRef } from "./workspace-archive-service.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { SessionAuthorization, type DaemonPermission } from "./authorization/index.js";
+import { safeChiError } from "./chi/connection.js";
 
 function resolveWorkspaceSetupRuntime(
   runtime: WorkspaceSetupRuntime | undefined,
@@ -3046,6 +3047,31 @@ export class Session {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
         return;
+      case "chi.native.continue.request":
+        await this.handleChiContinue(msg);
+        return;
+      case "chi.native.share.request":
+        try {
+          if (!this.agentManager.chi) throw new Error("chi-unavailable");
+          const result = await this.agentManager.chi.share(msg.agentId, msg.repo);
+          if (!result.sourceId || !result.head) throw new Error("chi-capture-incomplete");
+          this.emit({
+            type: "chi.native.share.response",
+            payload: {
+              requestId: msg.requestId,
+              outcome: "ready",
+              sourceId: result.sourceId,
+              snapshotId: result.head,
+              actor: result.actor,
+            },
+          });
+        } catch (error) {
+          this.emit({
+            type: "chi.native.share.response",
+            payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
+          });
+        }
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
         return;
@@ -4516,6 +4542,47 @@ export class Session {
           type: "error",
           content: `Failed to import agent: ${message}`,
         },
+      });
+    }
+  }
+
+  private async handleChiContinue(
+    msg: Extract<SessionInboundMessage, { type: "chi.native.continue.request" }>,
+  ): Promise<void> {
+    try {
+      if (!this.agentManager.chi) throw new Error("chi-unavailable");
+      const workspace = await this.workspaceRegistry.get(msg.workspaceId);
+      if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
+      const fork = await this.agentManager.chi.continue({ ...msg, cwd: workspace.cwd });
+      const { snapshot, createdWorkspace } = await importProviderSession({
+        request: {
+          provider: "opencode",
+          providerHandleId: fork.sessionId,
+          cwd: workspace.cwd,
+          workspaceId: msg.workspaceId,
+          labels: fork.labels,
+          requestId: msg.requestId,
+        },
+        workspaceProvisioning: this.workspaceProvisioning,
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      if (createdWorkspace) await this.registerWorkspaceForImportedAgent(createdWorkspace);
+      this.emit({
+        type: "chi.native.continue.response",
+        payload: {
+          requestId: msg.requestId,
+          outcome: "ready",
+          agent: await this.buildAgentPayload(snapshot),
+          nativeSessionId: fork.sessionId,
+          turnStarted: false,
+        },
+      });
+    } catch (error) {
+      this.emit({
+        type: "chi.native.continue.response",
+        payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
       });
     }
   }

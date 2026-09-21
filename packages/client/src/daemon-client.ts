@@ -3101,6 +3101,38 @@ export class DaemonClient {
     return status.agent;
   }
 
+  async continueChi(input: {
+    workspaceId: string;
+    repo: string;
+    sourceId: string;
+    snapshotId: string;
+    requestId?: string;
+  }) {
+    const requestId = this.createRequestId(input.requestId);
+    return this.sendRequest({
+      requestId,
+      message: { type: "chi.native.continue.request", requestId, ...input },
+      options: { skipQueue: true },
+      select: (msg) =>
+        msg.type === "chi.native.continue.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+  }
+
+  async shareChi(input: { agentId: string; repo?: string }) {
+    const requestId = this.createRequestId();
+    return this.sendRequest({
+      requestId,
+      message: { type: "chi.native.share.request", requestId, ...input },
+      options: { skipQueue: true },
+      select: (msg) =>
+        msg.type === "chi.native.share.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+  }
+
   async refreshAgent(agentId: string, requestId?: string): Promise<AgentRefreshedStatusPayload> {
     const resolvedRequestId = this.createRequestId(requestId);
     const message = SessionInboundMessageSchema.parse({
