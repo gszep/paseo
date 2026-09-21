@@ -994,8 +994,17 @@ export class AgentManager {
             IMPORTABLE_SESSION_LIST_TIMEOUT_MS,
             `Timed out listing importable sessions for provider '${provider}' after ${IMPORTABLE_SESSION_LIST_TIMEOUT_MS}ms`,
           );
+          const quarantine =
+            provider === "opencode" && this.chi ? await this.chi.quarantinedSessions() : [];
           return {
             sessions: sessions
+              .filter(
+                (session) =>
+                  !quarantine.some(
+                    (owned) =>
+                      owned.sessionId === session.providerHandleId && owned.cwd === session.cwd,
+                  ),
+              )
               .filter((session) => matchesImportableSessionQuery(session, options?.query))
               .map((session) => Object.assign(session, { provider })),
             error: null,
@@ -1397,6 +1406,7 @@ export class AgentManager {
     cwd: string;
     workspaceId: string;
     labels?: Record<string, string>;
+    chiRegistration?: object;
   }): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(this.importProviderSessionInternal(input));
   }
@@ -1407,8 +1417,10 @@ export class AgentManager {
     cwd: string;
     workspaceId: string;
     labels?: Record<string, string>;
+    chiRegistration?: object;
   }): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    await this.chi?.assertImportAllowed(input);
     const resolvedAgentId = validateAgentId(this.idFactory(), "importProviderSession");
     this.requireEnabledProvider(input.provider);
 
@@ -2198,6 +2210,8 @@ export class AgentManager {
       return false;
     }
 
+    await this.chi?.assertCurrent({ cwd: record.cwd, labels: record.labels ?? {} });
+
     // Close and native restore share the lifecycle lane with persisted resume.
     // No new history or interactive runtime can acquire the writer between them.
     if (this.agents.has(agentId)) await this.closeAgentRuntime(agentId);
@@ -2230,6 +2244,23 @@ export class AgentManager {
     }
 
     await this.unarchiveSnapshot(matched.id);
+  }
+
+  /** Read/modify/write one daemon-owned label inside the existing lifecycle lane.
+   * Public snapshots copy labels and must never serve as mutation bases. */
+  async updateAgentLabel(
+    agentId: string,
+    key: string,
+    update: (current: string | undefined) => string,
+  ): Promise<string> {
+    return this.runLifecycleMutation(agentId, async () => {
+      const live = this.agents.get(agentId);
+      const labels = live ? live.labels : (await this.requireRegistry().get(agentId))?.labels;
+      if (!labels) throw new Error(`Agent not found: ${agentId}`);
+      const value = update(labels[key]);
+      await this.writeLabels(agentId, { [key]: value });
+      return value;
+    });
   }
 
   async updateAgentMetadata(
@@ -2356,7 +2387,9 @@ export class AgentManager {
     };
     void (async () => {
       try {
-        await handler.run({ emit: dispatch });
+        const run = () => handler.run({ emit: dispatch });
+        if (this.chi) await this.chi.withPromptAdmission(agentId, run);
+        else await run();
       } catch (error) {
         const text = error instanceof Error ? error.message : "Out-of-band command failed";
         dispatch({
@@ -2413,7 +2446,12 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
-      const result = await agent.session.startTurn(prompt, options);
+      const start = () => {
+        if (pendingRun.settled || this.agents.get(agentId) !== agent)
+          throw new Error(`Agent ${agentId} run was canceled before its turn started`);
+        return agent.session.startTurn(prompt, options);
+      };
+      const result = this.chi ? await this.chi.withPromptAdmission(agentId, start) : await start();
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
       }
@@ -2441,6 +2479,21 @@ export class AgentManager {
       this.runs.settleForegroundRun(agentId, pendingRun.token);
       throw error;
     }
+  }
+
+  isChiAgentBusy(agentId: string): boolean {
+    const agent = this.getAgent(agentId);
+    return (
+      !agent ||
+      agent.lifecycle === "running" ||
+      agent.lifecycle === "initializing" ||
+      Boolean(agent.activeForegroundTurnId) ||
+      this.runs.hasRun(agentId)
+    );
+  }
+
+  withChiAdmission<T>(agentId: string, operation: () => Promise<T>): Promise<T> {
+    return this.runForegroundMutation(agentId, operation);
   }
 
   streamAgent(
@@ -2764,6 +2817,7 @@ export class AgentManager {
       const barrier: SteerEventBarrier = { events: [] };
       this.steerEventBarriers.set(agent.id, barrier);
       try {
+        await this.chi?.assertCurrent(agent);
         return await operation();
       } finally {
         if (this.steerEventBarriers.get(agent.id) === barrier) {

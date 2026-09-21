@@ -3107,7 +3107,9 @@ export class DaemonClient {
     sourceId: string;
     snapshotId: string;
     requestId?: string;
+    canonical?: { conversationId: string; transferId: string };
   }) {
+    if (input.canonical) this.requireChiCanonical();
     const requestId = this.createRequestId(input.requestId);
     return this.sendRequest({
       requestId,
@@ -3131,6 +3133,30 @@ export class DaemonClient {
           ? msg.payload
           : null,
     });
+  }
+
+  async manageChiConversation(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "chi.conversation.manage.request" }>,
+      "type" | "requestId"
+    >,
+  ) {
+    this.requireChiCanonical();
+    const requestId = this.createRequestId();
+    return this.sendRequest({
+      requestId,
+      message: { type: "chi.conversation.manage.request", requestId, ...input },
+      options: { skipQueue: true },
+      select: (msg) =>
+        msg.type === "chi.conversation.manage.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+  }
+
+  private requireChiCanonical(): void {
+    if (this.getLastServerInfoMessage()?.features?.chiCanonical !== true)
+      throw new Error("Update the selected host to use Chi canonical continuation.");
   }
 
   async refreshAgent(agentId: string, requestId?: string): Promise<AgentRefreshedStatusPayload> {

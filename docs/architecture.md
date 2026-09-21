@@ -38,9 +38,10 @@ Chi native continuation uses the existing OpenCode V2 runtime owner. The app's
 paired host and workspace, and invokes a workspace-write operation. Share to Chi
 associates one agent explicitly; only associated agents capture settled turns.
 Chi credentials come from an in-memory GitHub CLI exchange, independent of native
-runtime credentials. `chiNative` is the server feature gate. The packed
+runtime credentials. `chiNative` gates standalone pinned forks; `chiCanonical`
+gates managed conversation transfers. The packed
 `vendor/henkaku-center-chi-native-0.0.0.tgz` dependency is built from the Chi
-repository's `packages/chi-native` at `a01f3ea`; rebuild and repack it after shared operation
+repository's `packages/chi-native`; rebuild and repack it after shared operation
 changes. npm bundles this private dependency inside the server tarball so packed
 CLI/Docker installations do not need the checkout's vendor path. Prepack stages
 the locked installed package beneath `packages/server/node_modules`: npm omits a
@@ -57,6 +58,57 @@ Only a proven pre-mutation failure permits an explicit fresh attempt. Ambiguous
 mutations retain their receipt IDs for inspection and never replay. Workspace
 choices require the selected host's completed catalog, and capture rejects a new
 settled turn during acquisition even when the bounded turn-history set stays full.
+
+For a managed move, choose **Continue on another host** on the source agent,
+then select the destination host and existing workspace. Same-host moves use the
+same flow. Source preparation shares the manager's foreground admission queue,
+rejects busy agents, and persists a prompt block before capturing and reserving.
+Every subsequent managed prompt reacquires Chi authorization; pending, stale and
+offline canonical associations cannot start a turn. Steering and out-of-band
+commands use the same admission boundary. Native CLI execution outside Paseo is
+outside this gate; its late captures can invalidate publication rather than being
+silently discarded.
+
+Destination receipts are keyed by repository, conversation and transfer, never
+by a new UI request ID. Reserve the private claim receipt before claiming. A
+replayed claim cannot grant execution; only an existing verified ready native
+receipt can recover that path. Registration stays blocked until the exact,
+durably saved publication request commits. Publication uses a separate immutable,
+no-replace receipt: concurrent processes must submit the winning request even if
+their export observes later work. Every publisher syncs the receipt's parent
+directory before sending it, including readers of an already-visible winner;
+a competing writer may still be between linking the file and syncing that name.
+Claim journals are never rewritten for publication.
+Retry returns the registered agent
+even after later turns, and never activates an incarnation that has since become
+stale. Lost or ambiguous native receipts require inspection, not another fork.
+The source's explicit reconciliation archives the predecessor using managed
+archive; OpenCode V2 native archive remains unsupported. Native discovery hides
+canonical archived predecessors and their import replicas. Private receipt-owned
+native IDs are quarantined from discovery and direct import even before agent
+registration, including known IDs from interrupted mutations. Reused same-host
+sources retain their existing ownership. Recovery registration gets an ephemeral
+capability bound to the verified fork, workspace and labels; ordinary imports
+cannot supply it. A fork-stage receipt without its resulting native ID blocks
+ordinary native discovery and direct import across that owner namespace until
+manual receipt recovery resolves the ambiguity. This also applies to a failed
+fork with a lost reply; native IDs are never guessed and the mutation never replays.
+Association updates merge in the manager's lifecycle lane, so late capture cannot
+erase admission policy or the original reservation/cancellation request. Unarchive checks
+canonical authorization before restoring a runtime.
+
+The SDK exposes `api.chi.share`, `api.chi.manage` and `api.chi.continue`:
+`manage({agentId, operation: {action: "prepare", transferId, destination}})`
+returns the reserved source/snapshot and conversation coordinates. Destination
+is `{instanceId: "<serverId>:opencode", workspace: {hostId: serverId, path}}`.
+Call `continue` on that destination with its local `workspaceId`, returned
+repository/source/snapshot, and `canonical: {conversationId, transferId}`.
+`manage` with `reconcile` performs source cleanup; `cancel` releases only an
+unclaimed reservation. All three operations require `workspace.write`.
+No model turn starts and neither workspaces nor runtime credentials are copied.
+The `/chi` route also accepts a prepared `conversationId` and `transferId`
+alongside the exact evidence coordinates. App/daemon drift is gated once by
+`chiCanonical`; there is no fallback to an independent fork.
 
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.

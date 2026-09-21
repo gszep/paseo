@@ -11,12 +11,16 @@ import {
   continuationRequestId,
   clearContinuationRequest,
   currentWorkspaceCatalog,
+  preparedCoordinates,
 } from "./continuation-state";
 
 interface Selection {
   repo: string;
   sourceId: string;
   snapshotId: string;
+  sourceHost?: string;
+  agentId?: string;
+  canonical?: { conversationId: string; transferId: string };
 }
 interface Target {
   serverId: string;
@@ -33,6 +37,133 @@ function targetReducer(state: Target, action: Action): Target {
   return { ...state, pickerOpen: action.open };
 }
 
+function selectionKey(selection: Selection, target: Target) {
+  return JSON.stringify([
+    selection.sourceHost,
+    selection.agentId,
+    selection.repo,
+    selection.sourceId,
+    selection.snapshotId,
+    target.serverId,
+    target.workspaceId,
+  ]);
+}
+
+function continuationErrorMessage(message: string): string {
+  const descriptions: Record<string, string> = {
+    "chi-session-busy": "Let the source agent finish its current turn, then retry this transfer.",
+    "chi-conversation-pending":
+      "This conversation is paused for a transfer. Retry the existing destination, or cancel before it claims the transfer.",
+    "chi-conversation-stale":
+      "This is a predecessor. Refresh source status to locate the current runtime and archive this copy.",
+    "chi-conversation-recovery-required":
+      "The destination claim or native mutation needs private receipt recovery on that host. Retry only the existing transfer; a new request will not create another fork.",
+    "continuation-recovery-required":
+      "The native mutation outcome is ambiguous. Keep the existing receipt for inspection on the selected host.",
+    "chi-conversation-http-409":
+      "Chi rejected this state transition. Refresh source status. A claimed transfer needs receipt recovery; late source work may have changed the selected head.",
+    "chi-conversation-publication-pending":
+      "The destination is registered but not published yet. Retry the existing continuation before capturing or sending a prompt.",
+  };
+  return descriptions[message] ?? message;
+}
+
+function SelectionHeading({
+  selection,
+  managed,
+  valid,
+  sourceMessage,
+}: {
+  selection: Selection;
+  managed: boolean;
+  valid: boolean;
+  sourceMessage: string;
+}) {
+  let description = "Fork the whole selected Chi snapshot into this host’s OpenCode runtime.";
+  if (selection.canonical)
+    description = "Recover the prepared transfer on its exact destination host and workspace.";
+  if (managed)
+    description =
+      "Pause the selected source agent, capture its latest settled work, then continue on the selected destination. Source and destination may be the same host. The published destination becomes current and the source is archived.";
+  return (
+    <>
+      <Text style={styles.heading}>
+        {managed || selection.canonical ? "Continue canonical conversation" : "Continue in Paseo"}
+      </Text>
+      <Text style={styles.text}>{selection.repo}</Text>
+      <Text style={styles.text}>
+        {description} No model turn starts. Workspaces and credentials are not copied.
+      </Text>
+      {!valid ? (
+        <Text style={styles.text}>
+          {managed ? sourceMessage : "Invalid Chi evidence coordinates."}
+        </Text>
+      ) : null}
+      {managed ? (
+        <Text style={styles.text}>
+          Source: {selection.sourceHost} / {selection.agentId}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
+function SourceRecovery({
+  selection,
+  target,
+  busy,
+}: {
+  selection: Selection;
+  target: Target;
+  busy: boolean;
+}) {
+  const runtime = useHostRuntimeSnapshot(selection.sourceHost ?? "");
+  const { supported } = continuationAvailability(runtime, true);
+  const recovery = useMutation({
+    retry: false,
+    mutationFn: async (action: "reconcile" | "cancel") => {
+      if (!runtime?.client || !selection.agentId) throw new Error("Reconnect the source host.");
+      const result = await runtime.client.manageChiConversation({
+        agentId: selection.agentId,
+        operation: { action },
+      });
+      if (result.outcome === "failed") throw new Error(result.error);
+      if (action === "cancel") await clearContinuationRequest(selectionKey(selection, target));
+      return result;
+    },
+  });
+  const { mutate } = recovery;
+  const cancel = useCallback(() => mutate("cancel"), [mutate]);
+  const reconcile = useCallback(() => mutate("reconcile"), [mutate]);
+  const disabled = busy || recovery.isPending || !supported;
+  return (
+    <>
+      <Button variant="outline" disabled={disabled} onPress={cancel}>
+        Cancel before destination claim
+      </Button>
+      <Button variant="outline" disabled={disabled} onPress={reconcile}>
+        Refresh source / archive predecessor
+      </Button>
+      {recovery.data ? (
+        <Text style={styles.text}>
+          Current runtime: {recovery.data.current.instanceId}.{" "}
+          {recovery.data.pending ? "Transfer pending." : "No pending transfer."}
+        </Text>
+      ) : null}
+      {recovery.isError ? (
+        <Text accessibilityRole="alert" style={styles.text}>
+          {continuationErrorMessage(recovery.error.message)}
+        </Text>
+      ) : null}
+    </>
+  );
+}
+
+function buttonText(pending: boolean, canonical: boolean) {
+  if (pending) return "Preparing continuation…";
+  return canonical ? "Continue on selected destination" : "Fork selected snapshot";
+}
+
 export function ChiContinueScreen(selection: Selection) {
   const hosts = useHosts();
   const [target, dispatch] = useReducer(targetReducer, {
@@ -43,7 +174,11 @@ export function ChiContinueScreen(selection: Selection) {
   const anchor = useRef<View>(null);
   const runtime = useHostRuntimeSnapshot(target.serverId);
   const client = runtime?.client;
-  const { supported, message: availabilityMessage } = continuationAvailability(runtime);
+  const sourceRuntime = useHostRuntimeSnapshot(selection.sourceHost ?? "");
+  const managed = Boolean(selection.sourceHost && selection.agentId);
+  const canonical = managed || Boolean(selection.canonical);
+  const { supported, message: availabilityMessage } = continuationAvailability(runtime, canonical);
+  const sourceAvailability = continuationAvailability(sourceRuntime, true);
   const workspaces = useFetchQuery({
     queryKey: ["chi-workspaces", target.serverId],
     enabled: Boolean(client && supported),
@@ -66,7 +201,7 @@ export function ChiContinueScreen(selection: Selection) {
       return { ...first, serverId: target.serverId };
     },
   });
-  const valid = validSelection(selection);
+  const valid = managed ? sourceAvailability.supported : validSelection(selection);
   const entries = currentWorkspaceCatalog(target.serverId, workspaces);
   const selectedWorkspace = entries.find((workspace) => workspace.id === target.workspaceId);
   const continuation = useMutation({
@@ -74,21 +209,40 @@ export function ChiContinueScreen(selection: Selection) {
     mutationFn: async () => {
       if (!client || !supported || !valid || !selectedWorkspace)
         throw new Error("Select an available host and existing workspace.");
-      const key = JSON.stringify([
-        selection.repo,
-        selection.sourceId,
-        selection.snapshotId,
-        target.serverId,
-        target.workspaceId,
-      ]);
+      const key = selectionKey(selection, target);
       const requestId = await continuationRequestId(key);
+      let coordinates = {
+        repo: selection.repo,
+        sourceId: selection.sourceId,
+        snapshotId: selection.snapshotId,
+        canonical: selection.canonical,
+      };
+      if (managed) {
+        if (!sourceRuntime?.client || !selection.agentId)
+          throw new Error("Reconnect the source host.");
+        const prepared = await sourceRuntime.client.manageChiConversation({
+          agentId: selection.agentId,
+          operation: {
+            action: "prepare",
+            transferId: requestId,
+            destination: {
+              instanceId: `${target.serverId}:opencode`,
+              workspace: { hostId: target.serverId, path: selectedWorkspace.workspaceDirectory },
+            },
+          },
+        });
+        coordinates = await preparedCoordinates(prepared, key);
+      }
       const result = await client.continueChi({
-        ...selection,
+        ...coordinates,
         workspaceId: target.workspaceId,
         requestId,
       });
       if (result.outcome === "failed") {
-        if (result.error === "continuation-pre-mutation-failed-start-new-attempt") {
+        if (
+          !coordinates.canonical &&
+          result.error === "continuation-pre-mutation-failed-start-new-attempt"
+        ) {
           await clearContinuationRequest(key);
           throw new Error(
             "No native mutation occurred. Click Fork selected snapshot again to start a new attempt.",
@@ -96,6 +250,23 @@ export function ChiContinueScreen(selection: Selection) {
         }
         throw new Error(result.error);
       }
+      if (managed && sourceRuntime?.client && selection.agentId) {
+        const reconciled = await sourceRuntime.client.manageChiConversation({
+          agentId: selection.agentId,
+          operation: { action: "reconcile" },
+        });
+        if (reconciled.outcome === "failed")
+          throw new Error(
+            `Destination is published; source cleanup needs retry: ${reconciled.error}`,
+          );
+      }
+      if (
+        result.canonicalCurrent &&
+        result.canonicalCurrent.nativeSessionId !== result.nativeSessionId
+      )
+        throw new Error(
+          `This transfer already completed and the conversation moved again. Open the current host ${result.canonicalCurrent.instanceId}; the old incarnation remains archived.`,
+        );
       return { result, serverId: target.serverId, workspaceId: target.workspaceId };
     },
     onSuccess: ({ result, serverId, workspaceId }) =>
@@ -116,13 +287,12 @@ export function ChiContinueScreen(selection: Selection) {
   const submit = useCallback(() => mutate(), [mutate]);
   return (
     <ScrollView contentContainerStyle={styles.screen}>
-      <Text style={styles.heading}>Continue in Paseo</Text>
-      <Text style={styles.text}>{selection.repo}</Text>
-      <Text style={styles.text}>
-        Fork the whole selected Chi snapshot into this host’s OpenCode runtime. No model turn
-        starts. Future settled turns of the fork are captured to Chi.
-      </Text>
-      {!valid ? <Text style={styles.text}>Invalid Chi evidence coordinates.</Text> : null}
+      <SelectionHeading
+        selection={selection}
+        managed={managed}
+        valid={valid}
+        sourceMessage={sourceAvailability.message}
+      />
       <HostPicker
         hosts={hosts}
         value={target.serverId}
@@ -158,11 +328,14 @@ export function ChiContinueScreen(selection: Selection) {
         disabled={!valid || !supported || !selectedWorkspace || continuation.isPending}
         onPress={submit}
       >
-        {continuation.isPending ? "Preparing native fork…" : "Fork selected snapshot"}
+        {buttonText(continuation.isPending, canonical)}
       </Button>
+      {managed ? (
+        <SourceRecovery selection={selection} target={target} busy={continuation.isPending} />
+      ) : null}
       {continuation.isError ? (
         <Text accessibilityRole="alert" style={styles.text}>
-          {continuation.error.message}
+          {continuationErrorMessage(continuation.error.message)}
         </Text>
       ) : null}
     </ScrollView>
@@ -177,10 +350,12 @@ function validSelection(selection: Selection): boolean {
   );
 }
 
-function continuationAvailability(runtime: HostRuntimeSnapshot | null) {
+function continuationAvailability(runtime: HostRuntimeSnapshot | null, canonical = false) {
   const supported =
     runtime?.connectionStatus === "online" &&
-    runtime.client?.getLastServerInfoMessage()?.features?.chiNative === true;
+    runtime.client?.getLastServerInfoMessage()?.features?.[
+      canonical ? "chiCanonical" : "chiNative"
+    ] === true;
   const message =
     runtime?.connectionStatus === "online"
       ? "Update the selected host to use Chi native continuation."

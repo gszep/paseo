@@ -37,6 +37,27 @@ function createMockLogger() {
   };
 }
 
+test("Chi canonical capability refuses old hosts before sending a standalone fork", async () => {
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "chi-fixture",
+    clientType: "cli",
+    logger: createMockLogger(),
+  });
+  await expect(
+    client.continueChi({
+      workspaceId: "workspace",
+      repo: "github:fixture/repo",
+      sourceId: "a".repeat(64),
+      snapshotId: "b".repeat(64),
+      canonical: { conversationId: "conversation", transferId: "transfer" },
+    }),
+  ).rejects.toThrow("Update the selected host");
+  await expect(
+    client.manageChiConversation({ agentId: "agent", operation: { action: "cancel" } }),
+  ).rejects.toThrow("Update the selected host");
+});
+
 interface TraceRecord {
   phase: "begin" | "end";
   name?: string;

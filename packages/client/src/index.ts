@@ -494,6 +494,11 @@ export interface PaseoApi {
   readonly agents: PaseoAgentActions;
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
+  readonly chi: {
+    share: DaemonClient["shareChi"];
+    continue: DaemonClient["continueChi"];
+    manage: DaemonClient["manageChiConversation"];
+  };
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -731,6 +736,11 @@ export function createPaseoApi(
       ref: (agent) => createAgentHandle(agent),
       create: (options) => createAgent(options),
       subscribe: listenAgents,
+    },
+    chi: {
+      share: (input) => daemonClient.shareChi(input),
+      continue: (input) => daemonClient.continueChi(input),
+      manage: (input) => daemonClient.manageChiConversation(input),
     },
     providers: {
       listModels: (provider, options) => daemonClient.listProviderModels(provider, options),

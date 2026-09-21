@@ -1675,6 +1675,7 @@ export class VoiceAssistantWebSocketServer {
       ...(this.serverCapabilities ? { capabilities: this.serverCapabilities } : {}),
       features: {
         chiNative: this.agentManager.chi !== null,
+        chiCanonical: this.agentManager.chi !== null,
         ownedSubscriptions: true,
         agentRequestReceipts: true,
         workspaceRequestReceipts: true,

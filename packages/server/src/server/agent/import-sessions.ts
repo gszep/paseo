@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
 import type {
@@ -27,6 +28,7 @@ const METADATA_GENERATION_PROMPT_PREFIX =
   "Generate metadata for a coding agent based on the user prompt.";
 const IMPORT_SESSION_SEARCH_SCAN_LIMIT = 500;
 export type ImportSessionAgentManager = AgentLoaderManager &
+  Partial<Pick<AgentManager, "chi">> &
   Pick<
     AgentManager,
     | "archiveSnapshot"
@@ -75,6 +77,7 @@ export interface ListImportableProviderSessionsResult {
 }
 
 export interface ImportProviderSessionInput {
+  chiRegistration?: object;
   request: NormalizedImportAgentRequest;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
   agentManager: ImportSessionAgentManager;
@@ -205,6 +208,29 @@ async function importProviderSessionNow(
   workspaceId: string,
 ): Promise<ImportedProviderSession> {
   const { provider, providerHandleId, labels } = input.request;
+  await input.agentManager.chi?.assertImportAllowed({
+    provider,
+    providerHandleId,
+    labels,
+    cwd,
+    workspaceId,
+    chiRegistration: input.chiRegistration,
+  });
+
+  if (provider === "opencode") {
+    const records = await input.agentStorage.list();
+    if (
+      records.some(
+        (record) =>
+          record.provider === provider &&
+          record.cwd === cwd &&
+          chiImportState(record).replica === providerHandleId,
+      )
+    )
+      throw new Error(
+        "Chi canonical replicas are read-only history; continue the current conversation instead.",
+      );
+  }
 
   const matchingRecords = await input.agentStorage.listByProviderSession(
     provider,
@@ -253,6 +279,7 @@ async function importProviderSessionNow(
     cwd,
     workspaceId,
     labels,
+    chiRegistration: input.chiRegistration,
   });
   await unarchiveAgentState(input.agentStorage, input.agentManager, snapshot.id);
 
@@ -367,7 +394,15 @@ async function collectImportedProviderSessions(
   }
 
   for (const record of records) {
-    if (record.archivedAt) {
+    // Canonical predecessors remain managed history even though V2 has no native
+    // archive operation. Hide their imported replica as well as their fork.
+    const { canonical, replica } = chiImportState(record);
+    if (replica) {
+      const key = toProviderSessionHandleKey(record.provider, replica);
+      handles.add(key);
+      sessions.add(key);
+    }
+    if (record.archivedAt && !canonical) {
       continue;
     }
     collect(record.provider, record.persistence);
@@ -378,6 +413,29 @@ async function collectImportedProviderSessions(
 
 function toProviderSessionHandleKey(provider: string, providerHandleId: string): string {
   return `${provider}\0${providerHandleId}`;
+}
+
+function chiImportState(record: StoredAgentRecord): { canonical: boolean; replica: string | null } {
+  try {
+    const canonical = Boolean(
+      record.labels?.["chi.native"] && JSON.parse(record.labels["chi.native"]).conversationId,
+    );
+    const receipt =
+      canonical && record.labels?.["chi.continuation"]
+        ? JSON.parse(record.labels["chi.continuation"])
+        : null;
+    const replica = receipt?.destination?.importedSessionId;
+    const reused =
+      receipt?.destination?.importDisposition === "reused" ||
+      (typeof replica === "string" &&
+        receipt?.destination?.importDisposition !== "created" &&
+        createHash("sha256")
+          .update(JSON.stringify(["opencode-v2", receipt.destination.origin, replica]))
+          .digest("hex") === receipt.source?.sourceId);
+    return { canonical, replica: !reused && typeof replica === "string" ? replica : null };
+  } catch {
+    return { canonical: Boolean(record.labels?.["chi.native"]), replica: null };
+  }
 }
 
 function isMetadataGenerationSession(input: { firstPromptPreview: string | null }): boolean {

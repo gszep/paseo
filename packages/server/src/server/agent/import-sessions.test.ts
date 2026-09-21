@@ -146,6 +146,44 @@ function makeRequest(
   };
 }
 
+test("canonical archived predecessors and import replicas stay out of native session discovery", async () => {
+  const result = await listImportableProviderSessions({
+    request: makeRequest(),
+    agentManager: {
+      listAgents: () => [],
+      listImportableSessions: async () =>
+        makeImportableSessionsResult(
+          ["ses_predecessor", "ses_replica", "ses_unmanaged"].map((sessionId) =>
+            makeImportableSession({
+              provider: "opencode",
+              sessionId,
+              lastActivityAt: "2026-09-21T00:00:00.000Z",
+            }),
+          ),
+        ),
+    },
+    agentStorage: {
+      list: async () => [
+        {
+          id: "old-agent",
+          provider: "opencode",
+          archivedAt: "2026-09-21T01:00:00.000Z",
+          persistence: { provider: "opencode", sessionId: "ses_predecessor" },
+          labels: {
+            "chi.native": JSON.stringify({ conversationId: "conversation" }),
+            "chi.continuation": JSON.stringify({
+              destination: { importedSessionId: "ses_replica" },
+            }),
+          },
+        } as StoredAgentRecord,
+      ],
+    },
+    providerSnapshotManager: { getProviderLabel: () => "OpenCode" },
+  });
+  expect(result.entries.map((entry) => entry.providerHandleId)).toEqual(["ses_unmanaged"]);
+  expect(result.filteredAlreadyImportedCount).toBe(2);
+});
+
 test("listImportableProviderSessions filters, sorts, limits, and projects importable sessions", async () => {
   const cwd = "/tmp/project";
   const sessions = [
@@ -751,6 +789,40 @@ class ProviderImportHarness {
     });
   }
 }
+
+test("canonical import replicas cannot bypass prompt admission through an explicit native import", async () => {
+  const harness = await ProviderImportHarness.create();
+  const base = makeStoredProviderSession({
+    id: harness.snapshot.id,
+    cwd: harness.snapshot.cwd,
+    sessionId: "ses_predecessor",
+    labels: {
+      "chi.native": JSON.stringify({ conversationId: "conversation" }),
+      "chi.continuation": JSON.stringify({ destination: { importedSessionId: "ses_replica" } }),
+    },
+  });
+  await harness.seed({
+    ...base,
+    provider: "opencode",
+    config: { ...base.config, provider: "opencode" },
+    persistence: { ...base.persistence!, provider: "opencode" },
+  });
+  await expect(
+    importProviderSession({
+      request: {
+        requestId: "import-replica",
+        provider: "opencode",
+        providerHandleId: "ses_replica",
+        cwd: harness.snapshot.cwd,
+      },
+      workspaceProvisioning: createImportWorkspace("workspace"),
+      agentManager: harness.manager,
+      agentStorage: harness.storage,
+      logger: createTestLogger(),
+    }),
+  ).rejects.toThrow("canonical replicas are read-only history");
+  expect(harness.freshImports).toEqual([]);
+});
 
 test("importProviderSession uses the provider import path with the requested labels", async () => {
   const harness = await ProviderImportHarness.create();

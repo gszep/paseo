@@ -3050,6 +3050,38 @@ export class Session {
       case "chi.native.continue.request":
         await this.handleChiContinue(msg);
         return;
+      case "chi.conversation.manage.request":
+        try {
+          if (!this.agentManager.chi) throw new Error("chi-unavailable");
+          await ensureAgentLoaded(msg.agentId, {
+            agentManager: this.agentManager,
+            agentStorage: this.agentStorage,
+            logger: this.sessionLogger,
+          });
+          const op = msg.operation;
+          const result =
+            op.action === "prepare"
+              ? await this.agentManager.chi.prepare(msg.agentId, op.transferId, op.destination)
+              : await this.agentManager.chi.reconcile(msg.agentId, op.action === "cancel");
+          this.emit({
+            type: "chi.conversation.manage.response",
+            payload: {
+              requestId: msg.requestId,
+              outcome: "ready",
+              repo: result.conversation.repo,
+              conversationId: result.conversation.id,
+              current: result.conversation.current,
+              pending: result.conversation.pending,
+              transfer: result.transfer,
+            },
+          });
+        } catch (error) {
+          this.emit({
+            type: "chi.conversation.manage.response",
+            payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
+          });
+        }
+        return;
       case "chi.native.share.request":
         try {
           if (!this.agentManager.chi) throw new Error("chi-unavailable");
@@ -4560,7 +4592,7 @@ export class Session {
             const records = await this.agentStorage.listByProviderSession("opencode", sessionId);
             const record = records[0];
             if (!record) return null;
-            if (record.archivedAt || records.length !== 1)
+            if ((!msg.canonical && record.archivedAt) || records.length !== 1)
               throw new Error("chi-continuation-registration-mismatch");
             return ensureAgentLoaded(record.id, {
               agentManager: this.agentManager,
@@ -4568,8 +4600,9 @@ export class Session {
               logger: this.sessionLogger,
             });
           },
-          register: async (sessionId, labels) => {
+          register: async (sessionId, labels, chiRegistration) => {
             const { snapshot, createdWorkspace } = await importProviderSession({
+              chiRegistration,
               request: {
                 provider: "opencode",
                 providerHandleId: sessionId,
@@ -4596,6 +4629,7 @@ export class Session {
           agent: await this.buildAgentPayload(fork.snapshot),
           nativeSessionId: fork.sessionId,
           turnStarted: false,
+          canonicalCurrent: fork.canonicalCurrent,
         },
       });
     } catch (error) {

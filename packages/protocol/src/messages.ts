@@ -1788,6 +1788,54 @@ export const ChiContinueRequestSchema = z.object({
   repo: z.string().max(4096),
   sourceId: z.string().regex(/^[a-f0-9]{64}$/),
   snapshotId: z.string().regex(/^[a-f0-9]{64}$/),
+  canonical: z.object({ conversationId: z.string(), transferId: z.string() }).optional(),
+});
+export const ChiConversationRequestSchema = z.object({
+  type: z.literal("chi.conversation.manage.request"),
+  requestId: z.string(),
+  agentId: z.string(),
+  operation: z.discriminatedUnion("action", [
+    z.object({
+      action: z.literal("prepare"),
+      transferId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),
+      destination: z.object({
+        instanceId: z.string(),
+        workspace: z.object({ hostId: z.string(), path: z.string() }),
+      }),
+    }),
+    z.object({ action: z.literal("reconcile") }),
+    z.object({ action: z.literal("cancel") }),
+  ]),
+});
+export const ChiConversationResponseSchema = z.object({
+  type: z.literal("chi.conversation.manage.response"),
+  payload: z.discriminatedUnion("outcome", [
+    z.object({
+      requestId: z.string(),
+      outcome: z.literal("ready"),
+      repo: z.string(),
+      conversationId: z.string(),
+      current: z.object({
+        sourceId: z.string(),
+        instanceId: z.string(),
+        nativeSessionId: z.string(),
+      }),
+      pending: z.string().nullable(),
+      transfer: z
+        .object({
+          id: z.string(),
+          sourceId: z.string(),
+          snapshotId: z.string(),
+          phase: z.string(),
+          destination: z.object({
+            instanceId: z.string(),
+            workspace: z.object({ hostId: z.string(), path: z.string() }),
+          }),
+        })
+        .optional(),
+    }),
+    z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
+  ]),
 });
 export const ChiShareRequestSchema = z.object({
   type: z.literal("chi.native.share.request"),
@@ -1804,6 +1852,14 @@ export const ChiContinueResponseSchema = z.object({
       agent: AgentSnapshotPayloadSchema,
       nativeSessionId: z.string(),
       turnStarted: z.literal(false),
+      canonicalCurrent: z
+        .object({
+          conversationId: z.string(),
+          sourceId: z.string(),
+          instanceId: z.string(),
+          nativeSessionId: z.string(),
+        })
+        .optional(),
     }),
     z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
   ]),
@@ -3193,6 +3249,7 @@ export const SubscriptionReleaseResponseSchema = z.object({
 
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueRequestSchema,
+  ChiConversationRequestSchema,
   ChiShareRequestSchema,
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
@@ -3570,6 +3627,7 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         chiNative: z.boolean().optional(),
+        chiCanonical: z.boolean().optional(),
         agentRequestReceipts: z.boolean().optional(),
         // COMPAT(workspaceRequestReceipts): added in v0.8.0; remove gate after 2027-03-07.
         workspaceRequestReceipts: z.boolean().optional(),
@@ -6762,6 +6820,7 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueResponseSchema,
+  ChiConversationResponseSchema,
   ChiShareResponseSchema,
   BrowserHostRegisterResponseSchema,
   SubscriptionReleaseResponseSchema,

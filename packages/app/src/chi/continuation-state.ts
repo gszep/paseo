@@ -1,4 +1,24 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+
+/** Only source-prepared coordinates may enter the canonical destination operation. */
+export async function preparedCoordinates(
+  result: Awaited<ReturnType<DaemonClient["manageChiConversation"]>>,
+  key: string,
+) {
+  if (result.outcome === "failed") throw new Error(result.error);
+  if (!result.transfer) throw new Error("The source did not return a prepared transfer.");
+  if (result.transfer.phase === "canceled") {
+    await clearContinuationRequest(key);
+    throw new Error("This transfer was canceled. Click Continue again to prepare a new transfer.");
+  }
+  return {
+    repo: result.repo,
+    sourceId: result.transfer.sourceId,
+    snapshotId: result.transfer.snapshotId,
+    canonical: { conversationId: result.conversationId, transferId: result.transfer.id },
+  };
+}
 
 export interface ContinuationStorage {
   getItem(key: string): Promise<string | null>;

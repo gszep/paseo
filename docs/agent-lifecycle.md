@@ -114,6 +114,11 @@ History navigation opens the selected agent without changing either archive stat
 The agent's **Unarchive** runs the provider's native unarchive hook before interactive resume and
 history hydration. Other archived agents stay archived.
 
+Chi canonical predecessors remain archived history. Their managed prompts and
+unarchive operations require fresh canonical authorization; a pending transfer
+or a different current incarnation blocks execution. The source transfer and
+recovery workflow is documented in [architecture](architecture.md#components-at-a-glance).
+
 Opening an agent is a navigation choice, independent of whether its details are cached. The
 layout retains that choice across reload while the panel fetches the agent from the daemon.
 Once the daemon reports the agent active, its tab follows normal archive propagation again.

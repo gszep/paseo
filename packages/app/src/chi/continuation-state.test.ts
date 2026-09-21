@@ -4,6 +4,7 @@ import { fetchQueryOptions } from "@/data/query";
 import {
   createContinuationRequests,
   currentWorkspaceCatalog,
+  preparedCoordinates,
   type ContinuationStorage,
 } from "./continuation-state";
 
@@ -21,6 +22,42 @@ function memoryStorage(): ContinuationStorage {
 }
 
 describe("Chi continuation intake", () => {
+  it("uses only source-prepared transfer coordinates and fails visibly rather than falling back to a pinned fork", async () => {
+    const ready = {
+      outcome: "ready" as const,
+      requestId: "ui-request",
+      repo: "github:fixture/repo",
+      conversationId: "conversation",
+      current: {
+        sourceId: "current-source",
+        instanceId: "source:opencode",
+        nativeSessionId: "ses_source",
+      },
+      pending: "transfer",
+      transfer: {
+        id: "transfer",
+        sourceId: "settled-source",
+        snapshotId: "latest-settled-snapshot",
+        phase: "reserved",
+        destination: {
+          instanceId: "target:opencode",
+          workspace: { hostId: "target", path: "/workspace" },
+        },
+      },
+    };
+    await expect(preparedCoordinates(ready, "key")).resolves.toEqual({
+      repo: ready.repo,
+      sourceId: "settled-source",
+      snapshotId: "latest-settled-snapshot",
+      canonical: { conversationId: "conversation", transferId: "transfer" },
+    });
+    await expect(
+      preparedCoordinates({ requestId: "ui", outcome: "failed", error: "chi-session-busy" }, "key"),
+    ).rejects.toThrow("chi-session-busy");
+    await expect(preparedCoordinates({ ...ready, transfer: undefined }, "key")).rejects.toThrow(
+      "did not return a prepared transfer",
+    );
+  });
   it("persists the request identity across concurrent clicks and reload until explicit pre-mutation recovery", async () => {
     const storage = memoryStorage();
     let generated = 0;
