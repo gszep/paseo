@@ -1,41 +1,43 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { fetchQueryOptions } from "@/data/query";
 import {
-  continuationRequestId,
-  clearContinuationRequest,
+  createContinuationRequests,
   currentWorkspaceCatalog,
+  type ContinuationStorage,
 } from "./continuation-state";
 
-const values = vi.hoisted(() => new Map<string, string>());
-vi.mock("@react-native-async-storage/async-storage", () => {
+function memoryStorage(): ContinuationStorage {
+  const values = new Map<string, string>();
   return {
-    default: {
-      getItem: async (key: string) => values.get(key) ?? null,
-      setItem: async (key: string, value: string) => {
-        values.set(key, value);
-      },
-      removeItem: async (key: string) => {
-        values.delete(key);
-      },
+    getItem: async (key) => values.get(key) ?? null,
+    setItem: async (key, value) => {
+      values.set(key, value);
+    },
+    removeItem: async (key) => {
+      values.delete(key);
     },
   };
-});
+}
 
 describe("Chi continuation intake", () => {
   it("persists the request identity across concurrent clicks and reload until explicit pre-mutation recovery", async () => {
+    const storage = memoryStorage();
+    let generated = 0;
+    const generateUuid = () => `request-${++generated}`;
+    const requests = createContinuationRequests({ storage, generateUuid });
     const [id, concurrent] = await Promise.all([
-      continuationRequestId("pin/host/workspace"),
-      continuationRequestId("pin/host/workspace"),
+      requests.requestId("pin/host/workspace"),
+      requests.requestId("pin/host/workspace"),
     ]);
     expect(concurrent).toBe(id);
-    expect(await continuationRequestId("pin/host/workspace")).toBe(id);
-    vi.resetModules();
-    const reloaded = await import("./continuation-state");
-    expect(await reloaded.continuationRequestId("pin/host/workspace")).toBe(id);
-    expect(await continuationRequestId("different-pin/host/workspace")).not.toBe(id);
-    await clearContinuationRequest("pin/host/workspace");
-    expect(await continuationRequestId("pin/host/workspace")).not.toBe(id);
+    expect(await requests.requestId("pin/host/workspace")).toBe(id);
+    const reloaded = createContinuationRequests({ storage, generateUuid });
+    expect(await reloaded.requestId("pin/host/workspace")).toBe(id);
+    expect(generated).toBe(1);
+    expect(await reloaded.requestId("different-pin/host/workspace")).not.toBe(id);
+    await reloaded.clear("pin/host/workspace");
+    expect(await reloaded.requestId("pin/host/workspace")).not.toBe(id);
   });
 
   it("suppresses A's placeholder rows while B's same-ID catalog is delayed, then reconciles removal", async () => {
