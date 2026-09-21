@@ -1,7 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { continueNative, ContinuationError } from "@henkaku-center/chi-native/continuation";
+import {
+  continueNative,
+  readContinuationReceipt,
+  verifyContinuationReceipt,
+  ContinuationError,
+} from "@henkaku-center/chi-native/continuation";
 import { captureNative, retryCaptureNative } from "@henkaku-center/chi-native/capture";
 import {
   exchangeGitHubToken,
@@ -52,6 +57,7 @@ const deployment: ChiAuthority = {
 export class ChiConnection {
   private readonly pending = new Map<string, Promise<Association>>();
   private readonly dirty = new Set<string>();
+  private readonly continuing = new Set<string>();
   private get authority(): ChiAuthority {
     return this.options.authority ?? deployment;
   }
@@ -160,7 +166,7 @@ export class ChiConnection {
     try {
       if (agent.lifecycle === "running" || agent.lifecycle === "initializing")
         throw new Error("chi-session-busy");
-      const settledTurns = agent.finalizedForegroundTurnIds.size;
+      const settledTurns = [...agent.finalizedForegroundTurnIds];
       const auth = await this.authorize(association.repo, agent.cwd);
       if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
       const sessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
@@ -171,7 +177,8 @@ export class ChiConnection {
           !current ||
           current.lifecycle === "running" ||
           current.lifecycle === "initializing" ||
-          current.finalizedForegroundTurnIds.size !== settledTurns
+          current.finalizedForegroundTurnIds.size !== settledTurns.length ||
+          settledTurns.some((id) => !current.finalizedForegroundTurnIds.has(id))
         )
           throw new Error("chi-session-busy");
         const input = {
@@ -212,24 +219,39 @@ export class ChiConnection {
     });
   }
 
-  async continue(input: {
-    repo: string;
-    sourceId: string;
-    snapshotId: string;
-    cwd: string;
-    requestId: string;
-  }) {
-    const auth = await this.authorize(input.repo, input.cwd);
-    const receipts = join(this.options.home, "chi", "receipts");
-    await mkdir(receipts, { recursive: true, mode: 0o700 });
-    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.requestId)) throw new Error("chi-invalid-request-id");
-    const local = this.manager
-      .listAgents()
-      .find((agent) => agent.labels[label] && this.association(agent)?.sourceId === input.sourceId);
-    const nativeId = local?.persistence?.nativeHandle ?? local?.persistence?.sessionId ?? null;
-    const receipt = await this.manager.withNativeRuntime(nativeId, (runtime) =>
-      continueNative(
-        {
+  async continue(
+    input: {
+      repo: string;
+      sourceId: string;
+      snapshotId: string;
+      cwd: string;
+      requestId: string;
+      workspaceId: string;
+    },
+    registration: {
+      find(sessionId: string): Promise<ManagedAgent | null>;
+      register(sessionId: string, labels: Record<string, string>): Promise<ManagedAgent>;
+    },
+  ) {
+    if (this.continuing.has(input.requestId)) throw new Error("chi-continuation-in-progress");
+    this.continuing.add(input.requestId);
+    try {
+      const auth = await this.authorize(input.repo, input.cwd);
+      const receipts = join(this.options.home, "chi", "receipts");
+      await mkdir(receipts, { recursive: true, mode: 0o700 });
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.requestId))
+        throw new Error("chi-invalid-request-id");
+      const local = this.manager
+        .listAgents()
+        .find(
+          (agent) => agent.labels[label] && this.association(agent)?.sourceId === input.sourceId,
+        );
+      const nativeId = local?.persistence?.nativeHandle ?? local?.persistence?.sessionId ?? null;
+      return await this.manager.withNativeRuntime(nativeId, async (transport) => {
+        // The owner's namespace survives process restarts; its authenticated
+        // loopback transport port does not. Native IDs remain owner-local.
+        const runtime = { ...transport, identity: `${this.options.serverId}:opencode` };
+        const operation = {
           endpoint: this.authority.endpoint,
           token: auth.sessionToken,
           repo: input.repo,
@@ -238,23 +260,50 @@ export class ChiConnection {
           workspace: input.cwd,
           receipt: join(receipts, `${input.requestId}.json`),
           runtime,
-        },
-        this.authority.request,
-      ),
-    );
-    if (!receipt.destination.sessionId) throw new Error("chi-continuation-incomplete");
-    return {
-      sessionId: receipt.destination.sessionId,
-      labels: {
-        [label]: JSON.stringify({
-          repo: input.repo,
-          actor: auth.chiUserId,
-          sourceId: null,
-          head: null,
-          error: null,
-        }),
-      },
-    };
+          owner: {
+            actor: auth.chiUserId,
+            workspaceId: input.workspaceId,
+            endpoint: this.authority.endpoint,
+          },
+        };
+        const previous = await readContinuationReceipt(operation, this.authority.request);
+        const receipt = previous ?? (await continueNative(operation, this.authority.request));
+        if (!receipt.destination.sessionId) throw new Error("chi-continuation-incomplete");
+        const labels = {
+          "chi.continuation": JSON.stringify({
+            requestId: input.requestId,
+            source: receipt.source,
+            destination: receipt.destination,
+            owner: receipt.owner,
+          }),
+          [label]: JSON.stringify({
+            repo: input.repo,
+            actor: auth.chiUserId,
+            sourceId: null,
+            head: null,
+            error: null,
+          }),
+        };
+        const existing = await registration.find(receipt.destination.sessionId);
+        if (existing) {
+          if (
+            existing.provider !== "opencode" ||
+            (existing.persistence?.nativeHandle ?? existing.persistence?.sessionId) !==
+              receipt.destination.sessionId ||
+            existing.cwd !== input.cwd ||
+            existing.workspaceId !== input.workspaceId ||
+            existing.labels["chi.continuation"] !== labels["chi.continuation"]
+          )
+            throw new Error("chi-continuation-registration-mismatch");
+          return { sessionId: receipt.destination.sessionId, snapshot: existing };
+        }
+        if (previous) await verifyContinuationReceipt(receipt, runtime);
+        const snapshot = await registration.register(receipt.destination.sessionId, labels);
+        return { sessionId: receipt.destination.sessionId, snapshot };
+      });
+    } finally {
+      this.continuing.delete(input.requestId);
+    }
   }
 }
 

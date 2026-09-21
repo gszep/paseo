@@ -21,6 +21,7 @@ import { z } from "zod";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import { Session } from "./session.js";
+import type { ChiConnection } from "./chi/connection.js";
 import type { SessionOptions } from "./session.js";
 import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import type { AgentUpdatesService } from "./session/agent-updates/agent-updates-service.js";
@@ -4310,6 +4311,100 @@ test("open_project_request registers a workspace before any agent exists", async
   const response = findByType(emitted, "open_project_response");
   expect(response?.payload.error).toBeNull();
   expect(response?.payload.workspace?.id).toBe(registeredWorkspace?.workspaceId);
+});
+
+test("Chi continuation dispatch registers in the selected workspace and returns the existing agent on a lost-reply retry", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  let registered = false;
+  const managed = makeManagedAgent({
+    id: "chi-agent",
+    cwd: REPO_CWD,
+    workspaceId: "ws-repo-running",
+    lifecycle: "idle",
+    updatedAt: "2026-09-21T00:00:00.000Z",
+  });
+  const imported = vi.fn(async () => {
+    registered = true;
+    return managed;
+  });
+  const continuation = vi.fn(
+    async (
+      _input: Parameters<ChiConnection["continue"]>[0],
+      registration: Parameters<ChiConnection["continue"]>[1],
+    ) => {
+      const existing = await registration.find("ses_fork");
+      return {
+        sessionId: "ses_fork",
+        snapshot:
+          existing ??
+          (await registration.register("ses_fork", { "chi.continuation": "verified-receipt" })),
+      };
+    },
+  );
+  const session = createSessionForWorkspaceTests({
+    onMessage: (message) => emitted.push(message),
+    agentManager: {
+      chi: { continue: continuation },
+      importProviderSession: imported,
+      getAgent: () => (registered ? managed : null),
+      getTimeline: () => [],
+      waitForAgentClose: async () => {},
+    },
+    agentStorage: {
+      listByProviderSession: async () => (registered ? [{ id: managed.id, archivedAt: null }] : []),
+      get: async () => null,
+    },
+  });
+  session.projectRegistry.get = async () =>
+    createPersistedProjectRecord({
+      projectId: "proj-repo-running",
+      rootPath: REPO_CWD,
+      kind: "non_git",
+      displayName: "repo",
+      createdAt: "2026-09-21T00:00:00.000Z",
+      updatedAt: "2026-09-21T00:00:00.000Z",
+    });
+  const message = {
+    type: "chi.native.continue.request",
+    workspaceId: "ws-repo-running",
+    repo: "github:fixture/repo",
+    sourceId: "a".repeat(64),
+    snapshotId: "b".repeat(64),
+    requestId: "retry",
+  };
+  await session.handleMessage(message);
+  await expect(continuation.mock.results[0]?.value).resolves.toMatchObject({
+    sessionId: "ses_fork",
+  });
+  await session.handleMessage(message);
+  expect(imported).toHaveBeenCalledTimes(1);
+  await expect(continuation.mock.results[1]?.value).resolves.toMatchObject({
+    sessionId: "ses_fork",
+  });
+  expect(imported).toHaveBeenCalledWith(
+    expect.objectContaining({
+      provider: "opencode",
+      providerHandleId: "ses_fork",
+      cwd: REPO_CWD,
+      workspaceId: message.workspaceId,
+      labels: { "chi.continuation": "verified-receipt" },
+    }),
+  );
+  const responses = filterByType(emitted, "chi.native.continue.response");
+  expect(responses).toHaveLength(2);
+  for (const response of responses)
+    expect(response.payload).toMatchObject({
+      outcome: "ready",
+      nativeSessionId: "ses_fork",
+      agent: { id: "chi-agent" },
+      turnStarted: false,
+    });
+  await session.handleMessage({ ...message, workspaceId: "missing" });
+  expect(continuation).toHaveBeenCalledTimes(2);
+  expect(filterByType(emitted, "chi.native.continue.response").at(-1)?.payload).toMatchObject({
+    outcome: "failed",
+    error: "chi-workspace-unavailable",
+  });
 });
 
 test("import_agent_request registers a workspace for a never-seen cwd", async () => {

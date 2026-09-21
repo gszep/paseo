@@ -4553,28 +4553,47 @@ export class Session {
       if (!this.agentManager.chi) throw new Error("chi-unavailable");
       const workspace = await this.workspaceRegistry.get(msg.workspaceId);
       if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
-      const fork = await this.agentManager.chi.continue({ ...msg, cwd: workspace.cwd });
-      const { snapshot, createdWorkspace } = await importProviderSession({
-        request: {
-          provider: "opencode",
-          providerHandleId: fork.sessionId,
-          cwd: workspace.cwd,
-          workspaceId: msg.workspaceId,
-          labels: fork.labels,
-          requestId: msg.requestId,
+      const fork = await this.agentManager.chi.continue(
+        { ...msg, cwd: workspace.cwd },
+        {
+          find: async (sessionId) => {
+            const records = await this.agentStorage.listByProviderSession("opencode", sessionId);
+            const record = records[0];
+            if (!record) return null;
+            if (record.archivedAt || records.length !== 1)
+              throw new Error("chi-continuation-registration-mismatch");
+            return ensureAgentLoaded(record.id, {
+              agentManager: this.agentManager,
+              agentStorage: this.agentStorage,
+              logger: this.sessionLogger,
+            });
+          },
+          register: async (sessionId, labels) => {
+            const { snapshot, createdWorkspace } = await importProviderSession({
+              request: {
+                provider: "opencode",
+                providerHandleId: sessionId,
+                cwd: workspace.cwd,
+                workspaceId: msg.workspaceId,
+                labels,
+                requestId: msg.requestId,
+              },
+              workspaceProvisioning: this.workspaceProvisioning,
+              agentManager: this.agentManager,
+              agentStorage: this.agentStorage,
+              logger: this.sessionLogger,
+            });
+            if (createdWorkspace) await this.registerWorkspaceForImportedAgent(createdWorkspace);
+            return snapshot;
+          },
         },
-        workspaceProvisioning: this.workspaceProvisioning,
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        logger: this.sessionLogger,
-      });
-      if (createdWorkspace) await this.registerWorkspaceForImportedAgent(createdWorkspace);
+      );
       this.emit({
         type: "chi.native.continue.response",
         payload: {
           requestId: msg.requestId,
           outcome: "ready",
-          agent: await this.buildAgentPayload(snapshot),
+          agent: await this.buildAgentPayload(fork.snapshot),
           nativeSessionId: fork.sessionId,
           turnStarted: false,
         },

@@ -1,9 +1,91 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 const repoRoot = join(import.meta.dirname, "..");
+
+test("packed server carries the private Chi closure outside the checkout", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "paseo-packed-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, "source");
+  const server = join(source, "packages/server");
+  const installed = join(root, "installed");
+  const native = join(source, "node_modules/@henkaku-center/chi-native");
+  await Promise.all([
+    mkdir(join(server, "scripts"), { recursive: true }),
+    mkdir(native, { recursive: true }),
+    mkdir(installed),
+  ]);
+  execFileSync("tar", [
+    "-xzf",
+    join(repoRoot, "vendor/henkaku-center-chi-native-0.0.0.tgz"),
+    "-C",
+    native,
+    "--strip-components=1",
+  ]);
+  await cp(
+    join(repoRoot, "packages/server/scripts/stage-chi-native.mjs"),
+    join(server, "scripts/stage-chi-native.mjs"),
+  );
+  const manifest = JSON.parse(
+    await readFile(join(repoRoot, "packages/server/package.json"), "utf8"),
+  );
+  await writeFile(
+    join(source, "package.json"),
+    JSON.stringify({ private: true, workspaces: ["packages/server"] }),
+  );
+  await writeFile(
+    join(server, "package.json"),
+    JSON.stringify({
+      name: "packed-server-fixture",
+      version: "1.0.0",
+      type: "module",
+      files: ["entry.mjs"],
+      dependencies: {
+        "@henkaku-center/chi-native": manifest.dependencies["@henkaku-center/chi-native"],
+      },
+      bundleDependencies: manifest.bundleDependencies,
+    }),
+  );
+  await writeFile(
+    join(server, "entry.mjs"),
+    'export { continueNative } from "@henkaku-center/chi-native/continuation";',
+  );
+  execFileSync(process.execPath, [join(server, "scripts/stage-chi-native.mjs")]);
+  const npm = (args, cwd) =>
+    execFileSync("npm", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: "pipe",
+      shell: process.platform === "win32",
+    });
+  npm(["pack", "--offline", "--ignore-scripts", "--pack-destination", root], server);
+  await rm(source, { recursive: true, force: true });
+  await writeFile(join(installed, "package.json"), JSON.stringify({ private: true }));
+  npm(
+    [
+      "install",
+      "--offline",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+      join(root, "packed-server-fixture-1.0.0.tgz"),
+    ],
+    installed,
+  );
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      'import assert from "node:assert/strict"; const core = await import("./node_modules/packed-server-fixture/entry.mjs"); assert.equal(typeof core.continueNative, "function");',
+    ],
+    { cwd: installed },
+  );
+});
 
 function assertNoDirectWorkerLaunch(label, command) {
   for (const workerEntrypoint of [

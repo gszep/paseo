@@ -7,6 +7,11 @@ import { HostPicker } from "@/components/hosts/host-picker";
 import { useHosts, useHostRuntimeSnapshot, type HostRuntimeSnapshot } from "@/runtime/host-runtime";
 import { useFetchQuery } from "@/data/query";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import {
+  continuationRequestId,
+  clearContinuationRequest,
+  currentWorkspaceCatalog,
+} from "./continuation-state";
 
 interface Selection {
   repo: string;
@@ -36,7 +41,6 @@ export function ChiContinueScreen(selection: Selection) {
     pickerOpen: false,
   });
   const anchor = useRef<View>(null);
-  const receiptIds = useRef(new Map<string, string>());
   const runtime = useHostRuntimeSnapshot(target.serverId);
   const client = runtime?.client;
   const { supported, message: availabilityMessage } = continuationAvailability(runtime);
@@ -59,27 +63,39 @@ export function ChiContinueScreen(selection: Selection) {
         page = await client.fetchWorkspaces({ page: { limit: 200, cursor } });
         first.entries.push(...page.entries);
       }
-      return first;
+      return { ...first, serverId: target.serverId };
     },
   });
   const valid = validSelection(selection);
+  const entries = currentWorkspaceCatalog(target.serverId, workspaces);
+  const selectedWorkspace = entries.find((workspace) => workspace.id === target.workspaceId);
   const continuation = useMutation({
     retry: false,
     mutationFn: async () => {
-      if (!client || !supported || !valid || !target.workspaceId)
+      if (!client || !supported || !valid || !selectedWorkspace)
         throw new Error("Select an available host and existing workspace.");
-      const key = `${target.serverId}/${target.workspaceId}`;
-      let requestId = receiptIds.current.get(key);
-      if (!requestId) {
-        requestId = crypto.randomUUID();
-        receiptIds.current.set(key, requestId);
-      }
+      const key = JSON.stringify([
+        selection.repo,
+        selection.sourceId,
+        selection.snapshotId,
+        target.serverId,
+        target.workspaceId,
+      ]);
+      const requestId = await continuationRequestId(key);
       const result = await client.continueChi({
         ...selection,
         workspaceId: target.workspaceId,
         requestId,
       });
-      if (result.outcome === "failed") throw new Error(result.error);
+      if (result.outcome === "failed") {
+        if (result.error === "continuation-pre-mutation-failed-start-new-attempt") {
+          await clearContinuationRequest(key);
+          throw new Error(
+            "No native mutation occurred. Click Fork selected snapshot again to start a new attempt.",
+          );
+        }
+        throw new Error(result.error);
+      }
       return { result, serverId: target.serverId, workspaceId: target.workspaceId };
     },
     onSuccess: ({ result, serverId, workspaceId }) =>
@@ -128,7 +144,7 @@ export function ChiContinueScreen(selection: Selection) {
       {workspaces.isError ? (
         <Text style={styles.text}>Could not load this host’s workspaces.</Text>
       ) : null}
-      {workspaces.data?.entries.map((workspace) => (
+      {entries.map((workspace) => (
         <WorkspaceChoice
           key={workspace.id}
           id={workspace.id}
@@ -139,7 +155,7 @@ export function ChiContinueScreen(selection: Selection) {
         />
       ))}
       <Button
-        disabled={!valid || !supported || !target.workspaceId || continuation.isPending}
+        disabled={!valid || !supported || !selectedWorkspace || continuation.isPending}
         onPress={submit}
       >
         {continuation.isPending ? "Preparing native fork…" : "Fork selected snapshot"}

@@ -40,8 +40,23 @@ associates one agent explicitly; only associated agents capture settled turns.
 Chi credentials come from an in-memory GitHub CLI exchange, independent of native
 runtime credentials. `chiNative` is the server feature gate. The packed
 `vendor/henkaku-center-chi-native-0.0.0.tgz` dependency is built from the Chi
-repository's `packages/chi-native` at `a8b2d6e`; rebuild and repack it after shared operation
-changes. It is a source-integration artifact, not a published package release.
+repository's `packages/chi-native` at `a01f3ea`; rebuild and repack it after shared operation
+changes. npm bundles this private dependency inside the server tarball so packed
+CLI/Docker installations do not need the checkout's vendor path. Prepack stages
+the locked installed package beneath `packages/server/node_modules`: npm omits a
+hoisted workspace dependency even when named in `bundleDependencies`. It is a
+source-integration artifact, not a published package release.
+
+Continuation request identity survives client reloads. The owner reacquires source
+access and matches the receipt's actor, deployment, runtime origin, pin and workspace
+before recovering a ready fork. Paseo's runtime identity is the existing stable
+`serverId:opencode` owner namespace, not its restart-dependent loopback port.
+Unregistered forks must match the reminted payload
+mapping; registered results return their existing agent even after later turns.
+Only a proven pre-mutation failure permits an explicit fresh attempt. Ambiguous
+mutations retain their receipt IDs for inspection and never replay. Workspace
+choices require the selected host's completed catalog, and capture rejects a new
+settled turn during acquisition even when the bounded turn-history set stays full.
 
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.
