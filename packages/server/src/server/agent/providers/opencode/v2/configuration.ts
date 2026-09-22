@@ -51,7 +51,10 @@ export async function applyResumeOverrides(
   info: SessionInfo,
   overrides?: Partial<AgentSessionConfig>,
 ) {
-  if (overrides?.modeId) {
+  // OpenCode records even a switch to the current agent in session history.
+  // Import/resume echoes persisted settings; attaching a verified transfer must
+  // not add a configuration event when nothing changed.
+  if (overrides?.modeId && overrides.modeId !== info.agent) {
     await client.session.switchAgent({
       sessionID: info.id,
       agent: overrides.modeId,
@@ -63,8 +66,14 @@ export async function applyResumeOverrides(
       ? modelRef(overrides.model, overrides.thinkingOptionId ?? info.model?.variant)
       : info.model && { ...info.model, variant: overrides.thinkingOptionId };
     if (!model) throw new Error("Select an OpenCode model before changing its variant");
-    await client.session.switchModel({ sessionID: info.id, model });
-    info.model = model;
+    if (
+      model.id !== info.model?.id ||
+      model.providerID !== info.model?.providerID ||
+      model.variant !== info.model?.variant
+    ) {
+      await client.session.switchModel({ sessionID: info.id, model });
+      info.model = model;
+    }
   }
 }
 

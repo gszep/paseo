@@ -467,9 +467,9 @@ export class ChiConnection {
     client: ConversationClient,
     destination: ConversationDestination,
     path: string,
-  ): Promise<ClaimJournal | null> {
+  ): Promise<ClaimJournal> {
     const canonical = input.canonical;
-    if (!canonical) return null;
+    if (!canonical) throw new Error("chi-transfer-preparation-required");
     const selected = await client.get({
       id: canonical.conversationId,
       transferId: canonical.transferId,
@@ -605,17 +605,12 @@ export class ChiConnection {
       ): Promise<ManagedAgent>;
     },
   ) {
-    const key = input.canonical
-      ? createHash("sha256")
-          .update(
-            JSON.stringify([
-              input.repo,
-              input.canonical.conversationId,
-              input.canonical.transferId,
-            ]),
-          )
-          .digest("hex")
-      : input.requestId;
+    const canonical = input.canonical;
+    if (!canonical?.conversationId || !canonical.transferId)
+      throw new Error("chi-transfer-preparation-required");
+    const key = createHash("sha256")
+      .update(JSON.stringify([input.repo, canonical.conversationId, canonical.transferId]))
+      .digest("hex");
     if (this.continuing.has(key)) throw new Error("chi-continuation-in-progress");
     this.continuing.add(key);
     try {
@@ -625,7 +620,6 @@ export class ChiConnection {
       if (!/^[a-zA-Z0-9_-]{1,128}$/.test(input.requestId))
         throw new Error("chi-invalid-request-id");
       const client = this.client(input.repo, auth.sessionToken);
-      const canonical = input.canonical;
       const destination = {
         instanceId: `${this.options.serverId}:opencode`,
         workspace: { hostId: this.options.serverId, path: input.cwd },
@@ -664,7 +658,7 @@ export class ChiConnection {
           },
         };
         const previous = await readContinuationReceipt(operation, this.authority.request);
-        if (journal && !previous) {
+        if (!previous) {
           const claimed = await client.claim(journal.claim);
           if (claimed.executionGranted !== true)
             throw new Error("chi-conversation-recovery-required");
@@ -684,7 +678,8 @@ export class ChiConnection {
             sourceId: null,
             head: null,
             error: null,
-            ...(canonical ? { conversationId: canonical.conversationId, blocked: true } : {}),
+            conversationId: canonical.conversationId,
+            blocked: true,
           }),
         };
         const existing = await registration.find(receipt.destination.sessionId);
@@ -695,39 +690,31 @@ export class ChiConnection {
             receipt.destination.sessionId,
             labels["chi.continuation"],
           );
-          if (!canonical) return { sessionId: receipt.destination.sessionId, snapshot: existing };
         }
         if (previous && !existing) await verifyContinuationReceipt(receipt, runtime);
         const permit = {};
-        if (canonical)
-          this.registrationPermits.set(permit, {
-            sessionId: receipt.destination.sessionId,
-            cwd: input.cwd,
-            workspaceId: input.workspaceId,
-            labels: JSON.stringify(labels),
-          });
+        this.registrationPermits.set(permit, {
+          sessionId: receipt.destination.sessionId,
+          cwd: input.cwd,
+          workspaceId: input.workspaceId,
+          labels: JSON.stringify(labels),
+        });
         let snapshot: ManagedAgent;
         try {
           snapshot =
             existing ??
-            (await registration.register(
-              receipt.destination.sessionId,
-              labels,
-              canonical ? permit : undefined,
-            ));
+            (await registration.register(receipt.destination.sessionId, labels, permit));
         } finally {
           this.registrationPermits.delete(permit);
         }
-        const canonicalCurrent = journal
-          ? await this.publishFork(
-              journal,
-              journalPath,
-              client,
-              runtime,
-              receipt.destination.sessionId,
-              snapshot,
-            )
-          : undefined;
+        const canonicalCurrent = await this.publishFork(
+          journal,
+          journalPath,
+          client,
+          runtime,
+          receipt.destination.sessionId,
+          snapshot,
+        );
         return {
           sessionId: receipt.destination.sessionId,
           snapshot: this.manager.getAgent(snapshot.id) ?? snapshot,

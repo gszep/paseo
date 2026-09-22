@@ -34,12 +34,17 @@ Your code never leaves your machine. Paseo is local-first.
 ## Components at a glance
 
 Chi native continuation uses the existing OpenCode V2 runtime owner. The app's
-`/chi` intake carries exact repository/source/snapshot coordinates, selects a
-paired host and workspace, and invokes a workspace-write operation. Share to Chi
+`/chi` intake accepts a source agent for preparation or an already prepared
+transfer with exact repository/source/snapshot coordinates. It selects a paired
+host and workspace and invokes a workspace-write operation. Bare evidence pins
+fail closed; the Chi browser has no runtime pairing authority or continuation
+action. Independent branching uses OpenCode's native Fork. Share to Chi
 associates one agent explicitly; only associated agents capture settled turns.
 Chi credentials come from an in-memory GitHub CLI exchange, independent of native
-runtime credentials. `chiNative` gates standalone pinned forks; `chiCanonical`
-gates managed conversation transfers. The packed
+runtime credentials. `chiCanonical` gates the single Continue/Resume transfer
+flow; `chiNative` remains the sharing capability. Older wire requests still parse
+but missing transfer coordinates return `chi-transfer-preparation-required`,
+never an independent fork. The packed
 `vendor/henkaku-center-chi-native-0.0.0.tgz` dependency is built from the Chi
 repository's `packages/chi-native`; rebuild and repack it after shared operation
 changes. npm bundles this private dependency inside the server tarball so packed
@@ -54,8 +59,12 @@ before recovering a ready fork. Paseo's runtime identity is the existing stable
 `serverId:opencode` owner namespace, not its restart-dependent loopback port.
 Unregistered forks must match the reminted payload
 mapping; registered results return their existing agent even after later turns.
-Only a proven pre-mutation failure permits an explicit fresh attempt. Ambiguous
-mutations retain their receipt IDs for inspection and never replay. Workspace
+Attaching/importing a verified fork must not reissue unchanged agent or model
+settings: OpenCode records a same-agent switch as another native message, which
+would invalidate exact transfer publication before any prompt runs.
+Claimed transfers retain their original receipt even after a pre-mutation failure;
+they cannot be restarted by changing a client request ID. Ambiguous mutations
+require manual recovery and never replay. Workspace
 choices require the selected host's completed catalog, and capture rejects a new
 settled turn during acquisition even when the bounded turn-history set stays full.
 

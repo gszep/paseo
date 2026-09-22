@@ -146,8 +146,26 @@ async function fixture() {
 }
 
 describe("Chi owner recovery", () => {
-  it("serializes receipt registration and reauthorizes an existing result before returning it", async () => {
+  it("rejects bare pins and incomplete transfer coordinates before authorization or native mutation", async () => {
     const f = await fixture();
+    for (const canonical of [
+      undefined,
+      { conversationId: "conversation", transferId: "" },
+      { conversationId: "", transferId: "transfer" },
+    ]) {
+      await expect(f.restart().continue({ ...f.input, canonical }, f.registration)).rejects.toThrow(
+        "chi-transfer-preparation-required",
+      );
+    }
+    expect(f.authority.request).not.toHaveBeenCalled();
+    expect(f.runtime.export).not.toHaveBeenCalled();
+    expect(f.runtime.import).not.toHaveBeenCalled();
+    expect(f.runtime.fork).not.toHaveBeenCalled();
+    expect(f.registration.register).not.toHaveBeenCalled();
+  });
+  it("serializes receipt registration and reauthorizes an existing result before returning it", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
     const owner = f.restart();
     const first = owner.continue(f.input, f.registration);
     await expect(owner.continue(f.input, f.registration)).rejects.toThrow(
@@ -163,23 +181,25 @@ describe("Chi owner recovery", () => {
   });
 
   it("registers a ready fork after a crash, then returns the advanced registered agent after restart/lost reply", async () => {
-    const f = await fixture();
+    const f = await canonicalFixture();
+    await f.ready();
     f.runtime.identity = "http://new-process-after-crash";
     const first = await f.restart().continue(f.input, f.registration);
     expect(first.snapshot.id).toBe("paseo-agent");
-    f.transfer.messages.push({ id: "msg_new", type: "text", text: "later work" });
+    f.nativeTransfer.messages.push({ id: "msg_new", type: "text", text: "later work" });
     f.runtime.identity = "http://restarted-runtime-port";
     const recovered = await f.restart().continue(f.input, f.registration);
     expect(recovered.snapshot.id).toBe(first.snapshot.id);
     expect(f.registration.register).toHaveBeenCalledTimes(1);
-    expect(f.runtime.export).toHaveBeenCalledTimes(1);
+    expect(f.runtime.export).toHaveBeenCalledTimes(2);
     expect(f.runtime.fork).not.toHaveBeenCalled();
     expect(f.runtime.import).not.toHaveBeenCalled();
   });
 
   it("rejects altered unregistered exports and mismatching registration labels", async () => {
-    const f = await fixture();
-    f.transfer.messages[0].text = "changed";
+    const f = await canonicalFixture();
+    await f.ready();
+    f.nativeTransfer.messages[0].text = "changed";
     await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
       "fork-history-mismatch",
     );
@@ -193,7 +213,8 @@ describe("Chi owner recovery", () => {
   it.each(["importing", "forking", "verifying"])(
     "keeps %s ambiguous mutations blocked across restart",
     async (failedAt) => {
-      const f = await fixture();
+      const f = await canonicalFixture();
+      await f.ready();
       await writeFile(f.receiptPath, JSON.stringify({ ...f.receipt, status: "failed", failedAt }));
       await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
         "recovery-required",
@@ -203,8 +224,9 @@ describe("Chi owner recovery", () => {
     },
   );
 
-  it("reports a proven pre-mutation failure as a new explicit attempt, without replay", async () => {
-    const f = await fixture();
+  it("retains a claimed transfer's pre-mutation failure without replay", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
     await writeFile(
       f.receiptPath,
       JSON.stringify({
@@ -221,10 +243,11 @@ describe("Chi owner recovery", () => {
   });
 
   it("rejects a host workspace identity change with the same request ID", async () => {
-    const f = await fixture();
+    const f = await canonicalFixture();
+    await f.ready();
     await expect(
       f.restart().continue({ ...f.input, workspaceId: "other" }, f.registration),
-    ).rejects.toThrow("receipt-identity-mismatch");
+    ).rejects.toThrow("recovery-required");
     expect(f.registration.register).not.toHaveBeenCalled();
     const otherOwner = new ChiConnection(f.manager, {
       home: f.home,
@@ -232,7 +255,7 @@ describe("Chi owner recovery", () => {
       authority: f.authority,
     });
     await expect(otherOwner.continue(f.input, f.registration)).rejects.toThrow(
-      "receipt-identity-mismatch",
+      "selection-mismatch",
     );
   });
 
@@ -368,6 +391,8 @@ async function canonicalFixture() {
   return {
     ...f,
     input,
+    nativeTransfer: f.transfer,
+    receiptPath: path,
     path,
     journalPath,
     identity,

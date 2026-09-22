@@ -3107,9 +3107,11 @@ export class DaemonClient {
     sourceId: string;
     snapshotId: string;
     requestId?: string;
-    canonical?: { conversationId: string; transferId: string };
+    canonical: { conversationId: string; transferId: string };
   }) {
-    if (input.canonical) this.requireChiCanonical();
+    this.requireChiCanonical();
+    if (!input.canonical?.conversationId || !input.canonical.transferId)
+      throw new Error("Prepare the transfer from the source agent before continuing.");
     const requestId = this.createRequestId(input.requestId);
     return this.sendRequest({
       requestId,
@@ -3156,7 +3158,7 @@ export class DaemonClient {
 
   private requireChiCanonical(): void {
     if (this.getLastServerInfoMessage()?.features?.chiCanonical !== true)
-      throw new Error("Update the selected host to use Chi canonical continuation.");
+      throw new Error("Update the selected host to continue a Chi transfer.");
   }
 
   async refreshAgent(agentId: string, requestId?: string): Promise<AgentRefreshedStatusPayload> {

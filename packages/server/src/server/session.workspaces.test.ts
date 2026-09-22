@@ -4315,6 +4315,10 @@ test("open_project_request registers a workspace before any agent exists", async
 
 test("Chi continuation dispatch registers in the selected workspace and returns the existing agent on a lost-reply retry", async () => {
   const emitted: SessionOutboundMessage[] = [];
+  const permit = {};
+  const assertImportAllowed = vi.fn(async (input: { chiRegistration?: object }) => {
+    expect(input.chiRegistration).toBe(permit);
+  });
   let registered = false;
   const managed = makeManagedAgent({
     id: "chi-agent",
@@ -4337,14 +4341,18 @@ test("Chi continuation dispatch registers in the selected workspace and returns 
         sessionId: "ses_fork",
         snapshot:
           existing ??
-          (await registration.register("ses_fork", { "chi.continuation": "verified-receipt" })),
+          (await registration.register(
+            "ses_fork",
+            { "chi.continuation": "verified-receipt" },
+            permit,
+          )),
       };
     },
   );
   const session = createSessionForWorkspaceTests({
     onMessage: (message) => emitted.push(message),
     agentManager: {
-      chi: { continue: continuation },
+      chi: { continue: continuation, assertImportAllowed },
       importProviderSession: imported,
       getAgent: () => (registered ? managed : null),
       getTimeline: () => [],
@@ -4371,6 +4379,7 @@ test("Chi continuation dispatch registers in the selected workspace and returns 
     sourceId: "a".repeat(64),
     snapshotId: "b".repeat(64),
     requestId: "retry",
+    canonical: { conversationId: "conversation", transferId: "transfer" },
   };
   await session.handleMessage(message);
   await expect(continuation.mock.results[0]?.value).resolves.toMatchObject({
@@ -4404,6 +4413,13 @@ test("Chi continuation dispatch registers in the selected workspace and returns 
   expect(filterByType(emitted, "chi.native.continue.response").at(-1)?.payload).toMatchObject({
     outcome: "failed",
     error: "chi-workspace-unavailable",
+  });
+  await session.handleMessage({ ...message, canonical: undefined });
+  expect(continuation).toHaveBeenCalledTimes(2);
+  expect(imported).toHaveBeenCalledTimes(1);
+  expect(filterByType(emitted, "chi.native.continue.response").at(-1)?.payload).toMatchObject({
+    outcome: "failed",
+    error: "chi-transfer-preparation-required",
   });
 });
 

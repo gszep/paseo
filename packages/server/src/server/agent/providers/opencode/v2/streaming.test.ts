@@ -1,6 +1,7 @@
 import { V2Timeline } from "./timeline.js";
 import type { SessionMessageAssistant } from "@opencode/client";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+import { applyResumeOverrides } from "./configuration.js";
 import { OpenCodeV2AgentClient } from "./agent.js";
 import { V2Harness } from "../test-utils/v2-harness.js";
 import { createTestLogger } from "../../../../../test-utils/test-logger.js";
@@ -16,6 +17,70 @@ function collectAssistantText(session: {
   });
   return chunks;
 }
+
+describe("OpenCode v2 resume configuration", () => {
+  test("importing a verified fork does not append a same-agent or same-model switch", async () => {
+    const harness = new V2Harness();
+    harness.info.model = { providerID: "fixture", id: "local", variant: "default" };
+    harness.history.push({
+      id: "msg_pin",
+      type: "user",
+      text: "pinned transfer",
+      time: { created: 1 },
+      files: [],
+    });
+    const original = structuredClone(harness.history);
+    const agentSwitch = vi
+      .spyOn(harness.api.session, "switchAgent")
+      .mockImplementation(async (input) => {
+        harness.history.push({
+          id: "msg_switch",
+          type: "agent-switched",
+          agent: input.agent,
+          previous: "build",
+          time: { created: 2 },
+        });
+      });
+    const modelSwitch = vi.spyOn(harness.api.session, "switchModel").mockResolvedValue(undefined);
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const config = { provider: "opencode" as const, cwd: "/tmp/project" };
+    const imported = await client.importSession(
+      { providerHandleId: harness.info.id, cwd: config.cwd },
+      { config, storedConfig: config },
+    );
+    try {
+      expect(harness.history).toEqual(original);
+      expect(agentSwitch).not.toHaveBeenCalled();
+      expect(modelSwitch).not.toHaveBeenCalled();
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await imported.session.close();
+    }
+  });
+
+  test("explicit changed mode/model/variant still applies once, then unchanged resume is read-only", async () => {
+    const harness = new V2Harness();
+    harness.info.model = { providerID: "fixture", id: "local", variant: "default" };
+    const agentSwitch = vi.spyOn(harness.api.session, "switchAgent").mockResolvedValue(undefined);
+    const modelSwitch = vi.spyOn(harness.api.session, "switchModel").mockResolvedValue(undefined);
+    const overrides = { modeId: "plan", model: "fixture/other", thinkingOptionId: "high" };
+    await applyResumeOverrides(harness.api, harness.info, overrides);
+    expect(agentSwitch).toHaveBeenCalledWith({ sessionID: harness.info.id, agent: "plan" });
+    expect(modelSwitch).toHaveBeenCalledWith({
+      sessionID: harness.info.id,
+      model: { providerID: "fixture", id: "other", variant: "high" },
+    });
+    await applyResumeOverrides(harness.api, harness.info, overrides);
+    expect(agentSwitch).toHaveBeenCalledTimes(1);
+    expect(modelSwitch).toHaveBeenCalledTimes(1);
+    await applyResumeOverrides(harness.api, harness.info, { thinkingOptionId: "low" });
+    expect(modelSwitch).toHaveBeenCalledTimes(2);
+    expect(harness.info.model.variant).toBe("low");
+  });
+});
 
 function assistant(content: SessionMessageAssistant["content"]): SessionMessageAssistant {
   return {

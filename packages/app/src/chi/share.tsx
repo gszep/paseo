@@ -82,7 +82,7 @@ export function ChiShare({ serverId, agentId }: { serverId: string; agentId: str
         Continue on another host
       </Button>
       {!canonicalSupported ? (
-        <Text style={styles.text}>Update this host to use canonical continuation.</Text>
+        <Text style={styles.text}>Update this host to continue a Chi transfer.</Text>
       ) : null}
       {association?.blocked ? (
         <Text style={styles.text}>

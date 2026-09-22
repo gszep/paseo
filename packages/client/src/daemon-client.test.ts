@@ -37,7 +37,7 @@ function createMockLogger() {
   };
 }
 
-test("Chi canonical capability refuses old hosts before sending a standalone fork", async () => {
+test("Chi transfer capability refuses old hosts without a fork fallback", async () => {
   const client = new DaemonClient({
     url: "ws://fixture.invalid",
     clientId: "chi-fixture",
@@ -56,6 +56,30 @@ test("Chi canonical capability refuses old hosts before sending a standalone for
   await expect(
     client.manageChiConversation({ agentId: "agent", operation: { action: "cancel" } }),
   ).rejects.toThrow("Update the selected host");
+});
+
+test("Chi continuation rejects bare pins even on a transfer-capable host", async () => {
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "chi-fixture",
+    clientType: "cli",
+    logger: createMockLogger(),
+  });
+  vi.spyOn(client, "getLastServerInfoMessage").mockReturnValue({
+    features: { chiCanonical: true },
+  } as NonNullable<ReturnType<DaemonClient["getLastServerInfoMessage"]>>);
+  const send = vi.spyOn(client, "sendRequest");
+  await expect(
+    client.continueChi({
+      workspaceId: "workspace",
+      repo: "github:fixture/repo",
+      sourceId: "a".repeat(64),
+      snapshotId: "b".repeat(64),
+      // Old JavaScript callers still require a semantic boundary beyond TypeScript.
+      canonical: undefined as unknown as { conversationId: string; transferId: string },
+    }),
+  ).rejects.toThrow("Prepare the transfer");
+  expect(send).not.toHaveBeenCalled();
 });
 
 interface TraceRecord {

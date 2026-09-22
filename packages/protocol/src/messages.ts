@@ -1788,6 +1788,8 @@ export const ChiContinueRequestSchema = z.object({
   repo: z.string().max(4096),
   sourceId: z.string().regex(/^[a-f0-9]{64}$/),
   snapshotId: z.string().regex(/^[a-f0-9]{64}$/),
+  // Parse old wire requests; handlers reject missing transfer coordinates rather
+  // than executing the retired bare-pin fork path.
   canonical: z.object({ conversationId: z.string(), transferId: z.string() }).optional(),
 });
 export const ChiConversationRequestSchema = z.object({

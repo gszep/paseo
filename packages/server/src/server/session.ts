@@ -4583,6 +4583,8 @@ export class Session {
   ): Promise<void> {
     try {
       if (!this.agentManager.chi) throw new Error("chi-unavailable");
+      if (!msg.canonical?.conversationId || !msg.canonical.transferId)
+        throw new Error("chi-transfer-preparation-required");
       const workspace = await this.workspaceRegistry.get(msg.workspaceId);
       if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
       const fork = await this.agentManager.chi.continue(
@@ -4592,8 +4594,7 @@ export class Session {
             const records = await this.agentStorage.listByProviderSession("opencode", sessionId);
             const record = records[0];
             if (!record) return null;
-            if ((!msg.canonical && record.archivedAt) || records.length !== 1)
-              throw new Error("chi-continuation-registration-mismatch");
+            if (records.length !== 1) throw new Error("chi-continuation-registration-mismatch");
             return ensureAgentLoaded(record.id, {
               agentManager: this.agentManager,
               agentStorage: this.agentStorage,

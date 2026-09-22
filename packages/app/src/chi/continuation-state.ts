@@ -88,3 +88,18 @@ export function currentWorkspaceCatalog<T extends { id: string }>(
     ? query.data.entries
     : [];
 }
+/** A saved evidence pin is read-only; continuation requires a prepared transfer. */
+export function validPreparedSelection(selection: {
+  repo: string;
+  sourceId: string;
+  snapshotId: string;
+  canonical?: { conversationId: string; transferId: string };
+}): boolean {
+  return (
+    /^github:[^/\s]+\/[^/\s]+$/.test(selection.repo) &&
+    /^[a-f0-9]{64}$/.test(selection.sourceId) &&
+    /^[a-f0-9]{64}$/.test(selection.snapshotId) &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(selection.canonical?.conversationId ?? "") &&
+    /^[a-zA-Z0-9_-]{1,128}$/.test(selection.canonical?.transferId ?? "")
+  );
+}

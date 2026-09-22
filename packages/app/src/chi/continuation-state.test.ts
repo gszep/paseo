@@ -5,6 +5,7 @@ import {
   createContinuationRequests,
   currentWorkspaceCatalog,
   preparedCoordinates,
+  validPreparedSelection,
   type ContinuationStorage,
 } from "./continuation-state";
 
@@ -22,6 +23,26 @@ function memoryStorage(): ContinuationStorage {
 }
 
 describe("Chi continuation intake", () => {
+  it("rejects bare evidence pins and incomplete transfers", () => {
+    const pin = {
+      repo: "github:fixture/repo",
+      sourceId: "a".repeat(64),
+      snapshotId: "b".repeat(64),
+    };
+    expect(validPreparedSelection(pin)).toBe(false);
+    expect(
+      validPreparedSelection({
+        ...pin,
+        canonical: { conversationId: "conversation", transferId: "" },
+      }),
+    ).toBe(false);
+    expect(
+      validPreparedSelection({
+        ...pin,
+        canonical: { conversationId: "conversation", transferId: "transfer" },
+      }),
+    ).toBe(true);
+  });
   it("uses only source-prepared transfer coordinates and fails visibly rather than falling back to a pinned fork", async () => {
     const ready = {
       outcome: "ready" as const,
