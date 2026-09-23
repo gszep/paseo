@@ -9,6 +9,44 @@ import {
 } from "./question-form-card-core";
 
 describe("question form card core", () => {
+  test("returns exact selected values only for fields requesting array answers", () => {
+    const questions = parseQuestionFormQuestions({
+      questions: [
+        {
+          header: "structured",
+          question: "Select",
+          multiSelect: true,
+          answerFormat: "array",
+          allowOther: true,
+          options: [
+            { label: "A", value: "a" },
+            { label: "B", value: "b" },
+            { label: "A, B", value: "ab" },
+          ],
+        },
+        {
+          header: "legacy",
+          question: "Select",
+          multiSelect: true,
+          options: [
+            { label: "A", value: "a" },
+            { label: "B", value: "b" },
+          ],
+        },
+      ],
+    });
+    if (!questions) throw new Error("questions did not parse");
+    expect(
+      buildQuestionFormAnswers(questions, { 0: new Set([0, 1]), 1: new Set([0, 1]) }, {}),
+    ).toEqual({ structured: ["a", "b"], legacy: "A, B" });
+    expect(buildQuestionFormAnswers(questions, { 0: new Set([2]) }, {})).toEqual({
+      structured: ["ab"],
+    });
+    expect(buildQuestionFormAnswers(questions, {}, { 0: "Read, write" })).toEqual({
+      structured: ["Read, write"],
+    });
+  });
+
   test("treats optional input prompts as skippable empty answers", () => {
     const questions = parseQuestionFormQuestions({
       questions: [

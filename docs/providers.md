@@ -88,6 +88,22 @@ Pi RPC extension UI dialog requests (`select`, `input`, `editor`, `confirm`) are
 
 OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than the tested 2.0.10 SDK at runtime selection. Runtime selection uses the configured command and environment and lasts until provider configuration reload. Keep upstream SDK types inside the version-specific adapter. OpenCode owns storage migration; a missing native session must fail resume rather than create a replacement. V2 has no native archive/unarchive operation: archiving affects Paseo only. V1 retains native archiving.
 
+V2 admits a prompt before its separate `session.wait` request completes. That idle wait may stay
+open while tools run or a person answers a question, beyond Node fetch's five-minute headers
+deadline. Renew only the read-only wait before the transport deadline; never replay the admitted
+prompt. Only the exact local renewal reason wrapped by the SDK's transport error permits another
+wait. Session shutdown and other request failures must still end the wait, including HTTP errors
+whose response bodies finish decoding after the renewal timer fires.
+
+V2 questions use native session forms, separate from tool approvals. Translate fields and answers
+through the shared question-card contract, including text inputs and custom answers. V2 multi-select
+fields request `answerFormat: "array"`, which preserves each selected option's native value. Fields
+without that request keep the existing string answer format used by other providers. Older cards'
+comma-containing multi-select strings are rejected: a joined list and a label containing a comma
+cannot be distinguished. Adapter tests must use the card's parser and answer builder: a native-shaped
+array answer alone does not exercise what the UI actually sends. The isolated native-form round-trip in
+`opencode-bridge.local.e2e.test.ts` needs no model turn or personal credentials.
+
 V2.0.4 also removed the activation endpoint that gated a cold location, and a cold location registers its config-derived commands, skills, and providers asynchronously. Wait until `plugin.list` returns a populated inventory before reading the catalog or commands; an empty inventory means the location is still warming. Fail when the readiness deadline expires, including when an inventory request stalls.
 
 Paseo installs its OpenCode tool bridge through `OPENCODE_CONFIG_CONTENT`. V1 accepts a plugin file; v2 silently skips configured files and requires a package directory with a server entry point. Both versions use the daemon's private loopback bridge for caller-scoped tools. Bridge context lives only in daemon memory and is removed when the Paseo session closes. The content-addressed plugin artifacts contain no session data or secrets. V2 also needs this plugin when native Paseo tools are disabled: its prompt API has no structured-output format, so the plugin supplies a schema-validated final-answer tool.

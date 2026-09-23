@@ -102,8 +102,11 @@ export class SessionPermissions {
           questions: form.fields.map((field) => ({
             header: field.key,
             question: field.title ?? field.key,
-            options: "options" in field ? field.options : undefined,
-            multiple: field.type === "multiselect",
+            options: ("options" in field ? field.options : undefined) ?? [],
+            multiSelect: field.type === "multiselect",
+            ...(field.type === "multiselect" ? { answerFormat: "array" } : {}),
+            allowOther: "custom" in field && field.custom === true,
+            placeholder: "placeholder" in field ? field.placeholder : undefined,
           })),
         },
       };
@@ -124,6 +127,25 @@ function permissionReply(response: AgentPermissionResponse): "reject" | "once" |
   return response.selectedActionId === "always" ? "always" : "once";
 }
 
+function selectionLabels(
+  field: Extract<FormInfo["fields"][number], { type: "multiselect" }>,
+  value: unknown,
+): string[] | undefined {
+  // COMPAT(opencodeV2QuestionAnswers): added in v0.9.0-beta.2, remove after
+  // 2027-03-23 once the app floor supports array answers. Comma-joined strings
+  // cannot distinguish multiple choices from a single label containing commas.
+  if (typeof value === "string") {
+    if (value.includes(","))
+      throw new Error(
+        `OpenCode multi-select question ${field.key} requires an array for answers containing commas; update the Paseo client`,
+      );
+    return value ? [value] : [];
+  }
+  if (Array.isArray(value) && value.every((item: unknown) => typeof item === "string"))
+    return value;
+  return undefined;
+}
+
 function formAnswer(field: FormInfo["fields"][number], value: unknown): FormValue | undefined {
   if (value === undefined) return undefined;
   if (field.type === "external") return undefined;
@@ -136,8 +158,8 @@ function formAnswer(field: FormInfo["fields"][number], value: unknown): FormValu
     );
   };
   if (field.type === "multiselect") {
-    if (Array.isArray(value) && value.every((item: unknown) => typeof item === "string"))
-      return value.map(labelValue);
+    const labels = selectionLabels(field, value);
+    if (labels) return labels.map(labelValue);
   } else if (field.type === "string" && typeof value === "string") {
     return labelValue(value);
   } else if (field.type === "boolean") {

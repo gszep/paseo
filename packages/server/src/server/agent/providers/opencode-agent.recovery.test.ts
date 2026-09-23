@@ -2,14 +2,15 @@ import {
   waitForLocationReady,
   OpenCodeLocationReadyTimeoutError,
 } from "./opencode/v2/readiness.js";
-import type { SessionMessageInfo } from "@opencode/client";
+import { OpenCode, type SessionMessageInfo } from "@opencode/client";
 import { OpenCodeV2AgentClient } from "./opencode/v2/agent.js";
+import { SessionTurns } from "./opencode/v2/turns.js";
 import { V2Harness } from "./opencode/test-utils/v2-harness.js";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { AgentStreamEvent } from "../agent-sdk-types.js";
@@ -465,6 +466,199 @@ async function eventually(assertion: () => void): Promise<void> {
 }
 
 describe("OpenCode v2 lifecycle", () => {
+  test.each([false, true])(
+    "does not renew a late transport rejection when session cancellation is %s",
+    async (cancelSession) => {
+      const harness = new V2Harness();
+      const abort = new AbortController();
+      let signal: AbortSignal | null | undefined;
+      let rejectFetch!: (reason: unknown) => void;
+      let waits = 0;
+      const upstream = OpenCode.make({
+        baseUrl: "http://127.0.0.1:1",
+        fetch: async (_request, init) => {
+          waits++;
+          if (waits > 1) return new Response(null, { status: 204 });
+          signal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            rejectFetch = reject;
+          });
+        },
+      });
+      harness.wait = upstream.session.wait;
+      const events: AgentStreamEvent[] = [];
+      const turns = new SessionTurns({
+        client: harness.api,
+        id: "session",
+        cwd: "/tmp/project",
+        signal: abort.signal,
+        emit: (event) => events.push(event),
+        reconcile: async () => ({ info: harness.info, history: [] }),
+        clearPermissions: async () => {},
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        await turns.startTurn("synthetic prompt");
+        await vi.advanceTimersByTimeAsync(240_001);
+        expect(signal?.aborted).toBe(true);
+        if (cancelSession) abort.abort(new Error("session stopped"));
+        // Equal messages are not equal causes. In the cancellation case, even the
+        // exact SDK-wrapped renewal must lose to the session's own abort reason.
+        rejectFetch(cancelSession ? signal?.reason : new Error(signal?.reason.message));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(waits).toBe(1);
+        expect(events.filter((event) => event.type === "turn_failed")).toEqual([
+          expect.objectContaining({
+            error: cancelSession
+              ? "session stopped"
+              : "Transport\ncaused by: OpenCode idle wait renewal",
+          }),
+        ]);
+        expect(events.filter((event) => event.type === "turn_completed")).toEqual([]);
+      } finally {
+        abort.abort();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  test("propagates an SDK 503 decoded after the renewal deadline without retrying the wait", async () => {
+    const harness = new V2Harness();
+    let body!: ReadableStreamDefaultController<Uint8Array>;
+    let signal: AbortSignal | null | undefined;
+    let waits = 0;
+    const upstream = OpenCode.make({
+      baseUrl: "http://127.0.0.1:1",
+      fetch: async (_request, init) => {
+        waits++;
+        if (waits > 1) return new Response(null, { status: 204 });
+        signal = init?.signal;
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              body = controller;
+            },
+          }),
+          {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      },
+    });
+    harness.wait = upstream.session.wait;
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await session.startTurn("synthetic prompt");
+      await vi.advanceTimersByTimeAsync(240_001);
+      expect(signal?.aborted).toBe(true);
+      body.enqueue(
+        new TextEncoder().encode(
+          JSON.stringify({ _tag: "ServiceUnavailableError", message: "fixture wait unavailable" }),
+        ),
+      );
+      body.close();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waits).toBe(1);
+      expect(events.filter((event) => event.type === "turn_failed")).toEqual([
+        expect.objectContaining({ error: expect.stringContaining("fixture wait unavailable") }),
+      ]);
+      expect(events.filter((event) => event.type === "turn_completed")).toEqual([]);
+      expect(harness.prompts).toEqual(["synthetic prompt"]);
+    } finally {
+      await session.close();
+      vi.useRealTimers();
+    }
+  });
+
+  test("keeps a question-blocked turn alive beyond the HTTP headers deadline without resubmitting", async () => {
+    const harness = new V2Harness();
+    let settle!: () => void;
+    let waits = 0;
+    let replyCount = 0;
+    const upstream = OpenCode.make({
+      baseUrl: "http://127.0.0.1:1",
+      fetch: async (_request, init) => {
+        waits++;
+        return new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(
+                new TypeError("fetch failed", {
+                  cause: Object.assign(new Error("Headers Timeout Error"), {
+                    code: "UND_ERR_HEADERS_TIMEOUT",
+                  }),
+                }),
+              ),
+            300_000,
+          );
+          const abort = () => {
+            clearTimeout(timer);
+            reject(init?.signal?.reason);
+          };
+          init?.signal?.addEventListener("abort", abort, { once: true });
+          settle = () => {
+            clearTimeout(timer);
+            init?.signal?.removeEventListener("abort", abort);
+            resolve(new Response(null, { status: 204 }));
+          };
+        });
+      },
+    });
+    harness.wait = upstream.session.wait;
+    harness.api.session.form.list = async () =>
+      replyCount
+        ? []
+        : [
+            {
+              id: "question",
+              sessionID: "session",
+              title: "Choose",
+              fields: [
+                { key: "color", type: "string", options: [{ label: "Blue", value: "blue" }] },
+              ],
+            },
+          ];
+    harness.api.session.form.reply = async () => {
+      replyCount++;
+      settle();
+    };
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await session.startTurn("synthetic question");
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(events.filter((event) => event.type === "turn_failed")).toEqual([]);
+      expect(waits).toBeGreaterThan(1);
+      expect(harness.prompts).toEqual(["synthetic question"]);
+      expect(session.getPendingPermissions()).toHaveLength(1);
+      await session.respondToPermission("question", {
+        behavior: "allow",
+        updatedInput: { answers: { color: "Blue" } },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replyCount).toBe(1);
+      expect(events.filter((event) => event.type === "turn_completed")).toHaveLength(1);
+      expect(session.getPendingPermissions()).toEqual([]);
+    } finally {
+      await session.close();
+      vi.useRealTimers();
+    }
+  });
+
   test("fails initialization when the event stream ends before connecting", async () => {
     const harness = new V2Harness();
     harness.api.event.subscribe = async function* () {};
@@ -477,6 +671,65 @@ describe("OpenCode v2 lifecycle", () => {
     ).rejects.toThrow("event stream ended before connecting");
     expect(harness.releases).toBeGreaterThan(0);
   });
+
+  test("does not retry a failed idle wait or replay its accepted prompt", async () => {
+    const harness = new V2Harness();
+    let waits = 0;
+    harness.wait = async () => {
+      waits++;
+      throw new Error("wait transport disconnected");
+    };
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    try {
+      await expect(session.run("synthetic prompt")).rejects.toThrow("wait transport disconnected");
+      expect(waits).toBe(1);
+      expect(harness.prompts).toEqual(["synthetic prompt"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("closing a session aborts its idle wait without renewing it", async () => {
+    const harness = new V2Harness();
+    let waits = 0;
+    let cancellations = 0;
+    harness.wait = async (_input, options) =>
+      new Promise<void>((_resolve, reject) => {
+        waits++;
+        options?.signal?.addEventListener(
+          "abort",
+          () => {
+            cancellations++;
+            reject(options.signal?.reason);
+          },
+          { once: true },
+        );
+      });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await session.startTurn("synthetic prompt");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waits).toBe(1);
+      await session.close();
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(cancellations).toBe(1);
+      expect(waits).toBe(1);
+      expect(harness.prompts).toEqual(["synthetic prompt"]);
+    } finally {
+      await session.close();
+      vi.useRealTimers();
+    }
+  });
+
   test("returns only validated structured output and preserves it in history", async () => {
     const harness = new V2Harness();
     harness.prompt = async (input) => {

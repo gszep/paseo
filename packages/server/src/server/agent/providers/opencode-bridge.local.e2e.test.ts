@@ -1,5 +1,10 @@
 import { V2Runtime } from "./opencode/v2/runtime.js";
 import type { V2Api } from "./opencode/v2/api.js";
+import type { OpenCodeClient } from "@opencode/client";
+import {
+  buildQuestionFormAnswers,
+  parseQuestionFormQuestions,
+} from "../../../../../app/src/components/question-form-card-core.js";
 import { execCommand } from "../../../utils/spawn.js";
 import { z } from "zod";
 import { OpenCodeRuntimeClient } from "./opencode/runtime-client.js";
@@ -9,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { PaseoToolCatalog } from "../tools/types.js";
@@ -376,6 +381,119 @@ test("v2 preserves final text without duplicating streamed content", async () =>
     await rm(root, { recursive: true, force: true });
   }
 }, 120_000);
+
+test("v2 native forms round-trip through the question card without a model turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-form-contract-"));
+  vi.stubEnv("PASEO_HOME", path.join(root, "paseo"));
+  const runtime = new V2Runtime({
+    logger: createTestLogger(),
+    settings: {
+      env: {
+        HOME: root,
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        OPENCODE_CONFIG_CONTENT: "{}",
+      },
+    },
+  });
+  const client = new OpenCodeV2AgentClient({ logger: createTestLogger(), runtime });
+  let session: Awaited<ReturnType<typeof client.createSession>> | undefined;
+  let inspection: Awaited<ReturnType<typeof runtime.acquire>> | undefined;
+  try {
+    session = await client.createSession({ provider: "opencode", cwd: root });
+    inspection = await runtime.acquire();
+    // Runtime supplies the real SDK client; V2Api exposes only adapter-used methods.
+    const forms = inspection.client.session.form as OpenCodeClient["session"]["form"];
+    const form = await forms.create({
+      sessionID: session.id!,
+      title: "Synthetic preferences",
+      fields: [
+        {
+          key: "choices",
+          title: "Choose features",
+          type: "multiselect",
+          required: true,
+          options: [
+            { label: "A", value: "a" },
+            { label: "B", value: "b" },
+            { label: "A, B", value: "ab" },
+          ],
+        },
+        {
+          key: "features",
+          type: "multiselect",
+          required: true,
+          options: [
+            { label: "Read, write", value: "rw" },
+            { label: "Search", value: "search" },
+          ],
+        },
+        { key: "note", type: "string", required: true },
+      ],
+    });
+    const active = session;
+    await expect
+      .poll(() => active.getPendingPermissions().map((request) => request.id))
+      .toEqual([form.id]);
+    const questions = parseQuestionFormQuestions(active.getPendingPermissions()[0].input);
+    expect(
+      questions?.map((question) => ({
+        header: question.header,
+        multiSelect: question.multiSelect,
+      })),
+    ).toEqual([
+      { header: "choices", multiSelect: true },
+      { header: "features", multiSelect: true },
+      { header: "note", multiSelect: false },
+    ]);
+    if (!questions) throw new Error("Native form is not renderable");
+    await expect(
+      active.respondToPermission(form.id, {
+        behavior: "allow",
+        updatedInput: {
+          answers: { choices: ["not-an-option"], features: ["search"], note: "synthetic text" },
+        },
+      }),
+    ).rejects.toThrow();
+    expect(active.getPendingPermissions().map((request) => request.id)).toEqual([form.id]);
+    await active.respondToPermission(form.id, {
+      behavior: "allow",
+      updatedInput: {
+        answers: buildQuestionFormAnswers(
+          questions,
+          { 0: new Set([0, 1]), 1: new Set([0, 1]) },
+          { 2: "synthetic text" },
+        ),
+      },
+    });
+    expect((await forms.get({ sessionID: active.id!, formID: form.id })).state).toMatchObject({
+      status: "answered",
+      answer: { choices: ["a", "b"], features: ["rw", "search"], note: "synthetic text" },
+    });
+    expect(active.getPendingPermissions()).toEqual([]);
+    const cancelled = await forms.create({
+      sessionID: active.id!,
+      title: "Synthetic cancellation",
+      fields: [{ key: "note", type: "string" }],
+    });
+    await expect
+      .poll(() => active.getPendingPermissions().map((request) => request.id))
+      .toEqual([cancelled.id]);
+    await active.respondToPermission(cancelled.id, { behavior: "deny" });
+    expect((await forms.get({ sessionID: active.id!, formID: cancelled.id })).state).toMatchObject({
+      status: "cancelled",
+    });
+    expect(active.getPendingPermissions()).toEqual([]);
+  } finally {
+    await session?.close();
+    await inspection?.release();
+    await runtime.shutdown();
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
 
 test("v2 handles live tool approvals and questions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-opencode-v2-approvals-"));

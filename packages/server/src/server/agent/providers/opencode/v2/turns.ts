@@ -1,5 +1,5 @@
 import { structuredOutput } from "./structured-output.js";
-import type { SessionInfo, SessionMessageInfo } from "@opencode/client";
+import { ClientError, type SessionInfo, type SessionMessageInfo } from "@opencode/client";
 
 import { randomUUID } from "node:crypto";
 
@@ -148,10 +148,7 @@ export class SessionTurns {
     });
   }
   private async finish(id: string) {
-    await this.options.client.session.wait(
-      { sessionID: this.options.id },
-      { signal: this.options.signal },
-    );
+    await this.waitUntilIdle();
     const { info, history } = await this.options.reconcile();
     if (this.turn?.id !== id) return;
     if (info.outcome !== "failed" && info.outcome !== "interrupted")
@@ -181,6 +178,34 @@ export class SessionTurns {
         turnId: id,
         usage: usageFromV2(info),
       });
+  }
+  private async waitUntilIdle() {
+    // wait is a read-only long poll that sends no headers until the agent loop
+    // is idle. Renew it before Node fetch's 300s headers timeout; a user may
+    // leave a question open indefinitely. Never replay the admitted prompt.
+    while (true) {
+      this.options.signal.throwIfAborted();
+      const deadline = new AbortController();
+      const renewal = new Error("OpenCode idle wait renewal");
+      const timer = setTimeout(() => deadline.abort(renewal), 240_000);
+      try {
+        await this.options.client.session.wait(
+          { sessionID: this.options.id },
+          { signal: AbortSignal.any([this.options.signal, deadline.signal]) },
+        );
+        return;
+      } catch (error) {
+        this.options.signal.throwIfAborted();
+        // The installed SDK wraps fetch rejection once as Transport. A deadline
+        // firing while an HTTP error body decodes does not make that error a renewal.
+        if (
+          !(error instanceof ClientError && error.reason === "Transport" && error.cause === renewal)
+        )
+          throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
   }
   private async readExecutionError(): Promise<string> {
     let message = "OpenCode execution failed";

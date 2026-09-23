@@ -1,6 +1,7 @@
 export interface QuestionOption {
   label: string;
   description?: string;
+  value?: string;
 }
 
 export interface QuestionFormQuestion {
@@ -8,6 +9,7 @@ export interface QuestionFormQuestion {
   header: string;
   options: QuestionOption[];
   multiSelect: boolean;
+  answerFormat?: "array";
   allowOther: boolean;
   allowEmpty: boolean;
   placeholder?: string;
@@ -46,6 +48,7 @@ export function parseQuestionFormQuestions(input: unknown): QuestionFormQuestion
       options.push({
         label: o.label,
         description: typeof o.description === "string" ? o.description : undefined,
+        ...(typeof o.value === "string" ? { value: o.value } : {}),
       });
     }
     questions.push({
@@ -53,6 +56,7 @@ export function parseQuestionFormQuestions(input: unknown): QuestionFormQuestion
       header: q.header,
       options,
       multiSelect: q.multiSelect === true,
+      ...(q.answerFormat === "array" ? { answerFormat: "array" as const } : {}),
       allowOther: q.allowOther === true || q.isOther === true,
       allowEmpty: q.allowEmpty === true,
       placeholder: readOptionalString(q, "placeholder"),
@@ -105,8 +109,8 @@ export function buildQuestionFormAnswers(
   questions: QuestionFormQuestion[],
   selections: QuestionSelections,
   otherTexts: QuestionOtherTexts,
-): Record<string, string> {
-  const answers: Record<string, string> = {};
+): Record<string, string | string[]> {
+  const answers: Record<string, string | string[]> = {};
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const selected = selections[i];
@@ -114,18 +118,21 @@ export function buildQuestionFormAnswers(
 
     if (questionShowsTextInput(q)) {
       if (otherText && otherText.length > 0) {
-        answers[q.header] = otherText;
+        answers[q.header] = q.answerFormat === "array" ? [otherText] : otherText;
         continue;
       }
       if (q.allowEmpty && q.options.length === 0) {
-        answers[q.header] = "";
+        answers[q.header] = q.answerFormat === "array" ? [] : "";
         continue;
       }
     }
 
     if (selected && selected.size > 0) {
-      const labels = Array.from(selected).map((idx) => q.options[idx].label);
-      answers[q.header] = labels.join(", ");
+      const options = Array.from(selected).map((idx) => q.options[idx]);
+      answers[q.header] =
+        q.answerFormat === "array"
+          ? options.map((option) => option.value ?? option.label)
+          : options.map((option) => option.label).join(", ");
     }
   }
   return answers;
