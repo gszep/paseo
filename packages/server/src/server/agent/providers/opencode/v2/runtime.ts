@@ -272,14 +272,7 @@ export class V2Runtime {
         identity: boundedTransfer.identity,
         schema: boundedTransfer.schema,
         info: () => client.server.info(),
-        async get(sessionId) {
-          try {
-            return await client.session.get({ sessionID: sessionId });
-          } catch (error) {
-            if (error instanceof OpenCodeHttpError && error.status === 404) return null;
-            throw error;
-          }
-        },
+        get: boundedTransfer.get,
         export: (sessionId) => client.session.export({ sessionID: sessionId }),
         import: (data, directory) =>
           client.session.import({ ...data, location: { directory } } as Parameters<

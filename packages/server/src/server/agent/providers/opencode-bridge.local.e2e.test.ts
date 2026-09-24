@@ -491,6 +491,37 @@ test("v2 restores context usage from an imported native history without a model 
   }
 }, 60_000);
 
+test("v2 native transfer returns null for a missing destination session before import", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-transfer-get-"));
+  const runtime = new V2Runtime({
+    logger: createTestLogger(),
+    decorateEnv: (env) => env,
+    settings: {
+      env: {
+        HOME: root,
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        OPENCODE_CONFIG_CONTENT: "{}",
+      },
+    },
+  });
+  let inspection: Awaited<ReturnType<typeof runtime.acquire>> | undefined;
+  try {
+    inspection = await runtime.acquire();
+    const native = inspection.client.session as OpenCodeClient["session"];
+    const created = await native.create({ location: { directory: root } });
+    await expect(inspection.transfer!.get(`${created.id}_missing`)).resolves.toBeNull();
+    await expect(inspection.transfer!.get(created.id)).resolves.toMatchObject({ id: created.id });
+    expect((await native.export({ sessionID: created.id })).messages).toEqual([]);
+  } finally {
+    await inspection?.release();
+    await runtime.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("v2 native forms round-trip through the question card without a model turn", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-form-contract-"));
   vi.stubEnv("PASEO_HOME", path.join(root, "paseo"));
