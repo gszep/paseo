@@ -1,4 +1,5 @@
 import type {
+  ModelInfo,
   OpenCodeEvent,
   SessionInfo,
   SessionMessageInfo,
@@ -23,6 +24,7 @@ export class V2Harness {
     outcome: "succeeded",
   };
   readonly history: SessionMessageInfo[] = [];
+  readonly models: ModelInfo[] = [];
   readonly creates: SessionCreateInput[] = [];
   readonly prompts: string[] = [];
   readonly environments: Array<{ sessionID: string; variables: Record<string, string> }> = [];
@@ -62,7 +64,10 @@ export class V2Harness {
         data: [],
       }),
     },
-    model: { list: unexpected, default: unexpected },
+    model: {
+      list: async () => ({ location: this.info.location, data: this.models }),
+      default: unexpected,
+    },
     provider: { list: unexpected },
     command: { list: unexpected },
     skill: { list: unexpected },

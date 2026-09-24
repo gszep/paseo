@@ -534,6 +534,8 @@ export interface AgentRuntimeInfo {
   thinkingOptionId?: string | null;
   modeId?: string | null;
   extra?: AgentMetadata;
+  /** Current usage snapshot for hydration; the manager consumes it into lastUsage, not wire runtimeInfo. */
+  usage?: AgentUsage;
 }
 
 export type AgentSlashCommandKind = "command" | "skill";

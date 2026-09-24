@@ -16,6 +16,9 @@ import type {
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
+import { OpenCodeV2AgentClient } from "./providers/opencode/v2/agent.js";
+import { V2Harness } from "./providers/opencode/test-utils/v2-harness.js";
+import { toAgentPayload } from "./agent-projections.js";
 
 test("loads archived records for history and active records with the interactive default", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-loading-purpose-"));
@@ -140,3 +143,116 @@ test("resuming a stored agent keeps its unread flag and its last-activity time",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each(["measured", "empty"] as const)(
+  "OpenCode v2 idle resume and reload hydrate %s usage without changing recorded activity",
+  async (history) => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-loading-context-"));
+    const logger = createTestLogger();
+    const storage = new AgentStorage(path.join(root, "agents"), logger);
+    const harness = new V2Harness();
+    harness.models.push({
+      id: "model",
+      modelID: "model",
+      providerID: "fixture",
+      name: "Fixture",
+      enabled: true,
+      status: "active",
+      time: { released: 0 },
+      variants: [],
+      cost: [],
+      capabilities: { input: ["text"], output: ["text"], tools: true },
+      limit: { context: 200_000, output: 8_000 },
+    });
+    if (history === "measured") {
+      harness.history.push({
+        id: "msg_context",
+        type: "assistant",
+        agent: "build",
+        model: { providerID: "fixture", id: "model" },
+        time: { created: 1, completed: 2 },
+        content: [],
+        tokens: { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } },
+      });
+    }
+    const manager = new AgentManager({
+      clients: { opencode: new OpenCodeV2AgentClient({ logger, runtime: harness.runtime }) },
+      registry: storage,
+      logger,
+    });
+    const id = "00000000-0000-4000-8000-000000000402";
+    const updatedAt = "2026-01-09T03:04:05.000Z";
+    const attentionTimestamp = "2026-01-02T03:04:05.000Z";
+    const usage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalCostUsd: 0,
+      ...(history === "measured"
+        ? { contextWindowUsedTokens: 360, contextWindowMaxTokens: 200_000 }
+        : {}),
+    };
+    try {
+      await storage.upsert({
+        id,
+        provider: "opencode",
+        cwd: root,
+        workspaceId: "workspace-context",
+        createdAt: attentionTimestamp,
+        updatedAt,
+        lastActivityAt: updatedAt,
+        labels: {},
+        lastStatus: "idle",
+        persistence: { provider: "opencode", sessionId: harness.info.id, metadata: { cwd: root } },
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp,
+      });
+      await ensureAgentLoaded(id, { agentManager: manager, agentStorage: storage, logger });
+      await manager.flush();
+      await storage.flush();
+      const resumed = manager.getAgent(id)!;
+      expect(resumed.lastUsage).toEqual(usage);
+      expect(resumed.updatedAt.toISOString()).toBe(updatedAt);
+      expect(resumed.lifecycle).toBe("idle");
+      expect(resumed.attention).toEqual({
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp: new Date(attentionTimestamp),
+      });
+      expect(await storage.get(id)).toMatchObject({
+        updatedAt,
+        lastActivityAt: updatedAt,
+        lastStatus: "idle",
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp,
+      });
+      expect(toAgentPayload(resumed).lastUsage).toEqual(usage);
+      expect(toAgentPayload(resumed).runtimeInfo).not.toHaveProperty("usage");
+
+      await manager.reloadAgentSession(id);
+      await manager.flush();
+      await storage.flush();
+      const reloaded = manager.getAgent(id)!;
+      expect(reloaded.lastUsage).toEqual(usage);
+      expect(reloaded.updatedAt.toISOString()).toBe(updatedAt);
+      expect(reloaded.lifecycle).toBe("idle");
+      expect(reloaded.attention).toEqual(resumed.attention);
+      expect(await storage.get(id)).toMatchObject({
+        updatedAt,
+        lastActivityAt: updatedAt,
+        lastStatus: "idle",
+        requiresAttention: true,
+        attentionReason: "finished",
+        attentionTimestamp,
+      });
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await manager.closeAgent(id).catch(() => undefined);
+      await manager.flush();
+      await storage.flush();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

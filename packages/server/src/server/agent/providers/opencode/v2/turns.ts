@@ -7,6 +7,7 @@ import type {
   AgentPromptInput,
   AgentRunOptions,
   AgentStreamEvent,
+  AgentUsage,
   SteerActiveTurnOptions,
   SteerResult,
 } from "../../../agent-sdk-types.js";
@@ -15,14 +16,13 @@ import { toDiagnosticErrorMessage } from "../../diagnostic-utils.js";
 
 import { renderPromptAttachmentAsText } from "../../../prompt-attachments.js";
 
-import { usageFromV2 } from "./mapping.js";
-
 import { commands } from "./commands.js";
 
 import type { V2Api } from "./api.js";
 interface TurnSnapshot {
   info: SessionInfo;
   history: SessionMessageInfo[];
+  usage?: AgentUsage;
 }
 interface TurnOptions {
   client: V2Api;
@@ -149,7 +149,7 @@ export class SessionTurns {
   }
   private async finish(id: string) {
     await this.waitUntilIdle();
-    const { info, history } = await this.options.reconcile();
+    const { info, history, usage } = await this.options.reconcile();
     if (this.turn?.id !== id) return;
     if (info.outcome !== "failed" && info.outcome !== "interrupted")
       this.turn.output?.assert(history);
@@ -176,7 +176,7 @@ export class SessionTurns {
         type: "turn_completed",
         provider: "opencode",
         turnId: id,
-        usage: usageFromV2(info),
+        usage,
       });
   }
   private async waitUntilIdle() {

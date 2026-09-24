@@ -18,6 +18,7 @@ import { expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import type { PaseoToolCatalog } from "../tools/types.js";
+import type { AgentUsage } from "../agent-sdk-types.js";
 import { OpenCodeAgentClient } from "./opencode-agent.js";
 import { OpenCodeBridge } from "./opencode/bridge.js";
 import { OpenCodeServerManager } from "./opencode/server-manager.js";
@@ -381,6 +382,114 @@ test("v2 preserves final text without duplicating streamed content", async () =>
     await rm(root, { recursive: true, force: true });
   }
 }, 120_000);
+
+test("v2 restores context usage from an imported native history without a model turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-context-contract-"));
+  vi.stubEnv("PASEO_HOME", path.join(root, "paseo"));
+  const runtime = new V2Runtime({
+    logger: createTestLogger(),
+    settings: {
+      env: {
+        HOME: root,
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          providers: {
+            fixture: {
+              package: "@opencode/ai/providers/openai/responses",
+              models: { context: { limit: { context: 200_000, output: 8_000 } } },
+            },
+          },
+        }),
+      },
+    },
+  });
+  const client = new OpenCodeV2AgentClient({ logger: createTestLogger(), runtime });
+  let session: Awaited<ReturnType<typeof client.createSession>> | undefined;
+  let inspection: Awaited<ReturnType<typeof runtime.acquire>> | undefined;
+  try {
+    const seed = await client.createSession({ provider: "opencode", cwd: root });
+    inspection = await runtime.acquire();
+    const native = inspection.client.session as OpenCodeClient["session"];
+    const original = await native.get({ sessionID: seed.id! });
+    await seed.close();
+    const model = { providerID: "fixture", id: "context" };
+    const imported = await native.import({
+      info: {
+        ...original,
+        id: `${original.id}_usage`,
+        model,
+        tokens: {
+          input: 900_000,
+          output: 20_000,
+          reasoning: 100,
+          cache: { read: 8_000_000, write: 0 },
+        },
+      },
+      messages: [
+        {
+          id: "msg_context_user",
+          type: "user",
+          text: "Synthetic context fixture",
+          files: [],
+          time: { created: 1 },
+        },
+        {
+          id: "msg_context_answer",
+          type: "assistant",
+          agent: "build",
+          model,
+          time: { created: 2, completed: 3 },
+          content: [{ type: "text", text: "Synthetic answer" }],
+          tokens: { input: 618, output: 586, reasoning: 30, cache: { read: 191_616, write: 150 } },
+        },
+      ],
+    });
+    session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: imported.id,
+      metadata: { cwd: root },
+    });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    await session.getRuntimeInfo();
+    expect(usage.at(-1)).toEqual({
+      inputTokens: 900_000,
+      outputTokens: 20_000,
+      cachedInputTokens: 8_000_000,
+      totalCostUsd: 0,
+      contextWindowUsedTokens: 193_000,
+      contextWindowMaxTokens: 200_000,
+    });
+    const before = await native.export({ sessionID: imported.id });
+    await native.revert.stage({ sessionID: imported.id, messageID: "msg_context_user" });
+    await expect
+      .poll(() => usage.at(-1))
+      .toEqual({
+        inputTokens: 900_000,
+        outputTokens: 20_000,
+        cachedInputTokens: 8_000_000,
+        totalCostUsd: 0,
+      });
+    await native.revert.clear({ sessionID: imported.id });
+    await expect.poll(() => usage.at(-1)?.contextWindowUsedTokens).toBe(193_000);
+    // Native rewind may append its idle marker; it must not run another model turn.
+    const after = await native.export({ sessionID: imported.id });
+    expect(after.messages.filter((message) => message.type !== "idle")).toEqual(
+      before.messages.filter((message) => message.type !== "idle"),
+    );
+  } finally {
+    await session?.close();
+    await inspection?.release();
+    await runtime.shutdown();
+    vi.unstubAllEnvs();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
 
 test("v2 native forms round-trip through the question card without a model turn", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-form-contract-"));

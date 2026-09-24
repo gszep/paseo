@@ -3,9 +3,10 @@ import { SessionTurns } from "./turns.js";
 import { V2Timeline } from "./timeline.js";
 import { waitForLocationReady, awaitPaseoPlugin } from "./readiness.js";
 
-import type { SessionInfo, SessionMessageInfo } from "@opencode/client";
+import type { ModelInfo, SessionInfo, SessionMessageInfo } from "@opencode/client";
 
 import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import type { Logger } from "pino";
 import type {
   AgentLaunchContext,
@@ -17,6 +18,7 @@ import type {
   AgentSession,
   AgentSessionConfig,
   AgentStreamEvent,
+  AgentUsage,
   SteerActiveTurnOptions,
   SteerResult,
 } from "../../../agent-sdk-types.js";
@@ -29,7 +31,7 @@ import { composeSystemPromptParts } from "../../../system-prompt.js";
 import { raceProviderRefreshAbort } from "../../../provider-refresh-deadline.js";
 
 import { type V2Connection } from "./runtime.js";
-import { modelRef, modesFromV2 } from "./mapping.js";
+import { modelRef, modesFromV2, usageFromV2 } from "./mapping.js";
 
 import { V2_CAPABILITIES } from "./capabilities.js";
 import { features } from "./configuration.js";
@@ -52,6 +54,8 @@ export class OpenCodeV2Session implements AgentSession {
   private closed = false;
   private history: SessionMessageInfo[] = [];
   private modes: AgentMode[] = [];
+  private models: ModelInfo[] = [];
+  private usage: AgentUsage | undefined;
   constructor(
     private readonly connection: V2Connection,
     private info: SessionInfo,
@@ -80,7 +84,7 @@ export class OpenCodeV2Session implements AgentSession {
       emit: (event) => this.emit(event),
       reconcile: async () => {
         await this.reconcile();
-        return { info: this.info, history: this.history };
+        return { info: this.info, history: this.history, usage: this.usage };
       },
       clearPermissions: async () => {
         for (const request of this.permissions.list())
@@ -190,13 +194,14 @@ export class OpenCodeV2Session implements AgentSession {
     yield* history.messages(await messages(this.client, this.id));
   }
   async getRuntimeInfo() {
-    this.info = await this.client.session.get({ sessionID: this.id });
+    await this.reconcile();
     return {
       provider: "opencode",
       sessionId: this.id,
       model: this.info.model ? `${this.info.model.providerID}/${this.info.model.id}` : null,
       modeId: this.info.agent ?? null,
       thinkingOptionId: this.info.model?.variant ?? null,
+      usage: this.usage,
     };
   }
   async getAvailableModes() {
@@ -244,7 +249,7 @@ export class OpenCodeV2Session implements AgentSession {
       model: { id: model.id, providerID: model.providerID, ...(variant ? { variant } : {}) },
     });
     this.config.thinkingOptionId = variant ?? undefined;
-    this.info = await this.client.session.get({ sessionID: this.id });
+    await this.reconcile();
     this.emit({ type: "thinking_option_changed", provider: "opencode", thinkingOptionId: variant });
   }
   async setFeature(id: string, value: unknown) {
@@ -295,6 +300,7 @@ export class OpenCodeV2Session implements AgentSession {
       files: true,
     });
     await this.client.session.revert.commit({ sessionID: this.id });
+    await this.reconcile();
   }
   getPendingPermissions() {
     return [...this.permissions.list()];
@@ -309,6 +315,13 @@ export class OpenCodeV2Session implements AgentSession {
     ]);
     this.info = info;
     this.history = history;
+    const usage = usageFromV2({ session: info, history, models: this.models });
+    if (!isDeepStrictEqual(usage, this.usage)) {
+      this.usage = usage;
+      // usage_updated replaces the manager's snapshot; omitted context fields
+      // therefore clear an invalidated measurement without a protocol change.
+      this.emit({ type: "usage_updated", provider: "opencode", usage });
+    }
     for (const event of this.timeline.messages(history)) this.emitTimeline(event);
     await this.permissions.reconcile(this.id);
   }
@@ -324,6 +337,23 @@ export class OpenCodeV2Session implements AgentSession {
     }
   }
   private async reconcileConnection() {
+    // Model limits are location-scoped metadata. Refresh on connection, not on
+    // each streamed token or native step. Unknown limits must not prevent resume.
+    this.models = [];
+    try {
+      this.models = (
+        await this.client.model.list(
+          { location: { directory: this.config.cwd } },
+          { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(10_000)]) },
+        )
+      ).data;
+    } catch (error) {
+      this.abort.signal.throwIfAborted();
+      this.logger.warn(
+        { error: toDiagnosticErrorMessage(error) },
+        "OpenCode context limits unavailable",
+      );
+    }
     await this.reconcile();
     await this.children.reconcile(this.id);
     const active = await this.client.session.active();

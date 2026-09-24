@@ -7,6 +7,7 @@ import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   AGENT_LIFECYCLE_STATUSES,
   type AgentLifecycleStatus,
@@ -3954,20 +3955,25 @@ export class AgentManager {
     options?: { emit?: boolean },
   ): Promise<void> {
     try {
-      const newInfo = await agent.session.getRuntimeInfo();
+      const { usage, ...newInfo } = await agent.session.getRuntimeInfo();
+      const usageChanged = usage !== undefined && !isDeepStrictEqual(usage, agent.lastUsage);
       const changed =
         newInfo.model !== agent.runtimeInfo?.model ||
         newInfo.thinkingOptionId !== agent.runtimeInfo?.thinkingOptionId ||
         newInfo.sessionId !== agent.runtimeInfo?.sessionId ||
-        newInfo.modeId !== agent.runtimeInfo?.modeId;
+        newInfo.modeId !== agent.runtimeInfo?.modeId ||
+        usageChanged;
       agent.runtimeInfo = newInfo;
+      // Hydration is not execution activity. Restore the complete usage snapshot
+      // here, before registration subscribes to live events and persists state.
+      if (usage !== undefined) agent.lastUsage = usage;
       if (!agent.persistence && newInfo.sessionId) {
         agent.persistence = attachPersistenceCwd(
           { provider: agent.provider, sessionId: newInfo.sessionId },
           agent.cwd,
         );
       }
-      // Emit state if runtimeInfo changed so clients get the updated model
+      // Publish refreshed model/usage metadata without touching activity or attention.
       if (changed && options?.emit !== false) {
         this.emitState(agent);
       }

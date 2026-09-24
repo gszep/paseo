@@ -1,11 +1,11 @@
 import { V2Timeline } from "./timeline.js";
-import type { SessionMessageAssistant } from "@opencode/client";
+import type { ModelInfo, SessionMessageAssistant } from "@opencode/client";
 import { describe, expect, test, vi } from "vitest";
 import { applyResumeOverrides } from "./configuration.js";
 import { OpenCodeV2AgentClient } from "./agent.js";
 import { V2Harness } from "../test-utils/v2-harness.js";
 import { createTestLogger } from "../../../../../test-utils/test-logger.js";
-import type { AgentStreamEvent } from "../../../agent-sdk-types.js";
+import type { AgentStreamEvent, AgentUsage } from "../../../agent-sdk-types.js";
 
 function collectAssistantText(session: {
   subscribe: (cb: (e: AgentStreamEvent) => void) => () => void;
@@ -92,6 +92,415 @@ function assistant(content: SessionMessageAssistant["content"]): SessionMessageA
     content,
   };
 }
+
+function contextModel(id = "model", context = 200_000): ModelInfo {
+  return {
+    id,
+    modelID: id,
+    providerID: "test",
+    name: id,
+    enabled: true,
+    status: "active",
+    time: { released: 0 },
+    variants: [{ id: "high" }],
+    cost: [],
+    limit: { context, output: 8_000 },
+    capabilities: { input: ["text"], output: ["text"], tools: true },
+  };
+}
+
+describe("OpenCode v2 context usage", () => {
+  test("restores the last measured assistant on resume without running a turn or counting lifetime usage", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel());
+    harness.info.tokens = {
+      input: 5_448_234,
+      output: 275_013,
+      reasoning: 7,
+      cache: { read: 210_907_392, write: 800 },
+    };
+    harness.info.cost = 12;
+    harness.history.push(
+      {
+        ...assistant([]),
+        id: "previous",
+        tokens: { input: 400, output: 200, reasoning: 10, cache: { read: 1_000, write: 50 } },
+      },
+      {
+        ...assistant([]),
+        model: { providerID: "test", id: "model", variant: "high" },
+        tokens: { input: 618, output: 586, reasoning: 30, cache: { read: 191_616, write: 150 } },
+      },
+      { ...assistant([]), id: "streaming" },
+    );
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => {
+      events.push(event);
+    });
+    try {
+      expect((await session.getRuntimeInfo()).usage).toEqual({
+        inputTokens: 5_448_234,
+        outputTokens: 275_013,
+        cachedInputTokens: 210_907_392,
+        totalCostUsd: 12,
+        contextWindowUsedTokens: 193_000,
+        contextWindowMaxTokens: 200_000,
+      });
+      expect(events).toEqual([]);
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("publishes completed native steps while the Paseo turn is still running, then returns the same usage at completion", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel());
+    let settle!: () => void;
+    harness.wait = () =>
+      new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    try {
+      let finished = false;
+      const result = session.run("fixture").then((value) => {
+        finished = true;
+        return value;
+      });
+      await expect.poll(() => harness.prompts).toEqual(["fixture"]);
+      const tokens = { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } };
+      harness.history.push({ ...assistant([]), tokens });
+      harness.push({
+        id: "step",
+        created: 3,
+        type: "session.step.ended",
+        durable: { aggregateID: "session", seq: 1, version: 1 },
+        data: {
+          sessionID: "session",
+          assistantMessageID: "answer",
+          finish: "tool-calls",
+          cost: 0,
+          tokens,
+        },
+      });
+      const measured = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        totalCostUsd: 0,
+        contextWindowUsedTokens: 360,
+        contextWindowMaxTokens: 200_000,
+      };
+      await expect.poll(() => usage.at(-1)).toEqual(measured);
+      expect(finished).toBe(false);
+      // The next in-flight assistant has no measurement yet.
+      harness.history.push({ ...assistant([]), id: "next" });
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual(measured);
+      expect(usage).toHaveLength(2);
+      settle();
+      expect((await result).usage).toEqual(measured);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("clears a completed compaction's old measurement, then recovers from a post-compaction assistant", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel());
+    const tokens = { input: 1_000, output: 100, reasoning: 50, cache: { read: 100, write: 0 } };
+    harness.history.push({ ...assistant([]), tokens });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    const totals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalCostUsd: 0 };
+    try {
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 1_250,
+        contextWindowMaxTokens: 200_000,
+      });
+      harness.history.push({
+        id: "compact",
+        type: "compaction",
+        status: "running",
+        reason: "auto",
+        time: { created: 3 },
+      });
+      await session.getRuntimeInfo();
+      expect(usage).toHaveLength(1);
+      harness.history[1] = {
+        id: "compact",
+        type: "compaction",
+        status: "failed",
+        reason: "auto",
+        time: { created: 3 },
+        error: { type: "fixture", message: "fixture failure" },
+      };
+      await session.getRuntimeInfo();
+      expect(usage).toHaveLength(1);
+      const compact = {
+        id: "compact",
+        type: "compaction",
+        status: "completed",
+        reason: "auto",
+        time: { created: 3 },
+        summary: "fixture summary",
+        recent: "",
+        tokens,
+      } as const;
+      harness.history[1] = compact;
+      harness.push({
+        id: "compacted",
+        created: 4,
+        type: "session.compaction.ended",
+        durable: { aggregateID: "session", seq: 2, version: 1 },
+        data: {
+          sessionID: "session",
+          reason: "auto",
+          text: compact.summary,
+          recent: compact.recent,
+          tokens,
+        },
+      });
+      await expect.poll(() => usage.at(-1)).toEqual(totals);
+      harness.history.push({ ...assistant([]), id: "after", tokens: { ...tokens, input: 200 } });
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 450,
+        contextWindowMaxTokens: 200_000,
+      });
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("rewind measures strictly before its boundary and fails closed when that boundary is missing", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel());
+    const tokens = { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } };
+    harness.history.push(
+      { ...assistant([]), id: "before", tokens },
+      { id: "boundary", type: "user", text: "fixture", time: { created: 3 }, files: [] },
+      {
+        id: "compact",
+        type: "compaction",
+        status: "completed",
+        reason: "manual",
+        time: { created: 4 },
+        summary: "fixture",
+        recent: "",
+      },
+      { ...assistant([]), id: "after", tokens: { ...tokens, input: 800 } },
+    );
+    harness.info.revert = { messageID: "boundary" };
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    const totals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalCostUsd: 0 };
+    try {
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 360,
+        contextWindowMaxTokens: 200_000,
+      });
+      harness.info.revert = { messageID: "missing" };
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual(totals);
+      harness.info.revert = { messageID: "before" };
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual(totals);
+      delete harness.info.revert;
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 1_060,
+        contextWindowMaxTokens: 200_000,
+      });
+      // Native revert commit removes the boundary and suffix from history.
+      harness.api.session.revert.stage = async (input) => {
+        harness.info.revert = { messageID: input.messageID };
+        return { messageID: input.messageID };
+      };
+      harness.api.session.revert.commit = async () => {
+        harness.history.splice(1);
+        delete harness.info.revert;
+      };
+      await session.revertBoth!({ messageId: "boundary" });
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 360,
+        contextWindowMaxTokens: 200_000,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("pairs a measurement with its actual model's limit across selected-model and variant changes", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel(), contextModel("other", 1_000_000));
+    const tokens = { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } };
+    harness.history.push({ ...assistant([]), tokens });
+    harness.api.session.switchModel = async ({ model }) => {
+      harness.info.model = model;
+    };
+    harness.api.model.default = async () => ({
+      location: harness.info.location,
+      data: { providerID: "test", id: "other" },
+    });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    const totals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalCostUsd: 0 };
+    try {
+      await session.setModel!(null);
+      // This is still the last native measurement, not an estimate for the newly selected model.
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 360,
+        contextWindowMaxTokens: 200_000,
+      });
+      await session.setThinkingOption!("high");
+      harness.history.push({
+        ...assistant([]),
+        id: "new-model",
+        model: { providerID: "test", id: "other", variant: "high" },
+        tokens: { ...tokens, input: 200 },
+      });
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual({
+        ...totals,
+        contextWindowUsedTokens: 460,
+        contextWindowMaxTokens: 1_000_000,
+      });
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("never fabricates a percent for unknown limits or an assistant with zero/absent usage", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel("model", 0));
+    const tokens = { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } };
+    harness.history.push({ ...assistant([]), tokens });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    const totals = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalCostUsd: 0 };
+    try {
+      expect(usage.at(-1)).toEqual({ ...totals, contextWindowUsedTokens: 360 });
+      harness.history.push({
+        ...assistant([]),
+        id: "unknown-model",
+        model: { providerID: "unknown", id: "model" },
+        tokens: { ...tokens, input: 200 },
+      });
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual({ ...totals, contextWindowUsedTokens: 460 });
+      harness.history.push({
+        ...assistant([]),
+        id: "zero",
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      });
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual(totals);
+      harness.history.splice(0, harness.history.length, assistant([]));
+      await session.getRuntimeInfo();
+      expect(usage.at(-1)).toEqual(totals);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("drops an old limit when catalog acquisition fails on reconnect without blocking history access", async () => {
+    const harness = new V2Harness();
+    harness.models.push(contextModel());
+    harness.history.push({
+      ...assistant([]),
+      tokens: { input: 100, output: 20, reasoning: 10, cache: { read: 200, write: 30 } },
+    });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const usage: AgentUsage[] = [(await session.getRuntimeInfo()).usage!];
+    session.subscribe((event) => {
+      if (event.type === "usage_updated") usage.push(event.usage);
+    });
+    try {
+      expect(usage.at(-1)?.contextWindowMaxTokens).toBe(200_000);
+      harness.api.model.list = async () => {
+        throw new Error("fixture catalog unavailable");
+      };
+      harness.push({ id: "reconnected", created: 3, type: "server.connected", data: {} });
+      await expect
+        .poll(() => usage.at(-1))
+        .toEqual({
+          inputTokens: 0,
+          outputTokens: 0,
+          cachedInputTokens: 0,
+          totalCostUsd: 0,
+          contextWindowUsedTokens: 360,
+        });
+      await session.getRuntimeInfo();
+      expect(usage).toHaveLength(2);
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+});
 
 describe("OpenCode v2 token streaming", () => {
   test("emits text and reasoning deltas as they arrive", async () => {
