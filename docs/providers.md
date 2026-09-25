@@ -234,6 +234,8 @@ Kimi Code usage follows the CLI-managed credential file at `KIMI_CODE_HOME` or `
 
 Cursor usage reads the desktop `state.vscdb` token first, then `cursor-agent`'s `~/.config/cursor/auth.json`. Headless hosts only have the CLI file.
 
+Codex usage reads the Codex CLI `auth.json` first, then OpenCode's ChatGPT OAuth login from the `credential` table of `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode`), which is the subscription Paseo's OpenCode agents actually consume. Candidates with a known past expiry are skipped and a rejected token falls through to the next; a host that only uses OpenCode still gets the Session/Weekly windows.
+
 ### Usage fetchers are read-only on credentials
 
 A fetcher reads the provider's credential file and never writes it. On a 401 or 403 it returns `unavailable` and leaves refresh to the provider's own CLI: redeeming a refresh token in the fetcher invalidates the CLI's copy (refresh tokens are single-use), and rewriting the file through the fetcher's Zod schema drops any field the schema does not model, corrupting the file for the CLI.

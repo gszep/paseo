@@ -38,6 +38,44 @@ function writeCodexAuth(dir: string, accessToken: string, refreshToken = "rt_cod
   );
 }
 
+function jwt(expSeconds: number): string {
+  const payload = Buffer.from(JSON.stringify({ exp: expSeconds })).toString("base64url");
+  return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
+}
+
+// Mirrors OpenCode's `credential` table; the fetcher reads only integration_id/value.
+async function writeOpenCodeCredential(
+  dir: string,
+  value: object,
+  integrationId = "openai",
+): Promise<void> {
+  const { DatabaseSync } = (await import("node:sqlite")) as {
+    DatabaseSync: new (path: string) => {
+      exec(sql: string): void;
+      prepare(sql: string): { run(...params: unknown[]): unknown };
+      close(): void;
+    };
+  };
+  const db = new DatabaseSync(join(dir, "opencode.db"));
+  try {
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, value text NOT NULL, connector_id text, method_id text, active integer, time_created integer NOT NULL, time_updated integer NOT NULL)",
+    );
+    db.prepare(
+      "INSERT INTO credential (id, integration_id, label, value, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      `cred_${Math.random().toString(36).slice(2)}`,
+      integrationId,
+      "OpenAI",
+      JSON.stringify(value),
+      1,
+      Date.now(),
+    );
+  } finally {
+    db.close();
+  }
+}
+
 function kimiCredentialPath(dir: string): string {
   return join(dir, "credentials", "kimi-code.json");
 }
@@ -350,6 +388,7 @@ describe("ProviderUsageService", () => {
 describe("real provider usage fetchers", () => {
   let claudeHome: string;
   let codexHome: string;
+  let opencodeDataDir: string;
   let homeDir: string;
   let fetchApi: typeof fetch;
   let originalEnv: Record<string, string | undefined>;
@@ -357,6 +396,7 @@ describe("real provider usage fetchers", () => {
   beforeEach(() => {
     claudeHome = mkdtempSync(join(tmpdir(), "usage-test-claude-"));
     codexHome = mkdtempSync(join(tmpdir(), "usage-test-codex-"));
+    opencodeDataDir = mkdtempSync(join(tmpdir(), "usage-test-opencode-"));
     homeDir = mkdtempSync(join(tmpdir(), "usage-test-home-"));
     fetchApi = mockFetch(new Map());
     originalEnv = { ...process.env };
@@ -387,6 +427,7 @@ describe("real provider usage fetchers", () => {
   afterEach(() => {
     rmSync(claudeHome, { recursive: true, force: true });
     rmSync(codexHome, { recursive: true, force: true });
+    rmSync(opencodeDataDir, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
     for (const key in originalEnv) {
       process.env[key] = originalEnv[key];
@@ -422,7 +463,12 @@ describe("real provider usage fetchers", () => {
           platform: options.platform,
           fetch: fetchThroughTestDouble,
         }),
-        new CodexQuotaProvider({ logger, codexHome, fetch: fetchThroughTestDouble }),
+        new CodexQuotaProvider({
+          logger,
+          codexHome,
+          opencodeDataDir,
+          fetch: fetchThroughTestDouble,
+        }),
         new CopilotQuotaProvider({ logger, fetch: fetchThroughTestDouble }),
         new CursorQuotaProvider({
           logger,
@@ -657,6 +703,77 @@ describe("real provider usage fetchers", () => {
     expect(usageCalls).toBe(1);
     // The auth file must be left byte-for-byte untouched for the Codex CLI to own.
     expect(readFileSync(authPath, "utf8")).toBe(before);
+  });
+
+  it("uses OpenCode's ChatGPT login when the Codex CLI token has expired", async () => {
+    // Codex CLI file holds a JWT whose exp is in the past; the OpenCode credential
+    // store holds the subscription actually used by Paseo's OpenCode agents.
+    writeCodexAuth(codexHome, jwt(1_600_000_000));
+    await writeOpenCodeCredential(opencodeDataDir, {
+      type: "oauth",
+      methodID: "chatgpt-headless",
+      access: "at_opencode_live",
+      refresh: "rt_opencode",
+      expires: Date.now() + 60 * 60 * 1000,
+      metadata: { accountID: "acct_opencode" },
+    });
+    const requests: Array<{ token: string | null; account: string | null }> = [];
+    fetchApi = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      expect(url.toString()).toBe("https://chatgpt.com/backend-api/wham/usage");
+      const headers = new Headers(init?.headers);
+      requests.push({
+        token: headers.get("Authorization"),
+        account: headers.get("ChatGPT-Account-Id"),
+      });
+      return jsonResponse(makeCodexResponse({}));
+    }) as never;
+
+    const result = await service().listUsage();
+
+    expect(findProvider(result, "codex")).toMatchObject({
+      status: "available",
+      windows: expect.arrayContaining([expect.objectContaining({ id: "session", usedPct: 42 })]),
+    });
+    // The expired Codex CLI token is never sent.
+    expect(requests).toEqual([{ token: "Bearer at_opencode_live", account: "acct_opencode" }]);
+  });
+
+  it("falls through to OpenCode when the Codex CLI token is rejected, ignoring expired and foreign rows", async () => {
+    writeCodexAuth(codexHome, "at_codex_stale");
+    await writeOpenCodeCredential(opencodeDataDir, {
+      type: "oauth",
+      access: "at_opencode_expired",
+      expires: Date.now() - 1000,
+    });
+    await writeOpenCodeCredential(
+      opencodeDataDir,
+      { type: "oauth", access: "at_anthropic", expires: Date.now() + 1000 },
+      "anthropic",
+    );
+    await writeOpenCodeCredential(opencodeDataDir, { type: "oauth", access: "at_opencode_live" });
+    const tokens: Array<string | null> = [];
+    fetchApi = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const token = new Headers(init?.headers).get("Authorization");
+      tokens.push(token);
+      return token === "Bearer at_opencode_live"
+        ? jsonResponse(makeCodexResponse({}))
+        : new Response(null, { status: 401 });
+    }) as never;
+
+    const result = await service().listUsage();
+
+    expect(findProvider(result, "codex").status).toBe("available");
+    expect(tokens).toEqual(["Bearer at_codex_stale", "Bearer at_opencode_live"]);
+  });
+
+  it("stays unavailable without any Codex or OpenCode credential", async () => {
+    fetchApi = vi.fn(async () => {
+      throw new Error("no request expected");
+    }) as never;
+
+    const result = await service().listUsage();
+
+    expect(findProvider(result, "codex").status).toBe("unavailable");
   });
 
   it("fetches Copilot usage from COPILOT_TOKEN", async () => {
@@ -1318,15 +1435,18 @@ describe("real provider usage fetchers", () => {
 describe("usage bars escalate as they fill", () => {
   let claudeHome: string;
   let codexHome: string;
+  let opencodeDataDir: string;
 
   beforeEach(() => {
     claudeHome = mkdtempSync(join(tmpdir(), "paseo-tone-claude-"));
     codexHome = mkdtempSync(join(tmpdir(), "paseo-tone-codex-"));
+    opencodeDataDir = mkdtempSync(join(tmpdir(), "paseo-tone-opencode-"));
   });
 
   afterEach(() => {
     rmSync(claudeHome, { recursive: true, force: true });
     rmSync(codexHome, { recursive: true, force: true });
+    rmSync(opencodeDataDir, { recursive: true, force: true });
   });
 
   function claudeAt(utilization: number) {
@@ -1363,6 +1483,7 @@ describe("usage bars escalate as they fill", () => {
     const usage = await new CodexQuotaProvider({
       logger: createLogger(),
       codexHome,
+      opencodeDataDir,
       fetch: mockFetch(
         new Map([
           [
