@@ -292,6 +292,195 @@ function createFakeQueue(
 const passthroughEncodeImages = async (images: AttachmentMetadata[]) =>
   images.map((image) => ({ data: image.id, mimeType: image.mimeType }));
 
+it("queue drain and send-now carry immutable mention recipients and message identity through retries", async () => {
+  const queue = createFakeQueue();
+  const context = {
+    actor: "github:sender",
+    repo: "github:fixture/repo",
+    generation: "a".repeat(64),
+  };
+  const recipients = ["github:recipient"];
+  const queued = queueComposerMessage({
+    agentId: "agent",
+    text: "@recipient question",
+    attachments: [],
+    chiMentions: recipients,
+    chiMentionContext: context,
+    queue,
+  }).queued!;
+  recipients.push("github:other");
+  const first = createFakeSendClient({ rejection: new Error("response lost") });
+  const submission = createFakeStream();
+  const dispatch = (client: ComposerSendClient) => async (item: QueuedComposerMessage) =>
+    dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      messageId: item.id,
+      text: item.text,
+      attachments: item.attachments,
+      chiMentions: item.chiMentions,
+      chiMentionContext: item.chiMentionContext,
+      activeTurnBehavior: "interrupt",
+      encodeImages: passthroughEncodeImages,
+      submission,
+    });
+  expect(
+    await sendQueuedComposerMessageNow({
+      agentId: "agent",
+      messageId: queued.id,
+      queue,
+      submitMessage: dispatch(first),
+    }),
+  ).toEqual({ status: "failed", errorMessage: "response lost" });
+  expect(() =>
+    editQueuedComposerMessage({ agentId: "agent", messageId: queued.id, queue }),
+  ).toThrow("chi-mention-submission-unresolved");
+  const retry = createFakeSendClient();
+  expect(
+    await sendQueuedComposerMessageNow({
+      agentId: "agent",
+      messageId: queued.id,
+      queue,
+      submitMessage: dispatch(retry),
+    }),
+  ).toEqual({ status: "submitted" });
+  expect(retry.calls).toEqual(first.calls);
+  expect(retry.calls[0].options).toMatchObject({
+    messageId: queued.id,
+    chiMentions: ["github:recipient"],
+    chiMentionContext: context,
+    activeTurnBehavior: "interrupt",
+  });
+  expect(queue.read("agent")).toEqual([]);
+});
+
+it("mentions with attachments or slash/skill commands fail before optimistic submission or queue admission", async () => {
+  for (const input of [
+    { text: "/review @recipient", attachments: [] },
+    { text: "/skill @recipient", attachments: [] },
+    { text: "@recipient", attachments: [{ kind: "image" as const, metadata: imageMetadata }] },
+  ]) {
+    const client = createFakeSendClient();
+    const submission = createFakeStream();
+    await expect(
+      dispatchComposerAgentMessage({
+        ...input,
+        client,
+        agentId: "agent",
+        chiMentions: ["github:recipient"],
+        encodeImages: passthroughEncodeImages,
+        submission,
+      }),
+    ).rejects.toThrow("chi-mention-plain-text-required");
+    expect(client.calls).toEqual([]);
+    expect(submission.head.size).toBe(0);
+    const queue = createFakeQueue();
+    expect(() =>
+      queueComposerMessage({
+        ...input,
+        agentId: "agent",
+        chiMentions: ["github:recipient"],
+        queue,
+      }),
+    ).toThrow("chi-mention-plain-text-required");
+    expect(queue.read("agent")).toEqual([]);
+  }
+});
+
+it("a definitively rejected queued mention can be edited and a fresh ordinary send is admitted", async () => {
+  const values = new Map<string, string>();
+  const mentions = createMentionSubmissions({
+    getItem: async (key) => values.get(key) ?? null,
+    setItem: async (key, value) => {
+      values.set(key, value);
+    },
+    removeItem: async (key) => {
+      values.delete(key);
+    },
+  });
+  const context = {
+    actor: "github:sender",
+    repo: "github:fixture/repo",
+    generation: "a".repeat(64),
+  };
+  const queue = createFakeQueue();
+  const queued = queueComposerMessage({
+    agentId: "agent",
+    text: "@recipient question",
+    attachments: [],
+    chiMentions: ["github:recipient"],
+    chiMentionContext: context,
+    queue,
+  }).queued!;
+  const submission = createFakeStream();
+  const client = createFakeSendClient({
+    rejection: new ChiOperationError("chi-share-required", {
+      accessLost: false,
+      outcome: "not_committed",
+    }),
+  });
+  const result = await sendQueuedComposerMessageNow({
+    agentId: "agent",
+    messageId: queued.id,
+    queue,
+    submitMessage: (item) =>
+      dispatchComposerAgentMessage({
+        client,
+        mentions,
+        serverId: "host",
+        agentId: "agent",
+        messageId: item.id,
+        text: item.text,
+        attachments: [],
+        chiMentions: item.chiMentions,
+        chiMentionContext: item.chiMentionContext,
+        encodeImages: passthroughEncodeImages,
+        submission,
+      }),
+  });
+  expect(result.status).toBe("failed");
+  expect(await mentions.read("host", "agent")).toBeNull();
+  expect(editQueuedComposerMessage({ agentId: "agent", messageId: queued.id, queue })?.text).toBe(
+    queued.text,
+  );
+  const ordinary = createFakeSendClient();
+  await dispatchComposerAgentMessage({
+    client: ordinary,
+    mentions,
+    serverId: "host",
+    agentId: "agent",
+    text: "ordinary",
+    attachments: [],
+    encodeImages: passthroughEncodeImages,
+    submission,
+  });
+  expect(ordinary.calls).toHaveLength(1);
+});
+
+it("oversized mention is rejected before queue, saved-request or optimistic admission", async () => {
+  const client = createFakeSendClient(),
+    submission = createFakeStream(),
+    queue = createFakeQueue();
+  const input = {
+    agentId: "agent",
+    text: "x".repeat(8001),
+    attachments: [],
+    chiMentions: ["github:recipient"],
+  };
+  await expect(
+    dispatchComposerAgentMessage({
+      ...input,
+      client,
+      submission,
+      encodeImages: passthroughEncodeImages,
+    }),
+  ).rejects.toThrow("chi-mention-text-too-long");
+  expect(() => queueComposerMessage({ ...input, queue })).toThrow("chi-mention-text-too-long");
+  expect(client.calls).toEqual([]);
+  expect(submission.head.size).toBe(0);
+  expect(queue.read("agent")).toEqual([]);
+});
+
 describe("cancelComposerAgent", () => {
   function baseInput(): {
     client: ComposerCancelClient & { canceledIds: string[] };
@@ -822,7 +1011,7 @@ describe("sendQueuedComposerMessageNow", () => {
     });
     expect(result).toEqual({ status: "submitted" });
     expect(queue.state.get("agent")).toEqual([]);
-    expect(submitted).toEqual([{ text: "send me", attachments: [review] }]);
+    expect(submitted).toEqual([{ id: "msg-1", text: "send me", attachments: [review] }]);
   });
 
   it("restores the queued entry to the front and surfaces the error message on failure", async () => {
@@ -1123,3 +1312,5 @@ describe("file upload preparation", () => {
     },
   );
 });
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import { createMentionSubmissions } from "@/chi/mention-submission";

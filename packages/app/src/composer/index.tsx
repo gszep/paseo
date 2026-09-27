@@ -1,4 +1,6 @@
 import type { ComposerTextSource } from "./text-source";
+import { mentionError } from "@/chi/mention-errors";
+import { assertMentionPrompt } from "./actions";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { useStore } from "zustand";
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
@@ -89,6 +91,12 @@ import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { AutocompletePopover } from "@/components/ui/autocomplete-popover";
 import type { AutocompleteOption } from "@/components/ui/autocomplete";
 import { useAgentAutocomplete } from "@/hooks/use-agent-autocomplete";
+import {
+  selectedRecipients,
+  selectedMentionContext,
+  selectMention,
+  clearMentionSelection,
+} from "@/chi/mention-selection";
 import { usePluginClientSlashCommands } from "@/plugins/client-slash-commands";
 import {
   executePluginClientSlashCommand,
@@ -1570,6 +1578,9 @@ function ComposerContentImpl({
       }
       await dispatchComposerAgentMessage({
         client,
+        serverId,
+        chiMentions: selectedRecipients(serverId, targetAgentId, text),
+        chiMentionContext: selectedMentionContext(serverId, targetAgentId),
         agentId: targetAgentId,
         text,
         attachments: sendAttachments,
@@ -1587,6 +1598,7 @@ function ComposerContentImpl({
               ).turnId ?? undefined)
             : undefined,
       });
+      clearMentionSelection(serverId, targetAgentId);
       onAttentionPromptSend?.();
     };
   }, [appSettings.sendBehavior, client, onAttentionPromptSend, serverId, supportsForgeSearch, t]);
@@ -1632,9 +1644,12 @@ function ComposerContentImpl({
         agentId,
         text: queuedMessage,
         attachments: queuedAttachments,
+        chiMentions: selectedRecipients(serverId, agentId, queuedMessage),
+        chiMentionContext: selectedMentionContext(serverId, agentId),
         queue: queueWriter,
       });
       if (!result.queued) return;
+      clearMentionSelection(serverId, agentId);
 
       replaceUserInput("");
       setSelectedAttachments([]);
@@ -1643,6 +1658,7 @@ function ComposerContentImpl({
     },
     [
       agentId,
+      serverId,
       clearSentAttachments,
       queueWriter,
       resetSuppression,
@@ -1682,7 +1698,8 @@ function ComposerContentImpl({
         setAttachments: (nextAttachments) => {
           setSelectedAttachments(composerWorkspaceAttachment.userAttachmentsOnly(nextAttachments));
         },
-        setSendError,
+        setSendError: (message) =>
+          setSendError(message?.startsWith("chi-") ? mentionError(message) : message),
         setIsProcessing,
         onSubmitError: (error) => {
           console.error("[AgentInput] Failed to send message:", error);
@@ -1710,9 +1727,27 @@ function ComposerContentImpl({
     ],
   );
 
+  const validateMentionInput = useCallback(
+    (text: string, outgoingAttachments: ComposerAttachment[]) => {
+      try {
+        assertMentionPrompt({
+          text,
+          attachments: outgoingAttachments,
+          chiMentions: selectedRecipients(serverId, agentId, text),
+        });
+        return true;
+      } catch (error) {
+        setSendError(mentionError(error));
+        return false;
+      }
+    },
+    [serverId, agentId],
+  );
+
   const handleSubmit = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
+      if (!validateMentionInput(payload.text, outgoingAttachments)) return;
       const clientSlashCommand = resolveClientSlashCommand({
         text: payload.text,
         hasAttachments: outgoingAttachments.length > 0,
@@ -1740,6 +1775,7 @@ function ComposerContentImpl({
       pluginClientSlashCommands,
       runPluginClientSlashCommand,
       sendMessageWithContent,
+      validateMentionInput,
     ],
   );
 
@@ -1932,16 +1968,28 @@ function ComposerContentImpl({
 
   const handleEditQueuedMessage = useCallback(
     (id: string) => {
-      const result = editQueuedComposerMessage({
-        agentId,
-        messageId: id,
-        queue: queueWriter,
-      });
-      if (!result) return;
-      replaceUserInput(result.text);
-      setSelectedAttachments(result.attachments);
+      try {
+        const result = editQueuedComposerMessage({
+          agentId,
+          messageId: id,
+          queue: queueWriter,
+        });
+        if (!result) return;
+        clearMentionSelection(serverId, agentId);
+        if (result.chiMentionContext)
+          for (const ownerId of result.chiMentions ?? [])
+            selectMention(serverId, agentId, {
+              ownerId,
+              handle: ownerId.slice(7),
+              context: result.chiMentionContext,
+            });
+        replaceUserInput(result.text);
+        setSelectedAttachments(result.attachments);
+      } catch (error) {
+        setSendError(mentionError(error));
+      }
     },
-    [agentId, queueWriter, replaceUserInput, setSelectedAttachments],
+    [agentId, serverId, queueWriter, replaceUserInput, setSelectedAttachments],
   );
 
   const handleSendQueuedNow = useCallback(
@@ -1952,20 +2000,51 @@ function ComposerContentImpl({
         agentId,
         messageId: id,
         queue: queueWriter,
-        submitMessage: ({ text, attachments: queuedAttachments }) =>
-          submitMessage(text, queuedAttachments),
+        submitMessage: async (queued) => {
+          if (onSubmitMessageRef.current) {
+            if (queued.chiMentions?.length) throw new Error("chi-native-agent-required");
+            await onSubmitMessageRef.current({
+              text: queued.text,
+              attachments: queued.attachments,
+              cwd,
+            });
+            return;
+          }
+          if (!client) throw new Error("chi-host-disconnected");
+          await dispatchComposerAgentMessage({
+            client,
+            serverId,
+            agentId,
+            messageId: queued.id,
+            text: queued.text,
+            attachments: queued.attachments,
+            chiMentions: queued.chiMentions,
+            chiMentionContext: queued.chiMentionContext,
+            activeTurnBehavior: "interrupt",
+            attachmentSubmitFormat: resolveComposerAttachmentSubmitFormat({
+              supportsForgeAttachments: supportsForgeSearch,
+            }),
+            encodeImages,
+            submission: createMessageSubmissionWriter(serverId),
+          });
+        },
         failedToSendMessage: t("composer.errors.failedToSend"),
       });
       if (result.status === "failed") {
-        setSendError(result.errorMessage);
+        setSendError(
+          result.errorMessage.startsWith("chi-")
+            ? mentionError(result.errorMessage)
+            : result.errorMessage,
+        );
       }
     },
-    [agentId, queueWriter, submitMessage, t],
+    [agentId, serverId, client, queueWriter, supportsForgeSearch, cwd, t],
   );
 
   const handleQueue = useCallback(
     (payload: MessagePayload) => {
       const outgoingAttachments = buildOutgoingAttachments(attachments);
+      if (!validateMentionInput(payload.text, outgoingAttachments)) return;
       const clientSlashCommand = resolveClientSlashCommand({
         text: payload.text,
         hasAttachments: outgoingAttachments.length > 0,
@@ -1988,6 +2067,7 @@ function ComposerContentImpl({
       queueMessage,
       runClientSlashCommand,
       runPluginClientSlashCommand,
+      validateMentionInput,
     ],
   );
 

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -58,13 +59,22 @@ interface FakeAgentSessionOptions {
   sessionId?: string;
   memoryMarker?: string | null;
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  onStartTurn?: (
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    sessionId: string,
+  ) => void;
 }
 
 export interface TestAgentClientOptions {
+  nativeRuntime?: NativeRuntime;
   beforeCreateSession?: () => Promise<void>;
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  onStartTurn?: (
+    prompt: AgentPromptInput,
+    options: AgentRunOptions | undefined,
+    sessionId: string,
+  ) => void;
   supportsMcpServers?: boolean;
 }
 
@@ -337,7 +347,7 @@ class FakeAgentSession implements AgentSession {
   private activeForegroundTurnId: string | null = null;
 
   private readonly closeSession: (() => Promise<void>) | undefined;
-  private readonly onStartTurn: ((prompt: AgentPromptInput) => void) | undefined;
+  private readonly onStartTurn: TestAgentClientOptions["onStartTurn"];
 
   constructor(options: FakeAgentSessionOptions) {
     this.capabilities = {
@@ -433,14 +443,17 @@ class FakeAgentSession implements AgentSession {
     return { sessionId: this.id, finalText: resultText, timeline, usage };
   }
 
-  async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+  async startTurn(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ turnId: string }> {
     if (this.activeForegroundTurnId) {
       throw new Error("A foreground turn is already active");
     }
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
     this.activeForegroundTurnId = turnId;
-    this.onStartTurn?.(prompt);
+    this.onStartTurn?.(prompt, options, this.id);
 
     void this.emitTurnEvents(prompt);
 
@@ -1198,6 +1211,13 @@ class FakeAgentSession implements AgentSession {
 }
 
 class FakeAgentClient implements AgentClient {
+  async withNativeRuntime<T>(
+    _sessionId: string | null,
+    operation: (runtime: NativeRuntime) => Promise<T>,
+  ): Promise<T> {
+    if (!this.options.nativeRuntime) throw new Error("No synthetic native runtime configured");
+    return operation(this.options.nativeRuntime);
+  }
   readonly capabilities: AgentCapabilityFlags;
   constructor(
     public readonly provider: string,

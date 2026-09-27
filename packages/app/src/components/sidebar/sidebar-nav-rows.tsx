@@ -1,5 +1,5 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search } from "lucide-react-native";
+import { CalendarClock, History, Plus, Search, AtSign } from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
@@ -170,9 +170,30 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
   );
 }
 
+function SidebarMentionsRow({ onBeforeNavigate }: SidebarNavRowProps) {
+  const active = useActiveWorkspaceSelection();
+  const press = useCallback(() => {
+    onBeforeNavigate?.();
+    router.push({
+      pathname: "/chi",
+      params: { view: "inbox", host: active?.serverId, workspace: active?.workspaceId },
+    });
+  }, [active?.serverId, active?.workspaceId, onBeforeNavigate]);
+  return (
+    <SidebarHeaderRow
+      icon={AtSign}
+      label="Mentions"
+      onPress={press}
+      testID="sidebar-mentions"
+      variant="compact"
+    />
+  );
+}
+
 const BUILTIN_ROWS: Record<BuiltinSidebarNavId, ComponentType<SidebarNavRowProps>> = {
   "new-workspace": SidebarNewWorkspaceRow,
   history: SidebarHistoryRow,
   search: SidebarSearchRow,
   schedules: SidebarSchedulesRow,
+  mentions: SidebarMentionsRow,
 };

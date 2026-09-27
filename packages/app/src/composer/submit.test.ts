@@ -16,6 +16,49 @@ function createDeferredPromise<T>() {
 }
 
 describe("submitAgentInput", () => {
+  it("renders queue-admission failures without clearing the draft or dispatching a prompt", async () => {
+    let text = "/review @recipient";
+    let attachments = [{ id: "image" }];
+    const errors: Array<string | null> = [];
+    const processing: boolean[] = [];
+    let submitted = 0,
+      cleared = 0;
+    const result = await submitAgentInput({
+      message: text,
+      attachments,
+      isAgentRunning: true,
+      canSubmit: true,
+      queueMessage: () => {
+        throw new Error("chi-mention-plain-text-required");
+      },
+      submitMessage: async () => {
+        submitted++;
+      },
+      clearDraft: () => {
+        cleared++;
+      },
+      setUserInput: (value) => {
+        text = value;
+      },
+      setAttachments: (value) => {
+        attachments = value;
+      },
+      setSendError: (value) => {
+        errors.push(value);
+      },
+      setIsProcessing: (value) => {
+        processing.push(value);
+      },
+    });
+    expect(result).toBe("failed");
+    expect(text).toBe("/review @recipient");
+    expect(attachments).toEqual([{ id: "image" }]);
+    expect(errors).toEqual(["chi-mention-plain-text-required"]);
+    expect(processing).toEqual([false]);
+    expect(submitted).toBe(0);
+    expect(cleared).toBe(0);
+  });
+
   it("clears the composer before an in-flight submit resolves", async () => {
     const deferred = createDeferredPromise<void>();
     const queueMessage = vi.fn();

@@ -8,6 +8,7 @@ import {
   type Logger,
 } from "./daemon-client";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   decodeFileTransferFrame,
@@ -176,6 +177,101 @@ function wrapSessionMessage(message: unknown): string {
     message,
   });
 }
+
+test("actual mention send refuses an old host before transport and ordinary messages still send", async () => {
+  const wire = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "mentions",
+    transportFactory: () => wire.transport,
+    logger: createMockLogger(),
+  });
+  clients.push(client);
+  const connected = client.connect();
+  wire.triggerOpen({ features: {} });
+  await connected;
+  wire.sent.length = 0;
+  await expect(
+    client.sendAgentMessage("agent", "@recipient question", {
+      messageId: "mention-id",
+      chiMentions: ["github:recipient"],
+    }),
+  ).rejects.toMatchObject({ message: "chi-mentions-unsupported", failure: { outcome: "unknown" } });
+  expect(wire.sent).toEqual([]);
+  const sent = client.sendAgentMessage("agent", "ordinary", { messageId: "plain-id" });
+  const request = parseSentFrame(wire.sent[0]);
+  expect(request).toMatchObject({
+    type: "send_agent_message_request",
+    text: "ordinary",
+    messageId: "plain-id",
+  });
+  wire.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: { requestId: request.requestId, agentId: "agent", accepted: true, error: null },
+    }),
+  );
+  await sent;
+});
+
+test("mention transport preserves structured logout and proven non-admission without inferring from error strings", async () => {
+  const wire = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "mention-errors",
+    transportFactory: () => wire.transport,
+    logger: createMockLogger(),
+  });
+  clients.push(client);
+  const connected = client.connect();
+  wire.triggerOpen({ features: { chiMentions: true } });
+  await connected;
+  wire.sent.length = 0;
+  const mutation = client.chiMentions({
+    workspaceId: "workspace",
+    operation: { action: "retry", agentId: "agent" },
+  });
+  const request = parseSentFrame(wire.sent.at(-1));
+  wire.triggerMessage(
+    wrapSessionMessage({
+      type: "chi.mentions.execute.response",
+      payload: {
+        requestId: request.requestId,
+        outcome: "failed",
+        error: "chi-github-login-required",
+        failure: { accessLost: true, outcome: "unknown" },
+      },
+    }),
+  );
+  await expect(mutation).rejects.toMatchObject({
+    name: "ChiOperationError",
+    failure: { accessLost: true, outcome: "unknown" },
+  });
+  for (const admission of ["not_admitted", "unknown", undefined]) {
+    const sent = client.sendAgentMessage("agent", "@recipient message", {
+      messageId: "id",
+      chiMentions: ["github:recipient"],
+    });
+    const message = parseSentFrame(wire.sent.at(-1));
+    wire.triggerMessage(
+      wrapSessionMessage({
+        type: "send_agent_message_response",
+        payload: {
+          requestId: message.requestId,
+          agentId: "agent",
+          accepted: false,
+          error: "chi-share-required",
+          ...(admission ? { admission } : {}),
+        },
+      }),
+    );
+    const error = await sent.catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(ChiOperationError);
+    expect(error).toMatchObject({
+      failure: { outcome: admission === "not_admitted" ? "not_committed" : "unknown" },
+    });
+  }
+});
 
 function assertStr(data: string | Uint8Array | ArrayBuffer | undefined): string {
   if (typeof data !== "string") throw new Error("Expected string frame");

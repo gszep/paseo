@@ -17,6 +17,12 @@ export {
 import { TerminalProfileSchema } from "./terminal-profile.js";
 export { TerminalProfileSchema, type TerminalProfile } from "./terminal-profile.js";
 import { z } from "zod";
+import {
+  ChiMentionRequestSchema,
+  ChiMentionResponseSchema,
+  ChiMentionRecipientsSchema,
+  ChiMentionContextSchema,
+} from "./chi-mentions.js";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
 import { AGENT_LIFECYCLE_STATUSES } from "./agent-lifecycle.js";
@@ -1347,6 +1353,9 @@ export const FetchAgentRequestMessageSchema = z.object({
 });
 
 export const SendAgentMessageRequestSchema = z.object({
+  chiMentions: ChiMentionRecipientsSchema.optional(),
+  chiMentionContext: ChiMentionContextSchema.optional(),
+  chiMentionAuthorization: ChiMentionContextSchema.optional(),
   type: z.literal("send_agent_message_request"),
   requestId: z.string(),
   /** Accepts full ID, unique prefix, or exact full title (server resolves). */
@@ -3253,6 +3262,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueRequestSchema,
   ChiConversationRequestSchema,
   ChiShareRequestSchema,
+  ChiMentionRequestSchema,
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
   SessionEventsSetSubscriptionRequestSchema,
@@ -3629,6 +3639,7 @@ export const ServerInfoStatusPayloadSchema = z
       .object({
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         chiNative: z.boolean().optional(),
+        chiMentions: z.boolean().optional(),
         chiCanonical: z.boolean().optional(),
         agentRequestReceipts: z.boolean().optional(),
         // COMPAT(workspaceRequestReceipts): added in v0.8.0; remove gate after 2027-03-07.
@@ -5006,6 +5017,7 @@ export const SendAgentMessageResponseMessageSchema = z.object({
     agentId: z.string(),
     accepted: z.boolean(),
     error: z.string().nullable(),
+    admission: z.enum(["not_admitted", "unknown"]).optional(),
   }),
 });
 
@@ -6824,6 +6836,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueResponseSchema,
   ChiConversationResponseSchema,
   ChiShareResponseSchema,
+  ChiMentionResponseSchema,
   BrowserHostRegisterResponseSchema,
   SubscriptionReleaseResponseSchema,
   SessionEventsSetSubscriptionResponseSchema,

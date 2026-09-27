@@ -55,6 +55,7 @@ import type { TurnLivenessTransition } from "@/timeline/turn-liveness";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import { invalidateCheckoutGitQueriesForServer } from "@/git/query-keys";
 import { queryClient } from "@/data/query-client";
+import { loseHostMentionScopes } from "@/chi/use-mention-scope";
 import {
   invalidateServerDataQueriesAfterReconnect,
   mountServerDataPushRouter,
@@ -62,6 +63,8 @@ import {
 import { mountBrowserAutomationDaemonClientHandler } from "@/desktop/browser/automation/handler";
 import { schedulesQueryBaseKey } from "@/schedules/aggregated-schedules";
 import { dispatchComposerAgentMessage, sendQueuedComposerMessageNow } from "@/composer/actions";
+import { createMentionSubmissions } from "@/chi/mention-submission";
+import { mentionSubmissions } from "@/chi/mention-submission-storage";
 import { createMessageSubmissionWriter } from "@/composer/submission/writer";
 import { resolveComposerAttachmentSubmitFormat } from "@/composer/attachments/submit";
 import { encodeImages } from "@/utils/encode-images";
@@ -1394,6 +1397,7 @@ export class HostRuntimeStore {
   private configuredOverrideBootstrapInFlight: Promise<void> | null = null;
   private bootPromise: Promise<void> | null = null;
   private storage: HostRuntimeStorage;
+  private readonly mentions: typeof mentionSubmissions;
   private replicaCache: ReplicaCache;
   private readonly revokePushNotifications: typeof revokePushNotifications;
 
@@ -1405,6 +1409,7 @@ export class HostRuntimeStore {
   }) {
     this.deps = input?.deps ?? createDefaultDeps();
     this.storage = input?.storage ?? AsyncStorage;
+    this.mentions = input?.storage ? createMentionSubmissions(input.storage) : mentionSubmissions;
     this.replicaCache = new ReplicaCache(input?.replicaRowStore ?? createReplicaRowStore());
     this.revokePushNotifications = input?.revokePushNotifications ?? revokePushNotifications;
   }
@@ -2145,6 +2150,7 @@ export class HostRuntimeStore {
     });
     const previousStatus = this.lastConnectionStatusByServer.get(serverId);
     const statusChanged = previousStatus !== snapshot.connectionStatus;
+    if (statusChanged && snapshot.connectionStatus !== "online") loseHostMentionScopes(serverId);
     const isUnavailable =
       snapshot.connectionStatus !== "online" && snapshot.connectionStatus !== "idle";
     const wasUnavailable =
@@ -2186,11 +2192,17 @@ export class HostRuntimeStore {
           useSessionStore.getState().sessions[serverId]?.queuedMessages.get(queuedAgentId) ?? [],
         write: (update) => useSessionStore.getState().setQueuedMessages(serverId, update),
       },
-      submitMessage: async ({ text, attachments }) => {
+      submitMessage: async ({ id, text, attachments, chiMentions, chiMentionContext }) => {
         const supportsForgeAttachments =
           useSessionStore.getState().sessions[serverId]?.serverInfo?.features?.forgeSearch === true;
         await dispatchComposerAgentMessage({
+          mentions: this.mentions,
           client,
+          serverId,
+          messageId: id,
+          chiMentions,
+          chiMentionContext,
+          activeTurnBehavior: "interrupt",
           agentId,
           text,
           attachments,

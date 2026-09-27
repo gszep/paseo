@@ -1,4 +1,5 @@
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
 import {
   ConnectionSubscriptions,
@@ -358,6 +359,9 @@ export interface DaemonClientTrace {
 }
 
 export interface SendMessageOptions {
+  chiMentions?: string[];
+  chiMentionContext?: import("@getpaseo/protocol/chi-mentions").ChiMentionContext;
+  chiMentionAuthorization?: import("@getpaseo/protocol/chi-mentions").ChiMentionContext;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
@@ -3156,6 +3160,29 @@ export class DaemonClient {
     });
   }
 
+  async chiMentions(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "chi.mentions.execute.request" }>,
+      "type" | "requestId"
+    >,
+  ) {
+    if (this.lastServerInfoMessage?.features?.chiMentions !== true)
+      throw new Error("Update this host to use human mentions.");
+    const requestId = this.createRequestId();
+    const payload = await this.sendRequest({
+      requestId,
+      message: { type: "chi.mentions.execute.request", requestId, ...input },
+      options: { skipQueue: true },
+      select: (msg) =>
+        msg.type === "chi.mentions.execute.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+    if (payload.outcome === "failed") throw new ChiOperationError(payload.error, payload.failure);
+    if (!payload.context) throw new Error("chi-mention-context-required");
+    return { ...payload.result, context: payload.context };
+  }
+
   private requireChiCanonical(): void {
     if (this.getLastServerInfoMessage()?.features?.chiCanonical !== true)
       throw new Error("Update the selected host to continue a Chi transfer.");
@@ -3407,6 +3434,12 @@ export class DaemonClient {
     text: string,
     options?: SendMessageOptions,
   ): Promise<void> {
+    if (options?.chiMentions?.length && this.lastServerInfoMessage?.features?.chiMentions !== true)
+      throw new ChiOperationError("chi-mentions-unsupported", {
+        accessLost: false,
+        // A downgraded host may already have admitted an earlier attempt.
+        outcome: "unknown",
+      });
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({
@@ -3414,10 +3447,13 @@ export class DaemonClient {
       requestId,
       agentId,
       text,
-      ...(messageId ? { messageId } : {}),
-      ...(options?.activeTurnBehavior ? { activeTurnBehavior: options.activeTurnBehavior } : {}),
-      ...(options?.images ? { images: options.images } : {}),
-      ...(options?.attachments ? { attachments: options.attachments } : {}),
+      messageId,
+      chiMentions: options?.chiMentions,
+      chiMentionContext: options?.chiMentionContext,
+      chiMentionAuthorization: options?.chiMentionAuthorization,
+      activeTurnBehavior: options?.activeTurnBehavior,
+      images: options?.images,
+      attachments: options?.attachments,
     });
     const payload = await this.sendRequest({
       requestId,
@@ -3434,7 +3470,10 @@ export class DaemonClient {
       },
     });
     if (!payload.accepted) {
-      throw new Error(payload.error ?? "sendAgentMessage rejected");
+      throw new ChiOperationError(payload.error ?? "sendAgentMessage rejected", {
+        accessLost: false,
+        outcome: payload.admission === "not_admitted" ? "not_committed" : "unknown",
+      });
     }
   }
 

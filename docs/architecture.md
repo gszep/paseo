@@ -119,6 +119,84 @@ The `/chi` route also accepts a prepared `conversationId` and `transferId`
 alongside the exact evidence coordinates. App/daemon drift is gated once by
 `chiCanonical`; there is no fallback to an independent fork.
 
+Human mentions use Chi's existing source-linked handoffs. The composer combines
+authenticated participant suggestions with file suggestions; people carry a person
+icon and file insertion retains its quoted-path behavior. Selecting a person records
+an explicit recipient. Sending requires the existing **Share to Chi** consent first:
+mention selection does not change visibility or implicitly share a session.
+
+The optional `chiMentions` send field is gated on the actual client send path by
+`server_info.features.chiMentions`. Human mentions currently accept plain-text
+prompts only: attachments (including images and expanded skill context) and leading
+slash/skill commands are rejected before queue or daemon message-receipt admission.
+Remove the transformation or clear recipients to send an ordinary agent prompt.
+The daemon fsyncs a preparing fingerprint before publishing mention intent, then
+marks native submission pending before calling the provider. Capture and delivery
+require the intent's fingerprint to match a pending/completed admission. A crash
+between intent publication and native admission cannot turn an ordinary same-ID
+prompt into a mention; preparing receipts can resume only their original request.
+Legacy intent without an admission fingerprint fails closed.
+Settled capture resolves the persisted user message by the
+provider's `paseoClientMessageId` metadata and verifies its text. The native entry ID
+is never inferred from the composer ID, a timestamp, an assistant echo or matching
+text alone. The receipt pins the exact captured snapshot before handoff creation;
+retries after reconnect or daemon restart keep the same recipient, handoff UUID and
+pin. A locally accepted prompt is pending, not delivered. Delivery is shown only
+after Chi acknowledges its durable handoff. Per-agent receipts are bounded to 100
+submitted mention messages, with up to eight selected recipients each.
+
+Queue drain and **Send now** carry the queued message ID, recipients and verified
+context through every attempt. After an uncertain attempt a queued mention cannot
+be edited into a new request. The app saves the whole immutable wire request before
+sending (including attachments and active-turn behavior). **Retry saved send**
+replays that request explicitly; matching draft text never restores recipients.
+**Clear recipients** affects the draft only. Another send for that agent waits for
+confirmation or a structured daemon response proving non-admission. That rejection
+releases the saved request and unlocks queued correction; timeouts and provider
+outcome-unknown errors retain it. Text limits are checked before persistence.
+Unreadable saved state blocks replacement. Storage transactions serialize across
+remounted forms/store instances, and cleanup compares the owning operation before
+removing it, so a late response cannot erase a newer request.
+Definitive rejection is also fenced to its persisted attempt UUID: an older refusal
+cannot unlock correction after a newer attempt of the same operation may have committed.
+
+The **Mentions** route reuses `/chi` and the paired-host/workspace selector. The
+selected host's existing GitHub identity owns its inbox and is displayed explicitly;
+pairing to someone else's host does not sign in as a new Chi principal. Repository,
+handoff and source reads reacquire authorization. The inbox never opens supplied
+URLs or forwards tokens to the browser. Exact source reads and paginated context
+browsing stay on the handoff's immutable snapshot. Failed reacquisition removes
+protected query data across the shared parent/child scope, including exact payloads,
+participant suggestions and delivery state. Keys include host, workspace, verified
+actor, repository and auth generation; requests carry the expected context and the
+daemon rechecks it before mutation and after reads. The generation binds the host
+credential, not the Chi session token reminted during exchange. A delayed response
+from a lost scope cannot restore it. Authority acquisition failures and structured
+access-loss responses (including host GitHub logout) clear the scope on mutations
+as well as reads. Refresh/focus and disconnect suppress previous views. This
+is pull-based access reacquisition, not recall of data already downloaded.
+
+Credential rotation requires explicit **Authorize saved send/reply with current
+credentials** after verification under the same actor and repository. Send
+reauthorization travels separately from the immutable original request/fingerprint;
+reply reauthorization keeps the operation UUID, revision and text. Account or
+repository switches never adopt another principal's saved work: return to the
+original account/repository before reauthorizing. Pending payloads stay hidden
+while authority differs.
+
+Acknowledgement remains a recipient-only lifecycle transition. Replies use
+`POST /handoffs/reply` on the same record and preserve its lifecycle state. A reply
+is not a checked result or incomplete closure. The form saves its operation UUID,
+expected revision, text and verified context before dispatch; an uncertain outcome
+offers the same operation again. Failed/corrupt restore or changed authority blocks
+replacement IDs. Proven revision/scanner rejection is persisted and permits
+**Correct rejected reply**, which refreshes the discussion before a new operation.
+Replies longer than 8,000 characters never enter durable storage. The SDK exposes
+`api.chi.mentions`; the daemon owns credentials, fixed
+backend routes and sanitized failures. No notification transport or account store
+is added. Pi/artifact handoffs remain visible, but in-app exact context browsing is
+currently limited to native evidence.
+
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.
 - **CLI:** Terminal interface for agent workflows that can also start and manage the daemon.

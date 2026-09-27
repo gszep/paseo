@@ -170,6 +170,56 @@ Vitest picks up tests by suffix. The suffix tells the runner which category it b
 
 Browser Playwright specs live in `packages/app/e2e/browser/`. Desktop Playwright and real-Electron E2E live in `packages/desktop/e2e/`. Harness code shared by both suites lives in `packages/app/e2e/support/`; neither suite may place specs there. App Playwright specs that hit real providers use `*.real.spec.ts` and run through `npm run test:e2e:real --workspace=@getpaseo/app`; the default browser project ignores that suffix so CI does not need provider credentials.
 
+`chi-mentions.real.spec.ts` uses the deployed Chi backend and the Sava/Mochi test
+accounts in `gszep/chi-synthetic-two-actor-20260925`. Set
+`CHI_MENTION_TEST_ACTORS_DIR` to the private directory containing
+`sava-the-owl.chi-token` and `mochi-the-kitty.chi-token` (read in-process only).
+From the repository root, run:
+
+```sh
+CHI_MENTION_TEST_ACTORS_DIR=/absolute/private/actor-directory \
+  npm run test:e2e:real --workspace=@getpaseo/app -- e2e/browser/chi-mentions.real.spec.ts --workers=1
+```
+
+It refuses CI, starts Metro on a dynamic port and two isolated daemons, and uses a
+unique run marker in the synthetic title, question and exact-name inbox locators.
+At startup the fixture collects all evidence pages and purges only sources owned
+by its test actor with the `Synthetic human mention acceptance` title prefix;
+completion purges the current run's captured sources too. Run this shared-account
+fixture serially so startup cleanup cannot delete another active acceptance run.
+Its provider is synthetic:
+this checks rendered desktop/compact mention delivery, exact/context reads,
+acknowledgement, lost-response retries, an actual Sava author reply observed by
+Mochi at revision 4, and access revocation,
+without model calls. It does not establish production installation, native
+provider capture or another person's paired-host setup. The spec uses **Share to
+Chi**, **Send message**, **Retry mentions**, **Open mentions**, **Read exact source
+1**, **Browse pinned context**, **Acknowledge**, **Reply to mention**, **Retry saved
+operation** and **Refresh** accessible locators. Source denial must remove the
+entire protected scope and show **Mention context unavailable**. Screenshots and
+failure traces go to the usual app `test-results` directory.
+
+Deterministic coverage lives in `chi/mention-submission.test.ts`,
+`chi/reply-model.test.ts`, `chi/mention-context.test.ts`, `composer/actions.test.ts`
+and the queue cases in `runtime/host-runtime.test.ts` in the app; the client's
+`daemon-client.test.ts`; and server `chi/mentions.test.ts`, `chi/connection.test.ts`
+and `daemon-e2e/agent-rpc-durability.e2e.test.ts`. These cover immutable queued
+requests, Clear versus explicit retry, lost-response plus failed restore, shared
+cache clearing/delayed reads, expected authority, the actual old-host send gate,
+and a real isolated daemon rejecting mention intent on an already-admitted plain
+message ID. Transformation rejection is checked before admission, with the same
+ID still available to an ordinary send. These suites make no model calls.
+Reply regressions exercise the closed-A/remount/committed-B/lost-response race,
+oversize validation and persisted scanner rejection followed by explicit correction.
+Both send and reply regressions reject stale non-commit responses from older attempts.
+Send regressions distinguish proven non-admission from ambiguous outcomes and
+exercise explicit same-principal credential rotation. `message-receipts/index.test.ts`
+and `chi/mentions.test.ts` check durable admission and restart at the intent-publication
+boundary; the latter also checks fixture cleanup ownership/pagination. Mutation
+logout coverage uses the production `chi-github-login-required` code and verifies
+structured client decoding plus parent/child cache clearing. The real-account
+rendered spec remains a separate release gate; deterministic tests do not satisfy it.
+
 Live provider smoke tests belong in `*.real.e2e.test.ts`, not `*.test.ts`, even when guarded by environment variables. Default unit suites must use deterministic provider adapters/fakes so missing credits, auth outages, and upstream model drift do not block normal CI.
 
 Codex MultiAgentV2 real tests use local Codex authentication rather than the OpenRouter-compatible test provider. OpenRouter does not accept Codex collaboration-history items on the parent follow-up request, so it cannot verify a complete native sub-agent turn.

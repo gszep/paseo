@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { SelectedMention } from "@/chi/mention-selection";
+import { selectMention } from "@/chi/mention-selection";
+import { useMentionParticipants } from "@/chi/use-participants";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -53,6 +56,7 @@ interface AgentAutocompleteInputSnapshot {
 }
 
 type AgentAutocompleteOption =
+  | (AutocompleteOption & { type: "human"; participant: SelectedMention })
   | (AutocompleteOption & { type: "client_command"; command: ClientSlashCommand })
   | (AutocompleteOption & {
       type: "plugin_command";
@@ -401,6 +405,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
 
   const client = useHostRuntimeClient(serverId);
   const isConnected = useHostRuntimeIsConnected(serverId);
+  const people = useMentionParticipants(serverId, agentId, showFileAutocomplete);
 
   const mode = resolveAutocompleteMode({ showFileAutocomplete, showCommandAutocomplete });
   const canShowAutocomplete = resolveAutocompleteIsVisible({
@@ -460,33 +465,56 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     placeholderData: keepPreviousData,
   });
 
-  const options = useMemo<AgentAutocompleteOption[]>(
-    () =>
-      buildCommandAutocompleteOptions({
-        activeFileMention,
-        commandFilterQuery,
-        commands,
-        pluginCommands: pluginClientSlashCommands,
-        activeSlashCommand,
-        fileSuggestions: fileSuggestionsQuery.data ?? [],
-        isDraftContext,
-        isVisible,
-        mode,
-        t,
-      }),
-    [
+  const options = useMemo<AgentAutocompleteOption[]>(() => {
+    const files = buildCommandAutocompleteOptions({
       activeFileMention,
-      activeSlashCommand,
       commandFilterQuery,
       commands,
-      pluginClientSlashCommands,
-      fileSuggestionsQuery.data,
+      pluginCommands: pluginClientSlashCommands,
+      activeSlashCommand,
+      fileSuggestions: fileSuggestionsQuery.data ?? [],
       isDraftContext,
       isVisible,
       mode,
       t,
-    ],
-  );
+    });
+    const canShowPeople = mode === "file" && isConnected && people.isSuccess && !people.isFetching;
+    if (!canShowPeople) return files;
+    if (
+      activeFileMention &&
+      activeFileMention.start > 0 &&
+      !/[\s(]/.test(userInput[activeFileMention.start - 1]!)
+    )
+      return files;
+    const participants: AgentAutocompleteOption[] = (people.data ?? [])
+      .filter((p) => p.handle.toLowerCase().includes(fileFilterQuery.toLowerCase()))
+      .map((participant) => ({
+        type: "human",
+        id: `human:${participant.ownerId}`,
+        kind: "human",
+        label: `@${participant.handle}`,
+        description: "Person · Chi",
+        participant,
+      }));
+    return [...participants, ...files];
+  }, [
+    activeFileMention,
+    activeSlashCommand,
+    commandFilterQuery,
+    commands,
+    pluginClientSlashCommands,
+    fileSuggestionsQuery.data,
+    isDraftContext,
+    isVisible,
+    mode,
+    t,
+    people.data,
+    people.isSuccess,
+    people.isFetching,
+    isConnected,
+    fileFilterQuery,
+    userInput,
+  ]);
 
   const onSelectOption = useCallback(
     (option: AutocompleteOption, snapshot?: AgentAutocompleteInputSnapshot) => {
@@ -531,6 +559,14 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       }
 
       if (!current.fileMention) return;
+      if (selected.type === "human") {
+        selectMention(serverId, agentId, selected.participant);
+        setUserInput(
+          `${current.text.slice(0, current.fileMention.start)}@${selected.participant.handle} ${current.text.slice(current.fileMention.end)}`,
+        );
+        onAutocompleteApplied?.();
+        return;
+      }
       const nextInput = applyFileMentionReplacement({
         text: current.text,
         mention: current.fileMention,
@@ -548,6 +584,8 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       cursorIndex,
       activeFileMention,
       activeSlashCommand,
+      serverId,
+      agentId,
     ],
   );
 

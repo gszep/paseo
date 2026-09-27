@@ -139,7 +139,16 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
   - **Protocol contract (always):** an old client parses messages from a new daemon, and a new daemon parses messages from an old client. New fields are optional; never narrow, never remove, never require. Wire schemas stay pure — no `.transform()`, `.catch()`, or `.preprocess()`.
   - **Feature contract (per-feature):** gate the capability once on `server_info.features.*`, then run the feature or tell the user to update the host. No fallback paths, no defensive branches.
   - **Every shim is tagged.** `// COMPAT(name): added in vX, remove after <date>` at the site that has to be deleted. `rg "COMPAT\("` is the cleanup backlog; untagged back-compat is permanent by accident.
-  - **New RPCs use dotted namespaces with direction suffixes.** Follow [docs/rpc-namespacing.md](docs/rpc-namespacing.md): `domain.provider.operation.request` pairs with `domain.provider.operation.response`. Existing flat RPC names will migrate over time; don't add new ones.
+- **New RPCs use dotted namespaces with direction suffixes.** Follow [docs/rpc-namespacing.md](docs/rpc-namespacing.md): `domain.provider.operation.request` pairs with `domain.provider.operation.response`. Existing flat RPC names will migrate over time; don't add new ones.
+
+Chi human mentions and inbox reuse source-linked handoffs and the existing explicit
+Share flow. Admission, queued-send recovery and protected inbox state are specified
+in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
+regressions and isolated two-account rendered acceptance in
+[testing](docs/testing.md#test-organization); the latter is a separate release gate
+and runs serially because its test-account fixture purges stale owned evidence.
+Saved operation recovery must distinguish proven rejection from uncertain delivery;
+credential rotation requires explicit same-principal reauthorization.
 
 ## Platform gating
 

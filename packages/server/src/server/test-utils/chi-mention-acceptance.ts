@@ -1,0 +1,260 @@
+import { readFile, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { DaemonClient } from "./daemon-client.js";
+import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
+import { append, endpointUrl } from "@henkaku-center/chi-native/http";
+import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
+import { createTestPaseoDaemon } from "./paseo-daemon.js";
+import { createTestAgentClient } from "./fake-agent-client.js";
+import { z } from "zod";
+import { mentionFixtureTitle, purgeMentionFixtureSources } from "./chi-mention-fixture-sources.js";
+
+const repo = "github:gszep/chi-synthetic-two-actor-20260925";
+interface NativeMessage {
+  id: string;
+  type: "user";
+  text: string;
+  metadata: { paseoClientMessageId: string };
+  time: { created: number };
+}
+
+/** Live Chi identities and storage; a synthetic provider owns the native IDs and makes no model calls. */
+export async function startMentionActor(
+  actor: "sava-the-owl" | "mochi-the-kitty",
+  origin: string,
+  runId: string,
+) {
+  if (process.env.CI) throw new Error("Live Chi acceptance refuses CI");
+  const credentials = process.env.CHI_MENTION_TEST_ACTORS_DIR;
+  if (!credentials)
+    throw new Error("Set CHI_MENTION_TEST_ACTORS_DIR to the private test-account token directory");
+  const token = (await readFile(join(credentials, `${actor}.chi-token`), "utf8")).trim();
+  async function removeSource(sourceId: string) {
+    const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+    url.searchParams.set("sourceId", sourceId);
+    const response = await fetch(url, {
+      method: "DELETE",
+      redirect: "error",
+      headers: { authorization: `Bearer ${token}`, "x-chi-repo": repo },
+    });
+    if (!response.ok) throw new Error(`Synthetic source purge failed: ${response.status}`);
+    await response.body?.cancel();
+  }
+  await purgeMentionFixtureSources({
+    actor,
+    remove: removeSource,
+    list: async (cursor) => {
+      const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+      url.searchParams.set("limit", "100");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url, {
+        redirect: "error",
+        headers: { authorization: `Bearer ${token}`, "x-chi-repo": repo },
+      });
+      if (!response.ok) throw new Error(`Synthetic source listing failed: ${response.status}`);
+      return response.json();
+    },
+  });
+  const cwd = await mkdtemp(join(tmpdir(), "paseo-mention-project-"));
+  execFileSync("git", ["init", "-q", cwd]);
+  execFileSync("git", [
+    "-C",
+    cwd,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/gszep/chi-synthetic-two-actor-20260925.git",
+  ]);
+  await writeFile(join(cwd, "mention-file.txt"), "Synthetic file autocomplete fixture\n");
+  const messages = new Map<string, NativeMessage[]>();
+  const runtime: NativeRuntime = {
+    identity: `synthetic:${actor}`,
+    info: async () => ({ version: "synthetic" }),
+    schema: async () => ({}),
+    get: async () => null,
+    export: async (sessionId) => ({
+      info: {
+        id: sessionId,
+        title: `${mentionFixtureTitle} ${runId}`,
+        location: { directory: cwd },
+      },
+      messages: messages.get(sessionId) ?? [],
+    }),
+    import: async () => {
+      throw new Error("No native mutation in mention acceptance");
+    },
+    fork: async () => {
+      throw new Error("No native mutation in mention acceptance");
+    },
+  };
+  let loseCreateReply = false,
+    loseReplyReply = false;
+  const createdSources = new Set<string>();
+  const createAttempts: string[] = [];
+  const replyAttempts: string[] = [];
+  const authority = {
+    endpoint: DEFAULT_BACKEND_URL,
+    login: async () => ({
+      schemaVersion: 1 as const,
+      identityProvider: "github",
+      repoProvider: "github",
+      createdAt: new Date().toISOString(),
+      sessionToken: token,
+      chiUserId: `github:${actor}`,
+    }),
+    request: (async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const response = await fetch(url, init);
+      if (path.endsWith("/evidence") && init?.method === "POST" && response.ok) {
+        const body = await response.clone().json();
+        if (typeof body.sourceId === "string") createdSources.add(body.sourceId);
+      }
+      if (path.endsWith("/handoffs") && init?.method === "POST") {
+        createAttempts.push(String(init.body));
+        if (loseCreateReply && response.ok) {
+          loseCreateReply = false;
+          await response.body?.cancel();
+          throw new Error("Synthetic lost reply after actual durable handoff creation");
+        }
+      }
+      if (path.endsWith("/handoffs/reply") && init?.method === "POST") {
+        replyAttempts.push(String(init.body));
+        if (loseReplyReply && response.ok) {
+          loseReplyReply = false;
+          await response.body?.cancel();
+          throw new Error("Synthetic lost reply after actual durable response creation");
+        }
+      }
+      return response;
+    }) satisfies typeof fetch,
+  };
+  const agentClient = createTestAgentClient("opencode", {
+    nativeRuntime: runtime,
+    onStartTurn(prompt, options, sessionId) {
+      if (!options?.clientMessageId || typeof prompt !== "string")
+        throw new Error("Synthetic fixture requires a correlated text prompt");
+      const previous = messages.get(sessionId) ?? [];
+      previous.push({
+        id: `msg_synthetic_${randomUUID()}`,
+        type: "user",
+        text: prompt,
+        metadata: { paseoClientMessageId: options.clientMessageId },
+        time: { created: Date.now() },
+      });
+      messages.set(sessionId, previous);
+    },
+  });
+  process.env.PASEO_SUPERVISED = "0";
+  const host = await createTestPaseoDaemon({
+    chiAuthority: authority,
+    agentClients: { opencode: agentClient },
+    corsAllowedOrigins: [origin],
+    mcpEnabled: false,
+  });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${host.port}/ws`,
+    appVersion: "0.9.0-beta.2",
+  });
+  await client.connect();
+  await client.fetchAgents();
+  const serverId = client.getLastServerInfoMessage()?.serverId;
+  if (!serverId) throw new Error("Missing isolated host identity");
+  const project = await client.addProject(cwd);
+  if (!project.project) throw new Error("Synthetic project creation failed");
+  const created = await client.createWorkspace({
+    source: { kind: "directory", path: cwd, projectId: project.project.projectId },
+  });
+  const workspace = created.workspace;
+  if (!workspace) throw new Error("Synthetic workspace missing");
+  const agent = await client.createAgent({
+    provider: "opencode",
+    cwd,
+    workspaceId: workspace.id,
+    title: `Mention acceptance ${actor} ${runId}`,
+    modeId: "default",
+  });
+  async function sourceRequest(path: string, method: string, body?: unknown) {
+    const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), path), {
+      method,
+      redirect: "error",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-chi-repo": repo,
+        "content-type": "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!response.ok)
+      throw new Error(`Synthetic fixture cleanup/access mutation failed: ${response.status}`);
+  }
+  return {
+    workspaceId: workspace.id,
+    agentId: agent.id,
+    serverId,
+    port: host.port,
+    createAttempts,
+    replyAttempts,
+    loseNextCreateReply() {
+      loseCreateReply = true;
+    },
+    loseNextReplyReply() {
+      loseReplyReply = true;
+    },
+    async hideSources() {
+      for (const sourceId of createdSources)
+        await sourceRequest("evidence/visibility", "PATCH", { sourceId, visibility: "private" });
+    },
+    async close() {
+      try {
+        for (const sourceId of createdSources) await removeSource(sourceId);
+      } finally {
+        await client.removeProject(project.project!.projectId);
+        await client.close();
+        await host.close();
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+const actor = z.enum(["sava-the-owl", "mochi-the-kitty"]).parse(process.argv[2]);
+const origin = z.string().url().parse(process.argv[3]);
+const runId = z.string().uuid().parse(process.argv[4]);
+const instance = await startMentionActor(actor, origin, runId);
+process.send?.({
+  type: "ready",
+  serverId: instance.serverId,
+  workspaceId: instance.workspaceId,
+  agentId: instance.agentId,
+  port: instance.port,
+});
+process.on("message", async (value) => {
+  const request = z
+    .object({
+      id: z.string(),
+      action: z.enum(["lose-create", "lose-reply", "hide", "attempts", "close"]),
+    })
+    .parse(value);
+  try {
+    if (request.action === "lose-create") instance.loseNextCreateReply();
+    if (request.action === "lose-reply") instance.loseNextReplyReply();
+    if (request.action === "hide") await instance.hideSources();
+    if (request.action === "close") await instance.close();
+    process.send?.({
+      id: request.id,
+      ok: true,
+      createAttempts: instance.createAttempts,
+      replyAttempts: instance.replyAttempts,
+    });
+    if (request.action === "close") process.disconnect();
+  } catch (error) {
+    process.send?.({
+      id: request.id,
+      ok: false,
+      error: error instanceof Error ? error.message : "fixture-operation-failed",
+    });
+  }
+});
