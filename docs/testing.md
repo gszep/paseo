@@ -170,6 +170,17 @@ Vitest picks up tests by suffix. The suffix tells the runner which category it b
 
 Browser Playwright specs live in `packages/app/e2e/browser/`. Desktop Playwright and real-Electron E2E live in `packages/desktop/e2e/`. Harness code shared by both suites lives in `packages/app/e2e/support/`; neither suite may place specs there. App Playwright specs that hit real providers use `*.real.spec.ts` and run through `npm run test:e2e:real --workspace=@getpaseo/app`; the default browser project ignores that suffix so CI does not need provider credentials.
 
+`chi-mentions.real.spec.ts` uses the deployed Chi backend and the Sava/Mochi test
+accounts in their synthetic repository. Set `CHI_MENTION_TEST_ACTORS_DIR` to a
+private directory containing their `<handle>.chi-token` files, then target that
+spec with the app's `test:e2e:real` script. It refuses CI, starts two isolated
+daemons, and purges its captured sources on completion. Its provider is synthetic:
+this checks rendered desktop/compact mention delivery, exact/context reads,
+acknowledgement, lost-response retries, sender replies and access revocation,
+without model calls. It does not establish production installation, native
+provider capture or another person's paired-host setup. Receipt/reply-model unit
+tests cover deterministic restart and retry behavior without live credentials.
+
 Live provider smoke tests belong in `*.real.e2e.test.ts`, not `*.test.ts`, even when guarded by environment variables. Default unit suites must use deterministic provider adapters/fakes so missing credits, auth outages, and upstream model drift do not block normal CI.
 
 Codex MultiAgentV2 real tests use local Codex authentication rather than the OpenRouter-compatible test provider. OpenRouter does not accept Codex collaboration-history items on the parent follow-up request, so it cannot verify a complete native sub-agent turn.

@@ -55,6 +55,7 @@ import type { TurnLivenessTransition } from "@/timeline/turn-liveness";
 import { useWorkspaceSetupStore } from "@/stores/workspace-setup-store";
 import { invalidateCheckoutGitQueriesForServer } from "@/git/query-keys";
 import { queryClient } from "@/data/query-client";
+import { loseHostMentionScopes } from "@/chi/use-mention-scope";
 import {
   invalidateServerDataQueriesAfterReconnect,
   mountServerDataPushRouter,
@@ -2145,6 +2146,7 @@ export class HostRuntimeStore {
     });
     const previousStatus = this.lastConnectionStatusByServer.get(serverId);
     const statusChanged = previousStatus !== snapshot.connectionStatus;
+    if (statusChanged && snapshot.connectionStatus !== "online") loseHostMentionScopes(serverId);
     const isUnavailable =
       snapshot.connectionStatus !== "online" && snapshot.connectionStatus !== "idle";
     const wasUnavailable =
@@ -2186,11 +2188,16 @@ export class HostRuntimeStore {
           useSessionStore.getState().sessions[serverId]?.queuedMessages.get(queuedAgentId) ?? [],
         write: (update) => useSessionStore.getState().setQueuedMessages(serverId, update),
       },
-      submitMessage: async ({ text, attachments }) => {
+      submitMessage: async ({ id, text, attachments, chiMentions, chiMentionContext }) => {
         const supportsForgeAttachments =
           useSessionStore.getState().sessions[serverId]?.serverInfo?.features?.forgeSearch === true;
         await dispatchComposerAgentMessage({
           client,
+          serverId,
+          messageId: id,
+          chiMentions,
+          chiMentionContext,
+          activeTurnBehavior: "interrupt",
           agentId,
           text,
           attachments,

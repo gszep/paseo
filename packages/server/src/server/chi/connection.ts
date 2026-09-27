@@ -38,6 +38,8 @@ import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/htt
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
+import { ChiMentions, type MentionIdentity } from "./mentions.js";
+import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 
 const label = "chi.native";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -128,6 +130,7 @@ const deployment: ChiAuthority = {
 };
 
 export class ChiConnection {
+  readonly mentions: ChiMentions;
   private readonly registrationPermits = new WeakMap<
     object,
     { sessionId: string; cwd: string; workspaceId: string; labels: string }
@@ -286,7 +289,74 @@ export class ChiConnection {
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
-  ) {}
+  ) {
+    this.mentions = new ChiMentions(options.home, this.authority);
+  }
+
+  private async mentionIdentity(cwd: string): Promise<MentionIdentity> {
+    const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+      cwd,
+      timeout: 5000,
+    });
+    const parsed = parseGitHubRemote(remote.stdout);
+    if (!parsed) throw new Error("chi-repository-mismatch");
+    const repo = `github:${parsed.owner}/${parsed.repo}`;
+    const auth = await this.authorize(repo, cwd);
+    return { repo, actor: auth.chiUserId.toLowerCase(), token: auth.sessionToken };
+  }
+
+  async prepareMentions(
+    agentId: string,
+    messageId: string | undefined,
+    text: string,
+    recipients: string[],
+    expectedContext?: ChiMentionContext,
+  ) {
+    const agent = this.manager.getAgent(agentId);
+    if (!agent || agent.provider !== "opencode" || !messageId)
+      throw new Error("chi-native-agent-required");
+    const association = this.association(agent);
+    if (!association) throw new Error("chi-share-required");
+    const identity = await this.mentionIdentity(agent.cwd);
+    this.requireMentionContext(identity, expectedContext);
+    if (identity.actor !== association.actor.toLowerCase() || identity.repo !== association.repo)
+      throw new Error("chi-identity-mismatch");
+    await this.mentions.prepare({ agentId, messageId, text, recipients, identity });
+  }
+
+  private mentionContext(identity: MentionIdentity): ChiMentionContext {
+    return { actor: identity.actor, repo: identity.repo, generation: createHash("sha256").update(JSON.stringify([this.authority.endpoint, identity.actor, identity.repo, identity.token])).digest("hex") };
+  }
+
+  private requireMentionContext(identity: MentionIdentity, expected?: ChiMentionContext) {
+    const current = this.mentionContext(identity);
+    if (!expected || current.actor !== expected.actor || current.repo !== expected.repo || current.generation !== expected.generation)
+      throw new Error("chi-mention-context-changed");
+  }
+
+  async mentionOperation(cwd: string, workspaceId: string, operation: ChiMentionOperation, expectedContext?: ChiMentionContext) {
+    const identity = await this.mentionIdentity(cwd);
+    const context = this.mentionContext(identity);
+    if (operation.action === "scope") return { context, result: { kind: "scope" as const, actor: identity.actor } };
+    this.requireMentionContext(identity, expectedContext);
+    const result = await this.executeMentionOperation(cwd, workspaceId, identity, operation);
+    // A delayed read cannot republish data after the host changed identity/repository.
+    this.requireMentionContext(await this.mentionIdentity(cwd), context);
+    return { context, result };
+  }
+
+  private async executeMentionOperation(cwd: string, workspaceId: string, identity: MentionIdentity, operation: Exclude<ChiMentionOperation, { action: "scope" }>) {
+    if (operation.action !== "delivery" && operation.action !== "retry")
+      return this.mentions.execute(identity, operation);
+    const agent = this.manager.getAgent(operation.agentId);
+    if (!agent || agent.workspaceId !== workspaceId || agent.cwd !== cwd)
+      throw new Error("chi-native-agent-required");
+    if (operation.action === "retry") {
+      if (this.manager.isChiAgentBusy(agent.id)) throw new Error("chi-session-busy");
+      if (await this.mentions.retry(agent.id, identity)) await this.capture(agent.id);
+    }
+    return this.mentions.status(agent.id, identity);
+  }
 
   private association(agent: ManagedAgent): Association | null {
     const encoded = agent.labels[label];
@@ -410,7 +480,7 @@ export class ChiConnection {
       const auth = await this.authorize(association.repo, agent.cwd);
       if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
       const sessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
-      const result = await this.manager.withNativeRuntime(sessionId, async (runtime) => {
+      return await this.manager.withNativeRuntime(sessionId, async (runtime) => {
         const native = JSON.stringify(await runtime.export(sessionId));
         const current = this.manager.getAgent(agentId);
         if (
@@ -435,14 +505,30 @@ export class ChiConnection {
           visibility: "shared" as const,
           coverage: { kind: "export" as const, reason: null },
         };
-        return retryConflict
+        const captured = await (retryConflict
           ? retryCaptureNative(input, auth.chiUserId, this.authority.request)
-          : captureNative(input, this.authority.request);
-      });
-      return await this.patchAssociation(agentId, {
-        sourceId: result.sourceId,
-        head: result.head,
-        error: null,
+          : captureNative(input, this.authority.request));
+        const parsed = prepareNativeCapture(input);
+        const updated = await this.patchAssociation(agentId, {
+          sourceId: captured.sourceId,
+          head: captured.head,
+          error: null,
+        });
+        await this.mentions.captured({
+          agentId,
+          identity: {
+            repo: association.repo,
+            actor: auth.chiUserId.toLowerCase(),
+            token: auth.sessionToken,
+          },
+          sourceId: captured.sourceId,
+          snapshot: captured.head,
+          messages: parsed.entries.map((entry) => ({
+            id: entry.nativeId,
+            payload: parsed.payloads[entry.revision]!,
+          })),
+        });
+        return updated;
       });
     } catch (error) {
       const code = safeChiError(error);

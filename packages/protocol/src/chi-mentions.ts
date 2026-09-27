@@ -1,0 +1,157 @@
+import { z } from "zod";
+
+const id = z.string().min(1).max(256);
+const hash = z.string().regex(/^[a-f0-9]{64}$/);
+const principal = z.string().regex(/^github:[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
+const text = z.string().min(1).max(8000);
+export const ChiMentionContextSchema = z.object({ actor: principal, repo: id, generation: hash });
+export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
+export const ChiParticipantSchema = z.object({ ownerId: principal, handle: id });
+export type ChiParticipant = z.infer<typeof ChiParticipantSchema>;
+export const ChiMentionRecipientsSchema = z.array(principal).min(1).max(8);
+export const ChiSourceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("neutral"), id, snapshot: hash, entryId: id }),
+  z.object({ kind: z.literal("session"), id, entryId: id.optional() }),
+  z.object({ kind: z.literal("artifact"), id, entryId: id.optional() }),
+]);
+export type ChiSource = z.infer<typeof ChiSourceSchema>;
+const state = z.enum(["open", "acknowledged", "working", "resolved", "declined"]);
+export const ChiHandoffSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: z.string().uuid(),
+  repo: id,
+  author: principal,
+  recipient: principal,
+  text,
+  sources: z.array(ChiSourceSchema).min(1).max(8),
+  state,
+  revision: z.number().int().positive(),
+  createdAt: id,
+  updatedAt: id,
+  events: z.array(
+    z.object({ actor: principal, state, at: id, revision: z.number().int().positive() }),
+  ),
+  resolution: z
+    .discriminatedUnion("incomplete", [
+      z.object({ incomplete: z.literal(true), text }),
+      z.object({
+        incomplete: z.literal(false),
+        text,
+        result: ChiSourceSchema,
+        check: ChiSourceSchema,
+      }),
+    ])
+    .optional(),
+  replies: z
+    .array(
+      z.object({
+        id: z.string().uuid(),
+        actor: principal,
+        text,
+        at: id,
+        revision: z.number().int().positive(),
+      }),
+    )
+    .max(50)
+    .optional(),
+});
+export type ChiHandoff = z.infer<typeof ChiHandoffSchema>;
+export const ChiDeliverySchema = z.object({
+  messageId: id,
+  recipient: ChiParticipantSchema,
+  handoffId: z.string().uuid(),
+  status: z.enum(["pending", "delivered", "failed"]),
+  error: z.string().nullable(),
+});
+export type ChiDelivery = z.infer<typeof ChiDeliverySchema>;
+export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("scope") }),
+  z.object({ action: z.literal("participants") }),
+  z.object({
+    action: z.literal("list"),
+    inbox: z.boolean(),
+    offset: z.number().int().nonnegative(),
+  }),
+  z.object({ action: z.literal("read"), id: z.string().uuid() }),
+  z.object({
+    action: z.literal("source"),
+    id: z.string().uuid(),
+    index: z.number().int().min(0).max(7),
+    entryId: id.optional(),
+  }),
+  z.object({
+    action: z.literal("context"),
+    id: z.string().uuid(),
+    index: z.number().int().min(0).max(7),
+    cursor: z.string().max(4096).optional(),
+  }),
+  z.object({
+    action: z.literal("acknowledge"),
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    revision: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal("reply"),
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    text,
+  }),
+  z.object({ action: z.literal("delivery"), agentId: id }),
+  z.object({ action: z.literal("retry"), agentId: id }),
+]);
+export type ChiMentionOperation = z.infer<typeof ChiMentionOperationSchema>;
+export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("scope"), actor: principal }),
+  z.object({
+    kind: z.literal("participants"),
+    actor: principal,
+    participants: z.array(ChiParticipantSchema),
+  }),
+  z.object({
+    kind: z.literal("list"),
+    actor: principal,
+    handoffs: z.array(ChiHandoffSchema),
+    nextOffset: z.number().int().nonnegative().nullable(),
+  }),
+  z.object({ kind: z.literal("handoff"), actor: principal, handoff: ChiHandoffSchema }),
+  z.object({
+    kind: z.literal("source"),
+    actor: principal,
+    source: ChiSourceSchema,
+    payload: z.string().max(1024 * 1024),
+  }),
+  z.object({
+    kind: z.literal("context"),
+    actor: principal,
+    source: ChiSourceSchema,
+    entries: z.array(z.object({ nativeId: id, type: id })).max(30),
+    nextCursor: z.string().nullable(),
+  }),
+  z.object({
+    kind: z.literal("delivery"),
+    actor: principal,
+    deliveries: z.array(ChiDeliverySchema),
+  }),
+]);
+export type ChiMentionResult = z.infer<typeof ChiMentionResultSchema>;
+export const ChiMentionRequestSchema = z.object({
+  type: z.literal("chi.mentions.execute.request"),
+  requestId: z.string(),
+  workspaceId: id,
+  operation: ChiMentionOperationSchema,
+  expectedContext: ChiMentionContextSchema.optional(),
+});
+export const ChiMentionResponseSchema = z.object({
+  type: z.literal("chi.mentions.execute.response"),
+  payload: z.discriminatedUnion("outcome", [
+    z.object({
+      requestId: z.string(),
+      outcome: z.literal("ready"),
+      result: ChiMentionResultSchema,
+      context: ChiMentionContextSchema.optional(),
+    }),
+    z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
+  ]),
+});

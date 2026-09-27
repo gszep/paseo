@@ -3042,10 +3042,45 @@ export class Session {
     }
   }
 
+  private async handleChiMentions(
+    msg: Extract<SessionInboundMessage, { type: "chi.mentions.execute.request" }>,
+  ): Promise<void> {
+    try {
+      if (!this.agentManager.chi) throw new Error("chi-unavailable");
+      const workspace = await this.workspaceRegistry.get(msg.workspaceId);
+      if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
+      if (msg.operation.action === "delivery" || msg.operation.action === "retry") {
+        await ensureAgentLoaded(msg.operation.agentId, {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.sessionLogger,
+        });
+      }
+      const { result, context } = await this.agentManager.chi.mentionOperation(
+        workspace.cwd,
+        workspace.workspaceId,
+        msg.operation,
+        msg.expectedContext,
+      );
+      this.emit({
+        type: "chi.mentions.execute.response",
+        payload: { requestId: msg.requestId, outcome: "ready", result, context },
+      });
+    } catch (error) {
+      this.emit({
+        type: "chi.mentions.execute.response",
+        payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
+      });
+    }
+  }
+
   private async dispatchMiscMessage(msg: SessionInboundMessage): Promise<void> {
     switch (msg.type) {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
+        return;
+      case "chi.mentions.execute.request":
+        await this.handleChiMentions(msg);
         return;
       case "chi.native.continue.request":
         await this.handleChiContinue(msg);
@@ -8172,6 +8207,8 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      if (msg.chiMentions && (!msg.messageId || msg.text.trimStart().startsWith("/") || msg.images?.length || msg.attachments?.length))
+        throw new Error("chi-mention-plain-text-required");
       this.sessionLogger.trace(
         {
           agentId,
@@ -8182,6 +8219,12 @@ export class Session {
         "agent.session.send_agent_message",
       );
       const send = async () => {
+        // Runs only after the immutable message fingerprint has been admitted durably.
+        // A rejected reuse of a plain message ID must never create executable mention intent.
+        if (msg.chiMentions) {
+          if (!this.agentManager.chi) throw new Error("chi-unavailable");
+          await this.agentManager.chi.prepareMentions(agentId, msg.messageId, msg.text, msg.chiMentions, msg.chiMentionContext);
+        }
         const result = await sendPromptToAgent({
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
@@ -8204,7 +8247,12 @@ export class Session {
         await this.messageReceipts.send({
           agentId,
           messageId: msg.messageId,
-          request: { prompt, activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt" },
+          request: {
+            prompt,
+            activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+            ...(msg.chiMentions ? { chiMentions: msg.chiMentions } : {}),
+            ...(msg.chiMentionContext ? { chiMentionContext: msg.chiMentionContext } : {}),
+          },
           prepare: async () => {
             await this.prepareAgentMessage(agentId, msg.text);
           },

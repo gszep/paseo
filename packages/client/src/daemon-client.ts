@@ -358,6 +358,8 @@ export interface DaemonClientTrace {
 }
 
 export interface SendMessageOptions {
+  chiMentions?: string[];
+  chiMentionContext?: import("@getpaseo/protocol/chi-mentions").ChiMentionContext;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
@@ -3156,6 +3158,29 @@ export class DaemonClient {
     });
   }
 
+  async chiMentions(
+    input: Omit<
+      Extract<SessionInboundMessage, { type: "chi.mentions.execute.request" }>,
+      "type" | "requestId"
+    >,
+  ) {
+    if (this.lastServerInfoMessage?.features?.chiMentions !== true)
+      throw new Error("Update this host to use human mentions.");
+    const requestId = this.createRequestId();
+    const payload = await this.sendRequest({
+      requestId,
+      message: { type: "chi.mentions.execute.request", requestId, ...input },
+      options: { skipQueue: true },
+      select: (msg) =>
+        msg.type === "chi.mentions.execute.response" && msg.payload.requestId === requestId
+          ? msg.payload
+          : null,
+    });
+    if (payload.outcome === "failed") throw new Error(payload.error);
+    if (!payload.context) throw new Error("chi-mention-context-required");
+    return { ...payload.result, context: payload.context };
+  }
+
   private requireChiCanonical(): void {
     if (this.getLastServerInfoMessage()?.features?.chiCanonical !== true)
       throw new Error("Update the selected host to continue a Chi transfer.");
@@ -3407,6 +3432,8 @@ export class DaemonClient {
     text: string,
     options?: SendMessageOptions,
   ): Promise<void> {
+    if (options?.chiMentions?.length && this.lastServerInfoMessage?.features?.chiMentions !== true)
+      throw new Error("chi-mentions-unsupported");
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({
@@ -3415,6 +3442,8 @@ export class DaemonClient {
       agentId,
       text,
       ...(messageId ? { messageId } : {}),
+      ...(options?.chiMentions ? { chiMentions: options.chiMentions } : {}),
+      ...(options?.chiMentionContext ? { chiMentionContext: options.chiMentionContext } : {}),
       ...(options?.activeTurnBehavior ? { activeTurnBehavior: options.activeTurnBehavior } : {}),
       ...(options?.images ? { images: options.images } : {}),
       ...(options?.attachments ? { attachments: options.attachments } : {}),
