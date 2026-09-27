@@ -142,9 +142,10 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
 - **New RPCs use dotted namespaces with direction suffixes.** Follow [docs/rpc-namespacing.md](docs/rpc-namespacing.md): `domain.provider.operation.request` pairs with `domain.provider.operation.response`. Existing flat RPC names will migrate over time; don't add new ones.
 
 Chi human mentions and inbox reuse source-linked handoffs and the existing explicit
-Share flow. Preserve exact persisted user-entry correlation, immutable retry pins,
-authenticated host identity and reply/lifecycle separation; see
-[architecture](docs/architecture.md#components-at-a-glance).
+Share flow. Admission, queued-send recovery and protected inbox state are specified
+in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
+regressions and isolated two-account rendered acceptance in
+[testing](docs/testing.md#test-organization); the latter is a separate release gate.
 
 ## Platform gating
 

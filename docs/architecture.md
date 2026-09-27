@@ -125,9 +125,15 @@ icon and file insertion retains its quoted-path behavior. Selecting a person rec
 an explicit recipient. Sending requires the existing **Share to Chi** consent first:
 mention selection does not change visibility or implicitly share a session.
 
-The optional `chiMentions` send field is gated by `server_info.features.chiMentions`.
-Before native submission the daemon reserves a private delivery receipt under its
-existing Chi home. Settled capture resolves the persisted user message by the
+The optional `chiMentions` send field is gated on the actual client send path by
+`server_info.features.chiMentions`. Human mentions currently accept plain-text
+prompts only: attachments (including images and expanded skill context) and leading
+slash/skill commands are rejected before queue or daemon message-receipt admission.
+Remove the transformation or clear recipients to send an ordinary agent prompt.
+Only after the immutable message fingerprint is admitted does the daemon reserve
+a private delivery receipt under its existing Chi home, before native submission.
+A conflicting reuse of an ordinary prompt's ID cannot create mention intent.
+Settled capture resolves the persisted user message by the
 provider's `paseoClientMessageId` metadata and verifies its text. The native entry ID
 is never inferred from the composer ID, a timestamp, an assistant echo or matching
 text alone. The receipt pins the exact captured snapshot before handoff creation;
@@ -136,20 +142,35 @@ pin. A locally accepted prompt is pending, not delivered. Delivery is shown only
 after Chi acknowledges its durable handoff. Per-agent receipts are bounded to 100
 submitted mention messages, with up to eight selected recipients each.
 
+Queue drain and **Send now** carry the queued message ID, recipients and verified
+context through every attempt. After an uncertain attempt a queued mention cannot
+be edited into a new request. The app saves the whole immutable wire request before
+sending (including attachments and active-turn behavior). **Retry saved send**
+replays that request explicitly; matching draft text never restores recipients.
+**Clear recipients** affects the draft only. Another send for that agent waits for
+confirmation of the saved request. Unreadable saved state blocks replacement, and
+a late retry response cannot erase a newer request.
+
 The **Mentions** route reuses `/chi` and the paired-host/workspace selector. The
 selected host's existing GitHub identity owns its inbox and is displayed explicitly;
 pairing to someone else's host does not sign in as a new Chi principal. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context
 browsing stay on the handoff's immutable snapshot. Failed reacquisition removes
-protected query data; refresh/focus and disconnect suppress previous views. This
+protected query data across the shared parent/child scope, including exact payloads,
+participant suggestions and delivery state. Keys include host, workspace, verified
+actor, repository and auth generation; requests carry the expected context and the
+daemon rechecks it before mutation and after reads. The generation binds the host
+credential, not the Chi session token reminted during exchange. A delayed response
+from a lost scope cannot restore it. Refresh/focus and disconnect suppress previous views. This
 is pull-based access reacquisition, not recall of data already downloaded.
 
 Acknowledgement remains a recipient-only lifecycle transition. Replies use
 `POST /handoffs/reply` on the same record and preserve its lifecycle state. A reply
 is not a checked result or incomplete closure. The form saves its operation UUID,
-expected revision and text before dispatch; an uncertain outcome offers the same
-operation again. A revision conflict requires an explicit refresh before a new
+expected revision, text and verified context before dispatch; an uncertain outcome
+offers the same operation again. Failed/corrupt restore or changed authority blocks
+replacement IDs. A revision conflict requires an explicit refresh before a new
 operation. The SDK exposes `api.chi.mentions`; the daemon owns credentials, fixed
 backend routes and sanitized failures. No notification transport or account store
 is added. Pi/artifact handoffs remain visible, but in-app exact context browsing is

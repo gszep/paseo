@@ -171,15 +171,38 @@ Vitest picks up tests by suffix. The suffix tells the runner which category it b
 Browser Playwright specs live in `packages/app/e2e/browser/`. Desktop Playwright and real-Electron E2E live in `packages/desktop/e2e/`. Harness code shared by both suites lives in `packages/app/e2e/support/`; neither suite may place specs there. App Playwright specs that hit real providers use `*.real.spec.ts` and run through `npm run test:e2e:real --workspace=@getpaseo/app`; the default browser project ignores that suffix so CI does not need provider credentials.
 
 `chi-mentions.real.spec.ts` uses the deployed Chi backend and the Sava/Mochi test
-accounts in their synthetic repository. Set `CHI_MENTION_TEST_ACTORS_DIR` to a
-private directory containing their `<handle>.chi-token` files, then target that
-spec with the app's `test:e2e:real` script. It refuses CI, starts two isolated
+accounts in `gszep/chi-synthetic-two-actor-20260925`. Set
+`CHI_MENTION_TEST_ACTORS_DIR` to the private directory containing
+`sava-the-owl.chi-token` and `mochi-the-kitty.chi-token` (read in-process only).
+From the repository root, run:
+
+```sh
+CHI_MENTION_TEST_ACTORS_DIR=/absolute/private/actor-directory \
+  npm run test:e2e:real --workspace=@getpaseo/app -- e2e/browser/chi-mentions.real.spec.ts --workers=1
+```
+
+It refuses CI, starts Metro on a dynamic port and two isolated
 daemons, and purges its captured sources on completion. Its provider is synthetic:
 this checks rendered desktop/compact mention delivery, exact/context reads,
 acknowledgement, lost-response retries, sender replies and access revocation,
 without model calls. It does not establish production installation, native
-provider capture or another person's paired-host setup. Receipt/reply-model unit
-tests cover deterministic restart and retry behavior without live credentials.
+provider capture or another person's paired-host setup. The spec uses **Share to
+Chi**, **Send message**, **Retry mentions**, **Open mentions**, **Read exact source
+1**, **Browse pinned context**, **Acknowledge**, **Reply to mention**, **Retry saved
+operation** and **Refresh** accessible locators. Source denial must remove the
+entire protected scope and show **Mention context unavailable**. Screenshots and
+failure traces go to the usual app `test-results` directory.
+
+Deterministic coverage lives in `chi/mention-submission.test.ts`,
+`chi/reply-model.test.ts`, `chi/mention-context.test.ts`, `composer/actions.test.ts`
+and the queue cases in `runtime/host-runtime.test.ts` in the app; the client's
+`daemon-client.test.ts`; and server `chi/mentions.test.ts`, `chi/connection.test.ts`
+and `daemon-e2e/agent-rpc-durability.e2e.test.ts`. These cover immutable queued
+requests, Clear versus explicit retry, lost-response plus failed restore, shared
+cache clearing/delayed reads, expected authority, the actual old-host send gate,
+and a real isolated daemon rejecting mention intent on an already-admitted plain
+message ID. Transformation rejection is checked before admission, with the same
+ID still available to an ordinary send. These suites make no model calls.
 
 Live provider smoke tests belong in `*.real.e2e.test.ts`, not `*.test.ts`, even when guarded by environment variables. Default unit suites must use deterministic provider adapters/fakes so missing credits, auth outages, and upstream model drift do not block normal CI.
 

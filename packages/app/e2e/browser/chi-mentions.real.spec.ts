@@ -40,6 +40,15 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
       timeout: 30000,
     });
     await sendPage.getByText("@mochi-the-kitty", { exact: true }).click();
+    await input.fill("/review @mochi-the-kitty");
+    await sendPage.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect(
+      sendPage.getByText(
+        "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(input).toHaveValue("/review @mochi-the-kitty");
     const question = "@mochi-the-kitty Please inspect this synthetic persisted message.";
     await input.fill(question);
     await sender.loseNextCreateReply();
@@ -133,7 +142,7 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
     });
     await sender.hideSources();
     await readPage.getByRole("button", { name: "Refresh", exact: true }).click();
-    await expect(readPage.getByText("Discussion unavailable", { exact: true })).toBeVisible({
+    await expect(readPage.getByText("Mention context unavailable", { exact: true })).toBeVisible({
       timeout: 30000,
     });
     await expect(readPage.getByText(/paseoClientMessageId/)).toHaveCount(0);
