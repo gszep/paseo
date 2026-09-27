@@ -88,6 +88,12 @@ Pi RPC extension UI dialog requests (`select`, `input`, `editor`, `confirm`) are
 
 OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than the tested 2.0.10 SDK at runtime selection. Runtime selection uses the configured command and environment and lasts until provider configuration reload. Keep upstream SDK types inside the version-specific adapter. OpenCode owns storage migration; a missing native session must fail resume rather than create a replacement. V2 has no native archive/unarchive operation: archiving affects Paseo only. V1 retains native archiving.
 
+The V2 transfer preflight uses the credential owner's bounded HTTP adapter for destination
+session lookup. Only HTTP 404 means the replica is absent. The SDK wraps transport errors,
+so testing a caught SDK error directly for the underlying HTTP-error class loses that distinction.
+Authorization and other failures must propagate before native import; managed transfer and
+receipt recovery remain governed by the [Chi connection contract](architecture.md#components-at-a-glance).
+
 V2 context usage follows the native TUI's last measured assistant after completed compaction and
 before the staged rewind boundary (verified against upstream 2.0.10 and 2.0.15). Session token
 totals are lifetime usage and cannot measure context. Native output excludes reasoning; input
@@ -227,6 +233,8 @@ Keep the protocol shape provider-agnostic. Do not add provider-specific renderer
 Kimi Code usage follows the CLI-managed credential file at `KIMI_CODE_HOME` or `~/.kimi-code/credentials/kimi-code.json`; do not probe the legacy `~/.kimi` path as the primary source for current Kimi Code installs.
 
 Cursor usage reads the desktop `state.vscdb` token first, then `cursor-agent`'s `~/.config/cursor/auth.json`. Headless hosts only have the CLI file.
+
+Codex usage reads the Codex CLI `auth.json` first, then OpenCode's ChatGPT OAuth login from the `credential` table of `$XDG_DATA_HOME/opencode/opencode.db` (default `~/.local/share/opencode`), which is the subscription Paseo's OpenCode agents actually consume. Candidates with a known past expiry are skipped and a rejected token falls through to the next; a host that only uses OpenCode still gets the Session/Weekly windows.
 
 ### Usage fetchers are read-only on credentials
 

@@ -379,6 +379,8 @@ export interface PaseoAgentHandle {
    */
   commands(options?: PaseoAgentCommandsOptions): Promise<PaseoAgentCommandsResult>;
   archive(): Promise<{ archivedAt: string }>;
+  /** Cancels the running turn; the agent stays available for later prompts. */
+  cancel(): Promise<void>;
   detach(): Promise<void>;
   subscribe(handler: (update: PaseoAgentUpdate) => void): () => void;
 }
@@ -988,6 +990,9 @@ function createAgentHandleFactory(
           current = { ...current, archivedAt: result.archivedAt };
         }
         return result;
+      },
+      cancel: async () => {
+        await daemonClient.cancelAgent(id);
       },
       detach: async () => {
         await daemonClient.detachAgent(id);

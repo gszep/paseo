@@ -233,7 +233,9 @@ function evaluateBundle(bundle: string): void {
   if (typeof setup !== "function") {
     throw new Error("Plugin server bundle must default export a function");
   }
+  if (!paseo) throw new Error("Plugin Paseo API is unavailable");
   const contributedCleanup = setup({
+    paseo,
     handle: register,
     registerProvider,
     registerSettings,
