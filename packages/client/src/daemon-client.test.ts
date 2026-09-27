@@ -177,6 +177,42 @@ function wrapSessionMessage(message: unknown): string {
   });
 }
 
+test("actual mention send refuses an old host before transport and ordinary messages still send", async () => {
+  const wire = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "mentions",
+    transportFactory: () => wire.transport,
+    logger: createMockLogger(),
+  });
+  clients.push(client);
+  const connected = client.connect();
+  wire.triggerOpen({ features: {} });
+  await connected;
+  wire.sent.length = 0;
+  await expect(
+    client.sendAgentMessage("agent", "@recipient question", {
+      messageId: "mention-id",
+      chiMentions: ["github:recipient"],
+    }),
+  ).rejects.toThrow("chi-mentions-unsupported");
+  expect(wire.sent).toEqual([]);
+  const sent = client.sendAgentMessage("agent", "ordinary", { messageId: "plain-id" });
+  const request = parseSentFrame(wire.sent[0]);
+  expect(request).toMatchObject({
+    type: "send_agent_message_request",
+    text: "ordinary",
+    messageId: "plain-id",
+  });
+  wire.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: { requestId: request.requestId, agentId: "agent", accepted: true, error: null },
+    }),
+  );
+  await sent;
+});
+
 function assertStr(data: string | Uint8Array | ArrayBuffer | undefined): string {
   if (typeof data !== "string") throw new Error("Expected string frame");
   return data;

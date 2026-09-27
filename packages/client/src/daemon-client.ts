@@ -3441,12 +3441,12 @@ export class DaemonClient {
       requestId,
       agentId,
       text,
-      ...(messageId ? { messageId } : {}),
-      ...(options?.chiMentions ? { chiMentions: options.chiMentions } : {}),
-      ...(options?.chiMentionContext ? { chiMentionContext: options.chiMentionContext } : {}),
-      ...(options?.activeTurnBehavior ? { activeTurnBehavior: options.activeTurnBehavior } : {}),
-      ...(options?.images ? { images: options.images } : {}),
-      ...(options?.attachments ? { attachments: options.attachments } : {}),
+      messageId,
+      chiMentions: options?.chiMentions,
+      chiMentionContext: options?.chiMentionContext,
+      activeTurnBehavior: options?.activeTurnBehavior,
+      images: options?.images,
+      attachments: options?.attachments,
     });
     const payload = await this.sendRequest({
       requestId,

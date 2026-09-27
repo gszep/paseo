@@ -22,6 +22,7 @@ export interface MentionIdentity {
   repo: string;
   actor: string;
   token: string;
+  credentialGeneration?: string;
 }
 export interface MentionAuthority {
   endpoint: string;

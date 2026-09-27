@@ -146,6 +146,112 @@ async function fixture() {
 }
 
 describe("Chi owner recovery", () => {
+  it("mention requests bind actor, repository and auth generation before mutations, while reminted sessions keep the credential generation", async () => {
+    const f = await fixture();
+    let actor = "github:owner",
+      token = "token-one",
+      credentialGeneration = "credential-one",
+      repo = f.input.repo;
+    const operations: string[] = [];
+    f.authority.login = async () => ({
+      chiUserId: actor,
+      sessionToken: token,
+      credentialGeneration,
+    });
+    f.authority.request = async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (route === "/auth/session") return Response.json({ ok: true, chiUserId: actor });
+      if (route === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
+      operations.push(`${init?.method} ${route}`);
+      return Response.json({ ok: true, handoffs: [], nextOffset: null });
+    };
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    const mutation = {
+      action: "reply" as const,
+      id: "handoff",
+      operationId: "stable",
+      revision: 1,
+      text: "reply",
+    };
+    await expect(owner.mentionOperation(f.home, "workspace", mutation)).rejects.toThrow(
+      "chi-mention-context-changed",
+    );
+    actor = "github:other";
+    await expect(
+      owner.mentionOperation(f.home, "workspace", mutation, scope.context),
+    ).rejects.toThrow("chi-mention-context-changed");
+    actor = "github:owner";
+    credentialGeneration = "credential-two";
+    await expect(
+      owner.mentionOperation(f.home, "workspace", mutation, scope.context),
+    ).rejects.toThrow("chi-mention-context-changed");
+    credentialGeneration = "credential-one";
+    repo = "github:fixture/other";
+    execFileSync("git", [
+      "-C",
+      f.home,
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/fixture/other.git",
+    ]);
+    await expect(
+      owner.mentionOperation(f.home, "workspace", mutation, scope.context),
+    ).rejects.toThrow("chi-mention-context-changed");
+    expect(operations).toEqual([]);
+    repo = f.input.repo;
+    execFileSync("git", [
+      "-C",
+      f.home,
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/fixture/repo.git",
+    ]);
+    token = "reminted-session";
+    expect(
+      await owner.mentionOperation(
+        f.home,
+        "workspace",
+        { action: "list", inbox: true, offset: 0 },
+        scope.context,
+      ),
+    ).toEqual({
+      context: scope.context,
+      result: { kind: "list", actor, handoffs: [], nextOffset: null },
+    });
+    expect(operations).toEqual(["GET /handoffs"]);
+  });
+
+  it("a delayed mention read cannot publish protected content after repository access is lost", async () => {
+    const f = await fixture();
+    const started = barrier(),
+      release = barrier();
+    let denied = false;
+    f.authority.request = async (url) => {
+      const route = new URL(String(url)).pathname;
+      if (route === "/auth/session") return Response.json({ ok: true, chiUserId: "github:owner" });
+      if (route === "/repos")
+        return Response.json({ ok: true, repos: denied ? [] : [{ repo: f.input.repo }] });
+      started.resolve();
+      await release.promise;
+      return Response.json({ ok: true, handoffs: [], nextOffset: null });
+    };
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    const read = owner.mentionOperation(
+      f.home,
+      "workspace",
+      { action: "list", inbox: true, offset: 0 },
+      scope.context,
+    );
+    await started.promise;
+    denied = true;
+    release.resolve();
+    await expect(read).rejects.toThrow("chi-repository-denied");
+  });
+
   it("rejects bare pins and incomplete transfer coordinates before authorization or native mutation", async () => {
     const f = await fixture();
     for (const canonical of [

@@ -117,7 +117,7 @@ export interface ChiConnectionOptions {
 export interface ChiAuthority {
   endpoint: string;
   request: typeof fetch;
-  login(): Promise<AuthState>;
+  login(): Promise<AuthState & { credentialGeneration?: string }>;
 }
 const deployment: ChiAuthority = {
   endpoint: DEFAULT_BACKEND_URL,
@@ -125,7 +125,13 @@ const deployment: ChiAuthority = {
   async login() {
     const githubToken = readGitHubCliToken();
     if (!githubToken) throw new Error("chi-github-login-required");
-    return exchangeGitHubToken({ githubToken, backendUrl: DEFAULT_BACKEND_URL });
+    const session = await exchangeGitHubToken({ githubToken, backendUrl: DEFAULT_BACKEND_URL });
+    // Session tokens are reminted on exchange. Bind UI intent to the host credential,
+    // not the short-lived token's issue time, while still reacquiring authorization.
+    return {
+      ...session,
+      credentialGeneration: createHash("sha256").update(githubToken).digest("hex"),
+    };
   },
 };
 
@@ -302,7 +308,12 @@ export class ChiConnection {
     if (!parsed) throw new Error("chi-repository-mismatch");
     const repo = `github:${parsed.owner}/${parsed.repo}`;
     const auth = await this.authorize(repo, cwd);
-    return { repo, actor: auth.chiUserId.toLowerCase(), token: auth.sessionToken };
+    return {
+      repo,
+      actor: auth.chiUserId.toLowerCase(),
+      token: auth.sessionToken,
+      credentialGeneration: auth.credentialGeneration,
+    };
   }
 
   async prepareMentions(
@@ -325,19 +336,43 @@ export class ChiConnection {
   }
 
   private mentionContext(identity: MentionIdentity): ChiMentionContext {
-    return { actor: identity.actor, repo: identity.repo, generation: createHash("sha256").update(JSON.stringify([this.authority.endpoint, identity.actor, identity.repo, identity.token])).digest("hex") };
+    return {
+      actor: identity.actor,
+      repo: identity.repo,
+      generation: createHash("sha256")
+        .update(
+          JSON.stringify([
+            this.authority.endpoint,
+            identity.actor,
+            identity.repo,
+            identity.credentialGeneration ?? identity.token,
+          ]),
+        )
+        .digest("hex"),
+    };
   }
 
   private requireMentionContext(identity: MentionIdentity, expected?: ChiMentionContext) {
     const current = this.mentionContext(identity);
-    if (!expected || current.actor !== expected.actor || current.repo !== expected.repo || current.generation !== expected.generation)
+    if (
+      !expected ||
+      current.actor !== expected.actor ||
+      current.repo !== expected.repo ||
+      current.generation !== expected.generation
+    )
       throw new Error("chi-mention-context-changed");
   }
 
-  async mentionOperation(cwd: string, workspaceId: string, operation: ChiMentionOperation, expectedContext?: ChiMentionContext) {
+  async mentionOperation(
+    cwd: string,
+    workspaceId: string,
+    operation: ChiMentionOperation,
+    expectedContext?: ChiMentionContext,
+  ) {
     const identity = await this.mentionIdentity(cwd);
     const context = this.mentionContext(identity);
-    if (operation.action === "scope") return { context, result: { kind: "scope" as const, actor: identity.actor } };
+    if (operation.action === "scope")
+      return { context, result: { kind: "scope" as const, actor: identity.actor } };
     this.requireMentionContext(identity, expectedContext);
     const result = await this.executeMentionOperation(cwd, workspaceId, identity, operation);
     // A delayed read cannot republish data after the host changed identity/repository.
@@ -345,7 +380,12 @@ export class ChiConnection {
     return { context, result };
   }
 
-  private async executeMentionOperation(cwd: string, workspaceId: string, identity: MentionIdentity, operation: Exclude<ChiMentionOperation, { action: "scope" }>) {
+  private async executeMentionOperation(
+    cwd: string,
+    workspaceId: string,
+    identity: MentionIdentity,
+    operation: Exclude<ChiMentionOperation, { action: "scope" }>,
+  ) {
     if (operation.action !== "delivery" && operation.action !== "retry")
       return this.mentions.execute(identity, operation);
     const agent = this.manager.getAgent(operation.agentId);

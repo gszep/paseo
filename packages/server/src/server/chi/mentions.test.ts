@@ -197,6 +197,27 @@ test("human mentions reject file and email adjacency", () => {
     expect(hasMention(text, "SteffenPL")).toBe(false);
 });
 
+test("exact metadata cannot authorize transformed or duplicate user entries", async () => {
+  const f = await fixture();
+  const sender = f.restart();
+  await sender.prepare(f.input);
+  const message = f.capture.messages[0]!;
+  await sender.captured({
+    ...f.capture,
+    messages: [
+      { ...message, payload: { ...message.payload, text: `${f.input.text}\nexpanded attachment` } },
+    ],
+  });
+  expect(f.submissions).toEqual([]);
+  await sender.captured({
+    ...f.capture,
+    messages: [message, { ...message, id: "second-native-user" }],
+  });
+  expect(f.submissions).toEqual([]);
+  await sender.captured(f.capture);
+  expect(f.submissions).toHaveLength(1);
+});
+
 test("source and neighboring context reads reacquire the handoff and retain its pinned snapshot", async () => {
   const f = await fixture();
   const sender = f.restart();

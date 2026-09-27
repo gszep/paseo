@@ -8207,7 +8207,13 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
-      if (msg.chiMentions && (!msg.messageId || msg.text.trimStart().startsWith("/") || msg.images?.length || msg.attachments?.length))
+      if (
+        msg.chiMentions &&
+        (!msg.messageId ||
+          msg.text.trimStart().startsWith("/") ||
+          msg.images?.length ||
+          msg.attachments?.length)
+      )
         throw new Error("chi-mention-plain-text-required");
       this.sessionLogger.trace(
         {
@@ -8219,12 +8225,6 @@ export class Session {
         "agent.session.send_agent_message",
       );
       const send = async () => {
-        // Runs only after the immutable message fingerprint has been admitted durably.
-        // A rejected reuse of a plain message ID must never create executable mention intent.
-        if (msg.chiMentions) {
-          if (!this.agentManager.chi) throw new Error("chi-unavailable");
-          await this.agentManager.chi.prepareMentions(agentId, msg.messageId, msg.text, msg.chiMentions, msg.chiMentionContext);
-        }
         const result = await sendPromptToAgent({
           agentManager: this.agentManager,
           agentStorage: this.agentStorage,
@@ -8255,6 +8255,19 @@ export class Session {
           },
           prepare: async () => {
             await this.prepareAgentMessage(agentId, msg.text);
+            // Serialized after fingerprint admission, before the provider's pending receipt.
+            // A rejected ID reuse cannot persist intent; failed preflight never marks a
+            // provider turn as outcome-unknown when it was not attempted.
+            if (msg.chiMentions) {
+              if (!this.agentManager.chi) throw new Error("chi-unavailable");
+              await this.agentManager.chi.prepareMentions(
+                agentId,
+                msg.messageId,
+                msg.text,
+                msg.chiMentions,
+                msg.chiMentionContext,
+              );
+            }
           },
           send,
         });
