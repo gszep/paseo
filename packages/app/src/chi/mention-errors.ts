@@ -2,6 +2,14 @@ export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
   const copy: Record<string, string> = {
     "chi-share-required": "Share this session to Chi before sending a human mention.",
+    "chi-mentions-unsupported": "Update this host to use Chi mentions.",
+    "chi-mention-plain-text-required":
+      "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",
+    "chi-mention-context-changed":
+      "The host account, repository or credentials changed. Verify mention context before continuing; saved operations retain their original identity.",
+    "chi-mention-submission-unresolved":
+      "A saved send is unconfirmed. Use Retry saved send to confirm that exact request before starting another send.",
+    "chi-host-disconnected": "Reconnect this host, then verify mention context.",
     "chi-session-busy": "Waiting for the current turn to settle. Retry after it finishes.",
     "chi-mention-persisted-entry-required":
       "The exact user message is not in a settled capture yet. Retry after the turn finishes.",

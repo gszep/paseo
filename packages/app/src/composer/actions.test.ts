@@ -292,6 +292,101 @@ function createFakeQueue(
 const passthroughEncodeImages = async (images: AttachmentMetadata[]) =>
   images.map((image) => ({ data: image.id, mimeType: image.mimeType }));
 
+it("queue drain and send-now carry immutable mention recipients and message identity through retries", async () => {
+  const queue = createFakeQueue();
+  const context = {
+    actor: "github:sender",
+    repo: "github:fixture/repo",
+    generation: "a".repeat(64),
+  };
+  const recipients = ["github:recipient"];
+  const queued = queueComposerMessage({
+    agentId: "agent",
+    text: "@recipient question",
+    attachments: [],
+    chiMentions: recipients,
+    chiMentionContext: context,
+    queue,
+  }).queued!;
+  recipients.push("github:other");
+  const first = createFakeSendClient({ rejection: new Error("response lost") });
+  const submission = createFakeStream();
+  const dispatch = (client: ComposerSendClient) => async (item: QueuedComposerMessage) =>
+    dispatchComposerAgentMessage({
+      client,
+      agentId: "agent",
+      messageId: item.id,
+      text: item.text,
+      attachments: item.attachments,
+      chiMentions: item.chiMentions,
+      chiMentionContext: item.chiMentionContext,
+      activeTurnBehavior: "interrupt",
+      encodeImages: passthroughEncodeImages,
+      submission,
+    });
+  expect(
+    await sendQueuedComposerMessageNow({
+      agentId: "agent",
+      messageId: queued.id,
+      queue,
+      submitMessage: dispatch(first),
+    }),
+  ).toEqual({ status: "failed", errorMessage: "response lost" });
+  expect(() =>
+    editQueuedComposerMessage({ agentId: "agent", messageId: queued.id, queue }),
+  ).toThrow("chi-mention-submission-unresolved");
+  const retry = createFakeSendClient();
+  expect(
+    await sendQueuedComposerMessageNow({
+      agentId: "agent",
+      messageId: queued.id,
+      queue,
+      submitMessage: dispatch(retry),
+    }),
+  ).toEqual({ status: "submitted" });
+  expect(retry.calls).toEqual(first.calls);
+  expect(retry.calls[0].options).toMatchObject({
+    messageId: queued.id,
+    chiMentions: ["github:recipient"],
+    chiMentionContext: context,
+    activeTurnBehavior: "interrupt",
+  });
+  expect(queue.read("agent")).toEqual([]);
+});
+
+it("mentions with attachments or slash/skill commands fail before optimistic submission or queue admission", async () => {
+  for (const input of [
+    { text: "/review @recipient", attachments: [] },
+    { text: "/skill @recipient", attachments: [] },
+    { text: "@recipient", attachments: [{ kind: "image" as const, metadata: imageMetadata }] },
+  ]) {
+    const client = createFakeSendClient();
+    const submission = createFakeStream();
+    await expect(
+      dispatchComposerAgentMessage({
+        ...input,
+        client,
+        agentId: "agent",
+        chiMentions: ["github:recipient"],
+        encodeImages: passthroughEncodeImages,
+        submission,
+      }),
+    ).rejects.toThrow("chi-mention-plain-text-required");
+    expect(client.calls).toEqual([]);
+    expect(submission.head.size).toBe(0);
+    const queue = createFakeQueue();
+    expect(() =>
+      queueComposerMessage({
+        ...input,
+        agentId: "agent",
+        chiMentions: ["github:recipient"],
+        queue,
+      }),
+    ).toThrow("chi-mention-plain-text-required");
+    expect(queue.read("agent")).toEqual([]);
+  }
+});
+
 describe("cancelComposerAgent", () => {
   function baseInput(): {
     client: ComposerCancelClient & { canceledIds: string[] };
@@ -822,7 +917,7 @@ describe("sendQueuedComposerMessageNow", () => {
     });
     expect(result).toEqual({ status: "submitted" });
     expect(queue.state.get("agent")).toEqual([]);
-    expect(submitted).toEqual([{ text: "send me", attachments: [review] }]);
+    expect(submitted).toEqual([{ id: "msg-1", text: "send me", attachments: [review] }]);
   });
 
   it("restores the queued entry to the front and surfaces the error message on failure", async () => {

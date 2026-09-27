@@ -2128,6 +2128,7 @@ describe("HostRuntimeStore", () => {
         }),
         getClientId: async () => "cid_legacy_transitions",
       },
+      storage: createMemoryHostRuntimeStorage(),
     });
     const sessionStore = useSessionStore.getState();
     sessionStore.initializeSession(host.serverId, fakeClient as unknown as DaemonClient, 1);
@@ -2680,6 +2681,7 @@ describe("HostRuntimeStore", () => {
       pageTwo.promise,
     );
     const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
       deps: {
         createClient: () => fakeClient as unknown as DaemonClient,
         connectToDaemon: async () => ({
@@ -2765,6 +2767,7 @@ describe("HostRuntimeStore", () => {
     const send = new Deferred<void>();
     fakeClient.sendAgentMessageResponses.push(send.promise);
     const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
       deps: {
         createClient: () => fakeClient as unknown as DaemonClient,
         connectToDaemon: async () => ({
@@ -2830,6 +2833,7 @@ describe("HostRuntimeStore", () => {
     const fakeClient = new FakeDaemonClient();
     fakeClient.sendAgentMessageFailures.push(new Error("connection lost"));
     const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
       deps: {
         createClient: () => fakeClient as unknown as DaemonClient,
         connectToDaemon: async () => ({
@@ -2842,17 +2846,20 @@ describe("HostRuntimeStore", () => {
     });
     const sessionStore = useSessionStore.getState();
     sessionStore.initializeSession(host.serverId, fakeClient as unknown as DaemonClient, 1);
+    const mention = {
+      id: "first",
+      text: "@recipient retry me",
+      attachments: [],
+      chiMentions: ["github:recipient"],
+      chiMentionContext: {
+        actor: "github:sender",
+        repo: "github:fixture/repo",
+        generation: "a".repeat(64),
+      },
+    };
     sessionStore.setQueuedMessages(
       host.serverId,
-      new Map([
-        [
-          "agent",
-          [
-            { id: "first", text: "retry me", attachments: [] },
-            { id: "second", text: "keep me behind", attachments: [] },
-          ],
-        ],
-      ]),
+      new Map([["agent", [mention, { id: "second", text: "keep me behind", attachments: [] }]]]),
     );
 
     store.drainQueuedAgentMessage(host.serverId, "agent");
@@ -2862,11 +2869,19 @@ describe("HostRuntimeStore", () => {
       expect(
         useSessionStore.getState().sessions[host.serverId]?.queuedMessages.get("agent"),
       ).toEqual([
-        { id: "first", text: "retry me", attachments: [] },
+        { ...mention, attempted: true },
         { id: "second", text: "keep me behind", attachments: [] },
       ]);
     });
 
+    store.drainQueuedAgentMessage(host.serverId, "agent");
+    await fakeClient.waitForSentMessages(2);
+    expect(fakeClient.sentAgentMessages[0]).toEqual(fakeClient.sentAgentMessages[1]);
+    expect(fakeClient.sentAgentMessages[1][2]).toMatchObject({
+      messageId: "first",
+      chiMentions: mention.chiMentions,
+      chiMentionContext: mention.chiMentionContext,
+    });
     useSessionStore.getState().clearSession(host.serverId);
   });
 
@@ -2876,6 +2891,7 @@ describe("HostRuntimeStore", () => {
     const send = new Deferred<void>();
     fakeClient.sendAgentMessageResponses.push(send.promise);
     const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
       deps: {
         createClient: () => fakeClient as unknown as DaemonClient,
         connectToDaemon: async () => ({
@@ -2911,6 +2927,7 @@ describe("HostRuntimeStore", () => {
     const host = makeHost({ serverId: "srv_legacy_queue_attachment" });
     const fakeClient = new FakeDaemonClient();
     const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
       deps: {
         createClient: () => fakeClient as unknown as DaemonClient,
         connectToDaemon: async () => ({

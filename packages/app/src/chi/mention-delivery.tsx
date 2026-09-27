@@ -1,24 +1,37 @@
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { useFetchQuery } from "@/data/query";
 import { router } from "expo-router";
 import { useCallback, useSyncExternalStore } from "react";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { mentionError } from "./mention-errors";
 import { useMentionScope } from "./use-mention-scope";
-import { readMentionSubmission, retryMentionSubmission } from "./mention-submission";
-import { sameMentionContext } from "./mention-context";
+import { mentionSubmissions } from "./mention-submission-storage";
+import { sameMentionContext, mentionQueryKey, type MentionScope } from "./mention-context";
 import {
   mentionSelection,
   subscribeMentionSelection,
   clearMentionSelection,
 } from "./mention-selection";
 
-export function MentionDelivery({ serverId, agentId }: { serverId: string; agentId: string }) {
+interface AgentTarget {
+  serverId: string;
+  agentId: string;
+}
+interface ProtectedTarget extends AgentTarget {
+  client: DaemonClient;
+  scope: MentionScope;
+  identity: ChiMentionContext;
+  queryKey: readonly unknown[];
+}
+
+export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   const client = useHostRuntimeClient(serverId);
   const connected = useHostRuntimeIsConnected(serverId);
   const workspaceId = useSessionStore(
@@ -30,48 +43,8 @@ export function MentionDelivery({ serverId, agentId }: { serverId: string; agent
   const shared = useSessionStore((state) =>
     Boolean(state.sessions[serverId]?.agents.get(agentId)?.labels["chi.native"]),
   );
-  const selected = useSyncExternalStore(
-    subscribeMentionSelection,
-    () => mentionSelection(serverId, agentId),
-    () => mentionSelection(serverId, agentId),
-  );
-  const cache = useQueryClient();
-  const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, supported && shared && connected && Boolean(workspaceId));
-  const query = useFetchQuery({
-    dataShape: "value",
-    staleTimeMs: 0,
-    queryKey: ["chi-delivery", serverId, workspaceId, agentId, connected, state.generation],
-    enabled: Boolean(supported && shared && connected && client && workspaceId && state.context),
-    gcTime: 0,
-    retry: false,
-    refetchInterval: 5000,
-    queryFn: async () => {
-      if (!client || !workspaceId) throw new Error("Host disconnected");
-      const result = await scope.run({ action: "delivery", agentId })
-        .catch((error) => {
-          cache.setQueryData(["chi-delivery", serverId, workspaceId, agentId, connected], null);
-          throw error;
-        });
-      if (result.kind !== "delivery") throw new Error("chi-invalid-response");
-      return result;
-    },
-  });
-  const retry = useMutation({
-    retry: false,
-    mutationFn: async () => {
-      if (!client || !workspaceId) throw new Error("Host disconnected");
-      await scope.run({ action: "retry", agentId });
-    },
-    onSettled: () => query.refetch(),
-  });
-  const pending = useFetchQuery({ queryKey: ["chi-pending-send", serverId, workspaceId, agentId, state.generation], dataShape: "value", staleTimeMs: 0, gcTime: 0, retry: false, enabled: supported && connected && Boolean(state.context), refetchInterval: 2000, queryFn: () => readMentionSubmission(serverId, agentId) });
-  const retrySend = useMutation({ mutationFn: async () => {
-    if (!client || !state.context || !pending.data?.chiMentionContext || !sameMentionContext(state.context, pending.data.chiMentionContext)) throw new Error("chi-mention-context-changed");
-    await retryMentionSubmission(serverId, agentId, client);
-  }, onSettled: () => pending.refetch() });
-  const { mutate: sendSaved } = retrySend;
-  const recoverSend = useCallback(() => sendSaved(), [sendSaved]);
-  const clear = useCallback(() => clearMentionSelection(serverId, agentId), [serverId, agentId]);
+  const active = supported && shared && connected && Boolean(workspaceId);
+  const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, active);
   const open = useCallback(
     () =>
       router.push({
@@ -80,30 +53,88 @@ export function MentionDelivery({ serverId, agentId }: { serverId: string; agent
       }),
     [serverId, workspaceId],
   );
-  const { mutate } = retry;
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
-  const retryDelivery = useCallback(() => mutate(), [mutate]);
   if (!supported || !workspaceId) return null;
-  const deliveries =
-    connected && query.isSuccess && !query.isFetching ? (query.data?.deliveries ?? []) : [];
   return (
     <View style={styles.rail}>
-      {selected.length > 0 ? (
-        <View>
-          <Text style={styles.text}>
-            Mention recipients: {selected.map((p) => `@${p.handle}`).join(", ")}
-            {shared ? "" : " · Share to Chi before sending"}
-          </Text>
-          <Button size="sm" variant="ghost" onPress={clear}>
-            Clear recipients
-          </Button>
-        </View>
-      ) : null}
-      {pending.data && state.context && pending.data.chiMentionContext && sameMentionContext(state.context, pending.data.chiMentionContext) ? <View><Text style={styles.text}>Unconfirmed saved send: {pending.data.text}</Text><Text style={styles.text}>Recipients: {pending.data.chiMentions?.join(", ")}. New sends are blocked until this exact saved send is confirmed.</Text><Button onPress={recoverSend} disabled={retrySend.isPending}>Retry saved send</Button></View> : null}
-      {pending.isError || retrySend.isError ? <Alert variant="error" title="Saved send requires recovery" description={mentionError(pending.error ?? retrySend.error)} /> : null}
+      <SelectedRecipients serverId={serverId} agentId={agentId} shared={shared} />
       <Button size="sm" variant="ghost" onPress={open}>
         Open mentions
       </Button>
+      {active && client && state.context ? (
+        <ProtectedDelivery
+          key={state.generation}
+          serverId={serverId}
+          agentId={agentId}
+          client={client}
+          scope={scope}
+          identity={state.context}
+          queryKey={mentionQueryKey(serverId, workspaceId, state)}
+        />
+      ) : null}
+      {state.error ? (
+        <Alert
+          variant="error"
+          title="Mention context unavailable"
+          description={mentionError(state.error)}
+        >
+          <Button onPress={verify}>Verify mention context</Button>
+        </Alert>
+      ) : null}
+    </View>
+  );
+}
+
+function SelectedRecipients({ serverId, agentId, shared }: AgentTarget & { shared: boolean }) {
+  const selected = useSyncExternalStore(
+    subscribeMentionSelection,
+    () => mentionSelection(serverId, agentId),
+    () => mentionSelection(serverId, agentId),
+  );
+  const clear = useCallback(() => clearMentionSelection(serverId, agentId), [serverId, agentId]);
+  if (!selected.length) return null;
+  return (
+    <View>
+      <Text style={styles.text}>
+        Mention recipients: {selected.map((p) => `@${p.handle}`).join(", ")}
+        {shared ? "" : " · Share to Chi before sending"}
+      </Text>
+      <Button size="sm" variant="ghost" onPress={clear}>
+        Clear recipients
+      </Button>
+    </View>
+  );
+}
+
+function ProtectedDelivery(target: ProtectedTarget) {
+  const query = useFetchQuery({
+    dataShape: "value",
+    staleTimeMs: 0,
+    gcTime: 0,
+    retry: false,
+    refetchInterval: 5000,
+    queryKey: [...target.queryKey, "delivery", target.agentId],
+    queryFn: async () => {
+      const result = await target.scope.run(
+        { action: "delivery", agentId: target.agentId },
+        target.identity,
+      );
+      if (result.kind !== "delivery") throw new Error("chi-invalid-response");
+      return result;
+    },
+  });
+  const retry = useMutation({
+    retry: false,
+    mutationFn: () =>
+      target.scope.run({ action: "retry", agentId: target.agentId }, target.identity),
+    onSettled: () => query.refetch(),
+  });
+  const { mutate } = retry;
+  const retryDelivery = useCallback(() => mutate(), [mutate]);
+  const deliveries = query.isSuccess && !query.isFetching ? query.data.deliveries : [];
+  return (
+    <View>
+      <SavedSend {...target} />
       {deliveries.map((d) => (
         <Text
           key={d.handoffId}
@@ -132,10 +163,61 @@ export function MentionDelivery({ serverId, agentId }: { serverId: string; agent
           description={mentionError(query.error)}
         />
       ) : null}
-      {state.error ? <Alert variant="error" title="Mention context unavailable" description={mentionError(state.error)}><Button onPress={verify}>Verify mention context</Button></Alert> : null}
     </View>
   );
 }
+
+function SavedSend(target: ProtectedTarget) {
+  const pending = useFetchQuery({
+    queryKey: [...target.queryKey, "pending-send", target.agentId],
+    dataShape: "value",
+    staleTimeMs: 0,
+    gcTime: 0,
+    retry: false,
+    refetchInterval: 2000,
+    queryFn: async () => {
+      const saved = await mentionSubmissions.read(target.serverId, target.agentId);
+      if (
+        saved &&
+        (!saved.chiMentionContext || !sameMentionContext(target.identity, saved.chiMentionContext))
+      )
+        throw new Error("chi-mention-context-changed");
+      return saved;
+    },
+  });
+  const retry = useMutation({
+    retry: false,
+    mutationFn: () =>
+      mentionSubmissions.retry(target.serverId, target.agentId, target.identity, target.client),
+    onSettled: () => pending.refetch(),
+  });
+  const { mutate } = retry;
+  const recover = useCallback(() => mutate(), [mutate]);
+  return (
+    <View>
+      {pending.isSuccess && pending.data ? (
+        <View>
+          <Text style={styles.text}>Unconfirmed saved send: {pending.data.text}</Text>
+          <Text style={styles.text}>
+            Recipients: {pending.data.chiMentions?.join(", ")}. New sends are blocked until this
+            exact saved send is confirmed.
+          </Text>
+          <Button onPress={recover} disabled={retry.isPending}>
+            Retry saved send
+          </Button>
+        </View>
+      ) : null}
+      {pending.isError || retry.isError ? (
+        <Alert
+          variant="error"
+          title="Saved send requires recovery"
+          description={mentionError(pending.error ?? retry.error)}
+        />
+      ) : null}
+    </View>
+  );
+}
+
 function deliveryText(status: string, error: string | null) {
   if (status === "delivered") return "Mention delivered";
   if (status === "pending") return "Mention pending — waiting for a settled capture";

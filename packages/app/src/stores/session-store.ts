@@ -22,7 +22,6 @@ import {
   type MessageSubmissionRejectionOutcome,
 } from "@/composer/submission/model";
 import type { PendingPermission } from "@/types/shared";
-import type { ComposerAttachment } from "@/attachments/types";
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import type {
   AgentPermissionRequest,
@@ -593,9 +592,7 @@ interface SessionStoreActions {
     serverId: string,
     value:
       | SessionState["queuedMessages"]
-      | ((
-          prev: SessionState["queuedMessages"],
-        ) => SessionState["queuedMessages"]),
+      | ((prev: SessionState["queuedMessages"]) => SessionState["queuedMessages"]),
   ) => void;
 
   // Hydration

@@ -2,8 +2,14 @@ import type {
   ChiHandoff,
   ChiMentionOperation,
   ChiMentionResult,
+  ChiMentionContext,
 } from "@getpaseo/protocol/chi-mentions";
-import { ChiMentionOperationSchema } from "@getpaseo/protocol/chi-mentions";
+import {
+  ChiMentionOperationSchema,
+  ChiMentionContextSchema,
+} from "@getpaseo/protocol/chi-mentions";
+import { z } from "zod";
+import { sameMentionContext } from "./mention-context";
 import type { ContinuationStorage } from "./continuation-state";
 
 export interface ReplyState {
@@ -14,6 +20,7 @@ export interface ReplyState {
 }
 export function openReplyForm(input: {
   handoff: ChiHandoff;
+  context: ChiMentionContext;
   key: string;
   storage: ContinuationStorage;
   execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
@@ -35,7 +42,12 @@ export function openReplyForm(input: {
         publish({ status: "editing" });
         return;
       }
-      const op = ChiMentionOperationSchema.parse(JSON.parse(saved));
+      const envelope = z
+        .object({ context: ChiMentionContextSchema, operation: ChiMentionOperationSchema })
+        .parse(JSON.parse(saved));
+      if (!sameMentionContext(envelope.context, input.context))
+        throw new Error("chi-mention-context-changed");
+      const op = envelope.operation;
       if (op.action !== "reply" && op.action !== "acknowledge")
         throw new Error("Invalid saved mention operation");
       if (op.id !== input.handoff.id) throw new Error("Invalid saved mention operation");
@@ -81,7 +93,7 @@ export function openReplyForm(input: {
     if (operation.action === "reply" && !operation.text) return;
     publish({ status: "pending", error: null, operation });
     try {
-      await input.storage.setItem(input.key, JSON.stringify(operation));
+      await input.storage.setItem(input.key, JSON.stringify({ context: input.context, operation }));
       const result = await input.execute(operation);
       if (result.kind !== "handoff") throw new Error("Unexpected mention response");
       await input.storage.removeItem(input.key).catch(() => undefined);

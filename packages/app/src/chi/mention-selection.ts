@@ -15,7 +15,8 @@ export function selectMention(serverId: string, agentId: string, participant: Se
   for (const listener of listeners) listener();
 }
 export function clearHostMentionSelection(serverId: string) {
-  for (const scope of selected.keys()) if (JSON.parse(scope)[0] === serverId) selected.delete(scope);
+  for (const scope of selected.keys())
+    if (JSON.parse(scope)[0] === serverId) selected.delete(scope);
   for (const listener of listeners) listener();
 }
 export function selectedMentionContext(serverId: string, agentId: string) {

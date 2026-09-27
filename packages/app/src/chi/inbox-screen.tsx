@@ -17,6 +17,7 @@ import type {
   ChiHandoff,
   ChiMentionOperation,
   ChiMentionResult,
+  ChiMentionContext,
 } from "@getpaseo/protocol/chi-mentions";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
@@ -31,6 +32,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { openReplyForm } from "./reply-model";
 import { mentionError } from "./mention-errors";
 import { useMentionScope } from "./use-mention-scope";
+import { mentionQueryKey } from "./mention-context";
 
 interface Target {
   host: string;
@@ -50,6 +52,8 @@ interface InboxContext {
   client: Pick<DaemonClient, "chiMentions">;
   host: string;
   workspace: string;
+  identity: ChiMentionContext;
+  queryKey: readonly unknown[];
 }
 
 export function ChiInboxScreen({
@@ -108,6 +112,10 @@ export function ChiInboxScreen({
     if (selected) navigateToWorkspace({ serverId: target.host, workspaceId: selected.id });
   }, [selected, target.host]);
   const title = useMemo(() => <ScreenTitle>Mentions</ScreenTitle>, []);
+  const hostLabel = useMemo(
+    () => hosts.find((h) => h.serverId === target.host)?.label ?? "Choose host",
+    [hosts, target.host],
+  );
   const workspaceAction = useMemo(
     () =>
       selected ? (
@@ -131,7 +139,7 @@ export function ChiInboxScreen({
         >
           <View ref={anchor}>
             <Button size="sm" onPress={openPicker}>
-              {hosts.find((h) => h.serverId === target.host)?.label ?? "Choose host"}
+              {hostLabel}
             </Button>
           </View>
         </HostPicker>
@@ -180,9 +188,35 @@ export function ChiInboxScreen({
 function VerifiedInbox(context: { client: DaemonClient; host: string; workspace: string }) {
   const { scope, state } = useMentionScope(context.host, context.workspace, context.client, true);
   const retry = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
-  const client = useMemo(() => ({ chiMentions: (input: Parameters<DaemonClient["chiMentions"]>[0]) => scope.run(input.operation) }), [scope]);
-  if (!state.context) return <Alert variant="error" title="Mention context unavailable" description={state.error ? mentionError(state.error) : "Verifying account and repository..."}><Button onPress={retry}>Verify mention context</Button></Alert>;
-  return <Inbox key={state.generation} host={context.host} workspace={context.workspace} client={client} />;
+  const client = useMemo(
+    () => ({
+      chiMentions: (input: Parameters<DaemonClient["chiMentions"]>[0]) =>
+        scope.run(input.operation, state.context ?? undefined),
+    }),
+    [scope, state.context],
+  );
+  if (!state.context)
+    return (
+      <Alert
+        variant="error"
+        title="Mention context unavailable"
+        description={
+          state.error ? mentionError(state.error) : "Verifying account and repository..."
+        }
+      >
+        <Button onPress={retry}>Verify mention context</Button>
+      </Alert>
+    );
+  return (
+    <Inbox
+      key={state.generation}
+      host={context.host}
+      workspace={context.workspace}
+      client={client}
+      identity={state.context}
+      queryKey={mentionQueryKey(context.host, context.workspace, state)}
+    />
+  );
 }
 
 function ChoiceButton({
@@ -216,7 +250,7 @@ function Inbox(context: InboxContext) {
   const compact = useIsCompactFormFactor();
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: ["chi-inbox", context.host, context.workspace, selection.inbox, selection.offset],
+    queryKey: [...context.queryKey, "inbox", selection.inbox, selection.offset],
     retry: false,
     gcTime: 0,
     staleTimeMs: 0,
@@ -229,7 +263,7 @@ function Inbox(context: InboxContext) {
         })
         .catch((error) => {
           cache.setQueryData(
-            ["chi-inbox", context.host, context.workspace, selection.inbox, selection.offset],
+            [...context.queryKey, "inbox", selection.inbox, selection.offset],
             null,
           );
           throw error;
@@ -365,7 +399,7 @@ function HandoffDetail(context: InboxContext & { id: string }) {
   const [sourceIndex, setSourceIndex] = useState<number | null>(null);
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: ["chi-handoff", context.host, context.workspace, context.id],
+    queryKey: [...context.queryKey, "handoff", context.id],
     gcTime: 0,
     staleTimeMs: 0,
     retry: false,
@@ -377,10 +411,7 @@ function HandoffDetail(context: InboxContext & { id: string }) {
           operation: { action: "read", id: context.id },
         })
         .catch((error) => {
-          queryClient.setQueryData(
-            ["chi-handoff", context.host, context.workspace, context.id],
-            null,
-          );
+          queryClient.setQueryData([...context.queryKey, "handoff", context.id], null);
           throw error;
         });
       if (result.kind !== "handoff") throw new Error("chi-invalid-response");
@@ -389,9 +420,9 @@ function HandoffDetail(context: InboxContext & { id: string }) {
   });
   const updated = useCallback(() => {
     void queryClient.invalidateQueries({
-      queryKey: ["chi-inbox", context.host, context.workspace],
+      queryKey: context.queryKey,
     });
-  }, [queryClient, context.host, context.workspace]);
+  }, [queryClient, context.queryKey]);
   const { refetch } = query;
   const refresh = useCallback(() => void refetch(), [refetch]);
   const chooseSource = useCallback((index: string) => setSourceIndex(Number(index)), []);
@@ -474,14 +505,7 @@ function ExactSource(context: InboxContext & { id: string; index: number }) {
   );
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: [
-      "chi-source",
-      context.host,
-      context.workspace,
-      context.id,
-      context.index,
-      selection.entryId,
-    ],
+    queryKey: [...context.queryKey, "source", context.id, context.index, selection.entryId],
     gcTime: 0,
     staleTimeMs: 0,
     retry: false,
@@ -499,14 +523,7 @@ function ExactSource(context: InboxContext & { id: string; index: number }) {
         })
         .catch((error) => {
           cache.setQueryData(
-            [
-              "chi-source",
-              context.host,
-              context.workspace,
-              context.id,
-              context.index,
-              selection.entryId,
-            ],
+            [...context.queryKey, "source", context.id, context.index, selection.entryId],
             null,
           );
           throw error;
@@ -553,7 +570,7 @@ function PinnedContext(
   const [cursor, setCursor] = useState<string | undefined>();
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: ["chi-context", context.host, context.workspace, context.id, context.index, cursor],
+    queryKey: [...context.queryKey, "context", context.id, context.index, cursor],
     gcTime: 0,
     staleTimeMs: 0,
     retry: false,
@@ -565,7 +582,7 @@ function PinnedContext(
         })
         .catch((error) => {
           cache.setQueryData(
-            ["chi-context", context.host, context.workspace, context.id, context.index, cursor],
+            [...context.queryKey, "context", context.id, context.index, cursor],
             null,
           );
           throw error;
@@ -633,7 +650,8 @@ function ReplyForm({
   const [form] = useState(() =>
     openReplyForm({
       handoff,
-      key: `chi-reply:${JSON.stringify([context.host, context.workspace, actor, handoff.id])}`,
+      context: context.identity,
+      key: `chi-reply:${JSON.stringify([context.host, context.workspace, context.identity.repo, actor, handoff.id])}`,
       storage: AsyncStorage,
       execute: (operation: ChiMentionOperation): Promise<ChiMentionResult> =>
         context.client.chiMentions({ workspaceId: context.workspace, operation }),

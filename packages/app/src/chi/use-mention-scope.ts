@@ -16,7 +16,7 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
       return client.chiMentions({ workspaceId: workspace, operation, expectedContext });
     },
     () => {
-      queryClient.removeQueries({ predicate: query => String(query.queryKey[0]).startsWith("chi") && query.queryKey[1] === host && query.queryKey[2] === workspace });
+      queryClient.removeQueries({ queryKey: ["chi-mentions", host, workspace] });
       clearHostMentionSelection(host);
     },
   );
@@ -24,9 +24,15 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
   return scope;
 }
 export function loseHostMentionScopes(host: string) {
-  for (const [key, entry] of scopes) if (JSON.parse(key)[0] === host) entry.scope.lose("chi-host-disconnected");
+  for (const [key, entry] of scopes)
+    if (JSON.parse(key)[0] === host) entry.scope.lose("chi-host-disconnected");
 }
-export function useMentionScope(host: string, workspace: string, client: DaemonClient | null, active: boolean) {
+export function useMentionScope(
+  host: string,
+  workspace: string,
+  client: DaemonClient | null,
+  active: boolean,
+) {
   const scope = useMemo(() => scopeFor(host, workspace, client), [host, workspace, client]);
   const state = useSyncExternalStore(scope.subscribe, scope.getState, scope.getState);
   useEffect(() => {

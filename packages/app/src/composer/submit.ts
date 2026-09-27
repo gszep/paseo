@@ -42,24 +42,23 @@ export async function submitAgentInput<TAttachment>(
     return "noop";
   }
 
-  if (input.isAgentRunning && !input.forceSend) {
-    input.queueMessage({ message: trimmedMessage, attachments });
+  try {
+    if (input.isAgentRunning && !input.forceSend) {
+      input.queueMessage({ message: trimmedMessage, attachments });
+      if (shouldClearOnSubmit) {
+        input.setUserInput("");
+        input.setAttachments([]);
+      }
+      return "queued";
+    }
+
+    // Clear immediately so the submitted timeline row and composer state stay in sync.
     if (shouldClearOnSubmit) {
       input.setUserInput("");
       input.setAttachments([]);
     }
-    return "queued";
-  }
-
-  // Clear immediately so the submitted timeline row and composer state stay in sync.
-  if (shouldClearOnSubmit) {
-    input.setUserInput("");
-    input.setAttachments([]);
-  }
-  input.setSendError(null);
-  input.setIsProcessing(true);
-
-  try {
+    input.setSendError(null);
+    input.setIsProcessing(true);
     await input.submitMessage({ message: trimmedMessage, attachments });
     input.clearDraft("sent");
     input.setIsProcessing(false);

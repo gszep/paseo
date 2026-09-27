@@ -16,6 +16,7 @@ const handoff: ChiHandoff = {
   updatedAt: "2026-09-25",
   events: [],
 };
+const context = { actor: handoff.recipient, repo: handoff.repo, generation: "a".repeat(64) };
 function storage() {
   const values = new Map<string, string>();
   return {
@@ -35,6 +36,7 @@ test("reload retries the immutable reply operation without changing text, identi
   const updates: ChiHandoff[] = [];
   const deps = {
     handoff,
+    context,
     key: "test",
     storage: disk,
     uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
@@ -78,6 +80,7 @@ test("an acknowledged response remains discussion and an explicit conflict refre
   const disk = storage();
   const form = openReplyForm({
     handoff,
+    context,
     key: "conflict",
     storage: disk,
     uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
@@ -102,6 +105,7 @@ test("unreadable pending storage blocks replacement operations", async () => {
   let sends = 0;
   const form = openReplyForm({
     handoff,
+    context,
     key: "corrupt",
     storage: disk,
     uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
@@ -124,6 +128,7 @@ test("confirmed replies remain delivered when local cleanup fails", async () => 
   let delivered = 0;
   const form = openReplyForm({
     handoff,
+    context,
     key: "cleanup",
     storage: {
       ...disk,
@@ -141,4 +146,88 @@ test("confirmed replies remain delivered when local cleanup fails", async () => 
   await form.send("reply");
   expect(form.getState().status).toBe("sent");
   expect(delivered).toBe(1);
+});
+
+test("lost reply response followed by restore failure cannot generate a replacement operation", async () => {
+  const disk = storage();
+  const calls: ChiMentionOperation[] = [];
+  let generated = 0;
+  const deps = {
+    handoff,
+    context,
+    key: "lost-response",
+    storage: disk,
+    uuid: () => {
+      generated++;
+      return "fb2aed79-8a81-46f4-bf03-311f9a61337e";
+    },
+    onSuccess: () => undefined,
+    execute: async (op: ChiMentionOperation) => {
+      calls.push(op);
+      throw new Error("response lost after commit");
+    },
+  };
+  const first = openReplyForm(deps);
+  first.setText("Exactly once");
+  await first.send("reply");
+  first.close();
+  const saved = await disk.getItem(deps.key);
+  const restored = openReplyForm({
+    ...deps,
+    storage: {
+      ...disk,
+      getItem: async () => {
+        throw new Error("restore failed");
+      },
+    },
+  });
+  await restored.send("reply");
+  restored.setText("Do not send this duplicate");
+  await restored.send("reply");
+  await restored.discardConflict();
+  expect(restored.getState()).toMatchObject({ status: "blocked", text: "", operation: null });
+  expect(generated).toBe(1);
+  expect(calls).toHaveLength(1);
+  expect(await disk.getItem(deps.key)).toBe(saved);
+  restored.close();
+  const recovered = openReplyForm({
+    ...deps,
+    execute: async (op) => {
+      calls.push(op);
+      return { kind: "handoff", actor: context.actor, handoff };
+    },
+  });
+  await recovered.send("reply");
+  expect(calls[1]).toEqual(calls[0]);
+  expect(generated).toBe(1);
+});
+
+test("a saved reply from another auth generation blocks instead of adopting a new identity", async () => {
+  const disk = storage();
+  const deps = {
+    handoff,
+    context,
+    key: "authority",
+    storage: disk,
+    uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+    onSuccess: () => undefined,
+  };
+  const first = openReplyForm({
+    ...deps,
+    execute: async () => {
+      throw new Error("lost reply");
+    },
+  });
+  first.setText("Preserve actor");
+  await first.send("reply");
+  first.close();
+  const next = openReplyForm({
+    ...deps,
+    context: { ...context, generation: "b".repeat(64) },
+    execute: async () => {
+      throw new Error("must not execute");
+    },
+  });
+  await next.send("reply");
+  expect(next.getState().status).toBe("blocked");
 });
