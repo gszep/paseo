@@ -1,8 +1,11 @@
 import MarkdownIt from "markdown-it";
+import { enableMarkdownMath } from "@/utils/markdown-math";
 
 // Only block maps are needed here; inline parsing belongs to each rendered block.
 const markdownBlockParser = new MarkdownIt();
 markdownBlockParser.core.ruler.disable("inline");
+// Assistant display math may hold blank lines; keep it in one block.
+enableMarkdownMath(markdownBlockParser);
 
 export function splitMarkdownBlocks(text: string): string[] {
   if (text.length === 0) {

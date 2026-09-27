@@ -166,4 +166,72 @@ describe("createAssistantMarkdownParser", () => {
 
     expect(parser.render("[x](javascript:alert(1))")).not.toContain("href");
   });
+
+  describe("math", () => {
+    const parser = createAssistantMarkdownParser();
+
+    function inlineMath(source: string): [string, string][] {
+      return (parser.parseInline(source, {})[0]?.children ?? [])
+        .filter((token) => token.type === "math_inline")
+        .map((token) => [token.markup, token.content]);
+    }
+
+    function blockMath(source: string): [string, string][] {
+      return parser
+        .parse(source, {})
+        .filter((token) => token.type === "math_block")
+        .map((token) => [token.markup, token.content]);
+    }
+
+    it("parses inline $…$, $$…$$ and \\(…\\)", () => {
+      expect(inlineMath("so $E = mc^2$ and \\(\\tau\\) and $$x^2$$.")).toEqual([
+        ["$", "E = mc^2"],
+        ["\\(", "\\tau"],
+        ["$$", "x^2"],
+      ]);
+      expect(inlineMath("the $n$th term")).toEqual([["$", "n"]]);
+    });
+
+    it.each([
+      "costs $5 and $10",
+      "between $5-$10",
+      "a $ sign",
+      "$ x$",
+      "$x $",
+      "escaped \\$x\\$",
+      "`$x$` in code",
+      "costs $5 and $10. Code: `$HOME` stays code.",
+      "$$",
+    ])("leaves %j as text", (source) => {
+      expect(inlineMath(source)).toEqual([]);
+      expect(parser.renderInline(source)).not.toContain("math");
+    });
+
+    it("keeps \\[ for literal brackets inside a paragraph", () => {
+      expect(inlineMath("see \\[1\\]")).toEqual([]);
+      expect(parser.renderInline("see \\[1\\]")).toBe("see [1]");
+    });
+
+    it("parses $$ and \\[ display blocks, including one that interrupts a paragraph", () => {
+      expect(
+        blockMath(
+          "$$\n\\langle \\sigma \\rangle = D_{KL}(P_F \\| P_R) \\ge 0\n$$\n\n\\[ \\tau \\]\n\nText\n$$a$$",
+        ),
+      ).toEqual([
+        ["$$", "\\langle \\sigma \\rangle = D_{KL}(P_F \\| P_R) \\ge 0"],
+        ["\\[", "\\tau"],
+        ["$$", "a"],
+      ]);
+    });
+
+    it("leaves unclosed and fenced display math alone", () => {
+      expect(blockMath("$$\nx + y")).toEqual([]);
+      expect(blockMath("```\n$$\nx\n$$\n```")).toEqual([]);
+      expect(blockMath("    $$x$$")).toEqual([]);
+    });
+
+    it("copies math as its source", () => {
+      expect(parser.render("$a<b$\n\n$$\nx\n$$")).toBe("<p>$a&lt;b$</p>\n<p>$$x$$</p>\n");
+    });
+  });
 });
