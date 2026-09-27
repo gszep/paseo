@@ -40,6 +40,7 @@ import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 const label = "chi.native";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -300,20 +301,26 @@ export class ChiConnection {
   }
 
   private async mentionIdentity(cwd: string): Promise<MentionIdentity> {
-    const remote = await execCommand("git", ["remote", "get-url", "origin"], {
-      cwd,
-      timeout: 5000,
-    });
-    const parsed = parseGitHubRemote(remote.stdout);
-    if (!parsed) throw new Error("chi-repository-mismatch");
-    const repo = `github:${parsed.owner}/${parsed.repo}`;
-    const auth = await this.authorize(repo, cwd);
-    return {
-      repo,
-      actor: auth.chiUserId.toLowerCase(),
-      token: auth.sessionToken,
-      credentialGeneration: auth.credentialGeneration,
-    };
+    try {
+      const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+        cwd,
+        timeout: 5000,
+      });
+      const parsed = parseGitHubRemote(remote.stdout);
+      if (!parsed) throw new Error("chi-repository-mismatch");
+      const repo = `github:${parsed.owner}/${parsed.repo}`;
+      const auth = await this.authorize(repo, cwd);
+      return {
+        repo,
+        actor: auth.chiUserId.toLowerCase(),
+        token: auth.sessionToken,
+        credentialGeneration: auth.credentialGeneration,
+      };
+    } catch (error) {
+      // A failed authority acquisition invalidates protected data even when token
+      // exchange or Git reports an error outside the public Chi code vocabulary.
+      throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
+    }
   }
 
   async prepareMentions(
@@ -322,6 +329,7 @@ export class ChiConnection {
     text: string,
     recipients: string[],
     expectedContext?: ChiMentionContext,
+    admission?: string,
   ) {
     const agent = this.manager.getAgent(agentId);
     if (!agent || agent.provider !== "opencode" || !messageId)
@@ -332,7 +340,8 @@ export class ChiConnection {
     this.requireMentionContext(identity, expectedContext);
     if (identity.actor !== association.actor.toLowerCase() || identity.repo !== association.repo)
       throw new Error("chi-identity-mismatch");
-    await this.mentions.prepare({ agentId, messageId, text, recipients, identity });
+    if (!admission) throw new Error("chi-mention-admission-required");
+    await this.mentions.prepare({ agentId, messageId, text, recipients, identity, admission });
   }
 
   private mentionContext(identity: MentionIdentity): ChiMentionContext {

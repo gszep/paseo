@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { z } from "zod";
 import { ChiMentions, hasMention } from "./mentions.js";
 import { ChiHandoffSchema, type ChiHandoff } from "@getpaseo/protocol/chi-mentions";
+import { MessageReceipts } from "../message-receipts/index.js";
+import {
+  mentionFixtureTitle,
+  purgeMentionFixtureSources,
+} from "../test-utils/chi-mention-fixture-sources.js";
 
 const homes: string[] = [];
 afterEach(async () => {
@@ -82,12 +87,24 @@ async function fixture() {
     }) satisfies typeof fetch,
   };
   const input = {
+    admission: "",
     identity,
     agentId: "agent",
     messageId: "client-message",
     text: "@SteffenPL please check",
     recipients: ["github:SteffenPL"],
   };
+  const requests = new MessageReceipts(join(home, "agent-requests"));
+  await requests.send({
+    durable: true,
+    agentId: input.agentId,
+    messageId: input.messageId,
+    request: { text: input.text, recipients: input.recipients },
+    prepare: async (fingerprint) => {
+      input.admission = fingerprint;
+    },
+    send: async () => undefined,
+  });
   const capture = {
     identity,
     agentId: "agent",
@@ -108,6 +125,8 @@ async function fixture() {
   const restart = () => new ChiMentions(home, authority);
   return {
     restart,
+    home,
+    authority,
     input,
     capture,
     records,
@@ -150,6 +169,68 @@ test("durable delivery pins the persisted native user entry and replays the same
   expect(await f.restart().status("agent", f.input.identity)).toMatchObject({
     deliveries: [{ status: "delivered", error: null }],
   });
+});
+
+test("restart after intent publication cannot activate the intent through an ordinary same-ID/text send", async () => {
+  const f = await fixture();
+  const requests = new MessageReceipts(join(f.home, "agent-requests"));
+  const input = { ...f.input, messageId: "crash-boundary" };
+  let admission = "";
+  await expect(
+    requests.send({
+      durable: true,
+      agentId: input.agentId,
+      messageId: input.messageId,
+      request: { text: input.text, recipients: input.recipients },
+      prepare: async (fingerprint) => {
+        admission = fingerprint;
+        await f.restart().prepare({ ...input, admission });
+        throw new Error("process stopped before pending receipt");
+      },
+      send: async () => {
+        throw new Error("must not reach provider");
+      },
+    }),
+  ).rejects.toThrow("process stopped");
+  const restarted = new MessageReceipts(join(f.home, "agent-requests"));
+  expect(await restarted.admits(input.agentId, input.messageId, admission)).toBe(false);
+  await expect(
+    restarted.send({
+      agentId: input.agentId,
+      messageId: input.messageId,
+      request: { text: input.text },
+      send: async () => {
+        throw new Error("must not send ordinary message");
+      },
+    }),
+  ).rejects.toThrow("agent_request_key_conflict");
+  const capture = {
+    ...f.capture,
+    messages: [
+      {
+        ...f.capture.messages[0]!,
+        payload: {
+          ...f.capture.messages[0]!.payload,
+          metadata: { paseoClientMessageId: input.messageId },
+        },
+      },
+    ],
+  };
+  await f.restart().captured(capture);
+  await f.restart().retry(input.agentId, input.identity);
+  expect(f.submissions).toEqual([]);
+  await restarted.send({
+    durable: true,
+    agentId: input.agentId,
+    messageId: input.messageId,
+    request: { text: input.text, recipients: input.recipients },
+    prepare: async (fingerprint) => {
+      await f.restart().prepare({ ...input, admission: fingerprint });
+    },
+    send: async () => undefined,
+  });
+  await f.restart().captured(capture);
+  expect(f.submissions).toHaveLength(1);
 });
 
 test("never substitutes a matching assistant message or guesses a native ID for an unpersisted prompt", async () => {
@@ -195,6 +276,50 @@ test("human mentions reject file and email adjacency", () => {
   expect(hasMention("(@steffenpl)", "SteffenPL")).toBe(true);
   for (const text of ["me@SteffenPL", "./@SteffenPL", "@SteffenPL/file", "@SteffenPL-extra"])
     expect(hasMention(text, "SteffenPL")).toBe(false);
+});
+
+test("acceptance startup purges only its actor's marked sources, after collecting every page", async () => {
+  const removed: string[] = [];
+  const cursors: Array<string | null> = [];
+  await purgeMentionFixtureSources({
+    actor: "sava-the-owl",
+    list: async (cursor) => {
+      expect(removed).toEqual([]);
+      cursors.push(cursor);
+      if (!cursor)
+        return {
+          items: [
+            {
+              sourceId: "legacy-orphan",
+              title: mentionFixtureTitle,
+              ownerId: "github:sava-the-owl",
+            },
+            {
+              sourceId: "other-owner",
+              title: `${mentionFixtureTitle} old-run`,
+              ownerId: "github:other",
+            },
+            { sourceId: "real-session", title: "My work", ownerId: "github:sava-the-owl" },
+          ],
+          nextCursor: "second",
+        };
+      return {
+        items: [
+          {
+            sourceId: "marked-orphan",
+            title: `${mentionFixtureTitle} old-run`,
+            ownerId: "github:sava-the-owl",
+          },
+        ],
+        nextCursor: null,
+      };
+    },
+    remove: async (id) => {
+      removed.push(id);
+    },
+  });
+  expect(cursors).toEqual([null, "second"]);
+  expect(removed).toEqual(["legacy-orphan", "marked-orphan"]);
 });
 
 test("exact metadata cannot authorize transformed or duplicate user entries", async () => {

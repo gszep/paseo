@@ -1,4 +1,5 @@
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
 import {
   ConnectionSubscriptions,
@@ -360,6 +361,7 @@ export interface DaemonClientTrace {
 export interface SendMessageOptions {
   chiMentions?: string[];
   chiMentionContext?: import("@getpaseo/protocol/chi-mentions").ChiMentionContext;
+  chiMentionAuthorization?: import("@getpaseo/protocol/chi-mentions").ChiMentionContext;
   messageId?: string;
   activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
@@ -3176,7 +3178,7 @@ export class DaemonClient {
           ? msg.payload
           : null,
     });
-    if (payload.outcome === "failed") throw new Error(payload.error);
+    if (payload.outcome === "failed") throw new ChiOperationError(payload.error, payload.failure);
     if (!payload.context) throw new Error("chi-mention-context-required");
     return { ...payload.result, context: payload.context };
   }
@@ -3433,7 +3435,11 @@ export class DaemonClient {
     options?: SendMessageOptions,
   ): Promise<void> {
     if (options?.chiMentions?.length && this.lastServerInfoMessage?.features?.chiMentions !== true)
-      throw new Error("chi-mentions-unsupported");
+      throw new ChiOperationError("chi-mentions-unsupported", {
+        accessLost: false,
+        // A downgraded host may already have admitted an earlier attempt.
+        outcome: "unknown",
+      });
     const requestId = this.createRequestId();
     const messageId = options?.messageId ?? crypto.randomUUID();
     const message = SessionInboundMessageSchema.parse({
@@ -3444,6 +3450,7 @@ export class DaemonClient {
       messageId,
       chiMentions: options?.chiMentions,
       chiMentionContext: options?.chiMentionContext,
+      chiMentionAuthorization: options?.chiMentionAuthorization,
       activeTurnBehavior: options?.activeTurnBehavior,
       images: options?.images,
       attachments: options?.attachments,
@@ -3463,7 +3470,10 @@ export class DaemonClient {
       },
     });
     if (!payload.accepted) {
-      throw new Error(payload.error ?? "sendAgentMessage rejected");
+      throw new ChiOperationError(payload.error ?? "sendAgentMessage rejected", {
+        accessLost: false,
+        outcome: payload.admission === "not_admitted" ? "not_committed" : "unknown",
+      });
     }
   }
 

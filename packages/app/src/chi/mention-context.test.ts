@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { createMentionScope, mentionQueryKey, type ScopedMentionResult } from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 const identity: ChiMentionContext = {
   actor: "github:sender",
@@ -106,7 +107,10 @@ test("uncertain mutations retain identity for exact retry, while account failure
       if (operation.action === "scope")
         return { kind: "scope", actor: identity.actor, context: identity };
       expectations.push(expected);
-      throw new Error(failure);
+      throw new ChiOperationError(failure, {
+        accessLost: failure === "chi-http-401",
+        outcome: "unknown",
+      });
     },
     () => undefined,
   );
@@ -125,3 +129,47 @@ test("uncertain mutations retain identity for exact retry, while account failure
   expect(scope.getState().context).toBeNull();
   expect(expectations).toEqual([identity, identity]);
 });
+
+test.each(["reply", "acknowledge", "retry"] as const)(
+  "production logout during %s clears all protected caches and rejects delayed reads",
+  async (action) => {
+    const cache = new QueryClient();
+    const late = deferred<ScopedMentionResult>();
+    const scope = createMentionScope(
+      async (operation) => {
+        if (operation.action === "scope")
+          return { kind: "scope", actor: identity.actor, context: identity };
+        if (operation.action === "list") return late.promise;
+        throw new ChiOperationError("chi-github-login-required", {
+          accessLost: true,
+          outcome: "unknown",
+        });
+      },
+      () => cache.clear(),
+    );
+    await scope.acquire();
+    for (const child of ["inbox", "handoff", "source", "context", "participants", "delivery"])
+      cache.setQueryData(
+        [...mentionQueryKey("host", "workspace", scope.getState()), child],
+        "protected",
+      );
+    const pending = scope.run({ action: "list", inbox: true, offset: 0 });
+    await expect(
+      scope.run(
+        action === "retry"
+          ? { action, agentId: "agent" }
+          : {
+              action,
+              id: "handoff",
+              operationId: "operation",
+              revision: 1,
+              text: "reply",
+            },
+      ),
+    ).rejects.toThrow("chi-github-login-required");
+    expect(scope.getState().context).toBeNull();
+    expect(cache.getQueryCache().getAll()).toHaveLength(0);
+    late.resolve({ kind: "scope", actor: identity.actor, context: identity });
+    await expect(pending).rejects.toThrow("chi-mention-context-changed");
+  },
+);

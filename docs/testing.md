@@ -181,10 +181,16 @@ CHI_MENTION_TEST_ACTORS_DIR=/absolute/private/actor-directory \
   npm run test:e2e:real --workspace=@getpaseo/app -- e2e/browser/chi-mentions.real.spec.ts --workers=1
 ```
 
-It refuses CI, starts Metro on a dynamic port and two isolated
-daemons, and purges its captured sources on completion. Its provider is synthetic:
+It refuses CI, starts Metro on a dynamic port and two isolated daemons, and uses a
+unique run marker in the synthetic title, question and exact-name inbox locators.
+At startup the fixture collects all evidence pages and purges only sources owned
+by its test actor with the `Synthetic human mention acceptance` title prefix;
+completion purges the current run's captured sources too. Run this shared-account
+fixture serially so startup cleanup cannot delete another active acceptance run.
+Its provider is synthetic:
 this checks rendered desktop/compact mention delivery, exact/context reads,
-acknowledgement, lost-response retries, sender replies and access revocation,
+acknowledgement, lost-response retries, an actual Sava author reply observed by
+Mochi at revision 4, and access revocation,
 without model calls. It does not establish production installation, native
 provider capture or another person's paired-host setup. The spec uses **Share to
 Chi**, **Send message**, **Retry mentions**, **Open mentions**, **Read exact source
@@ -203,6 +209,16 @@ cache clearing/delayed reads, expected authority, the actual old-host send gate,
 and a real isolated daemon rejecting mention intent on an already-admitted plain
 message ID. Transformation rejection is checked before admission, with the same
 ID still available to an ordinary send. These suites make no model calls.
+Reply regressions exercise the closed-A/remount/committed-B/lost-response race,
+oversize validation and persisted scanner rejection followed by explicit correction.
+Both send and reply regressions reject stale non-commit responses from older attempts.
+Send regressions distinguish proven non-admission from ambiguous outcomes and
+exercise explicit same-principal credential rotation. `message-receipts/index.test.ts`
+and `chi/mentions.test.ts` check durable admission and restart at the intent-publication
+boundary; the latter also checks fixture cleanup ownership/pagination. Mutation
+logout coverage uses the production `chi-github-login-required` code and verifies
+structured client decoding plus parent/child cache clearing. The real-account
+rendered spec remains a separate release gate; deterministic tests do not satisfy it.
 
 Live provider smoke tests belong in `*.real.e2e.test.ts`, not `*.test.ts`, even when guarded by environment variables. Default unit suites must use deterministic provider adapters/fakes so missing credits, auth outages, and upstream model drift do not block normal CI.
 

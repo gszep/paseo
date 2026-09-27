@@ -1,12 +1,22 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import {
+  writeConversationReceipt,
+  syncConversationReceiptDirectory,
+} from "@henkaku-center/chi-native/conversations";
 import { writeJsonFileAtomic } from "../atomic-file.js";
+
+export class MessageNotAdmittedError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : "agent_request_not_admitted", { cause: error });
+  }
+}
 
 const ReceiptSchema = z.object({
   fingerprint: z.string(),
-  state: z.enum(["pending", "completed"]),
+  state: z.enum(["preparing", "pending", "completed"]),
   agentId: z.string(),
 });
 interface SendMessageInput {
@@ -14,13 +24,21 @@ interface SendMessageInput {
   messageId: string;
   request: unknown;
   send: () => Promise<void>;
-  prepare?: () => Promise<void>;
+  prepare?: (fingerprint: string) => Promise<void>;
+  durable?: boolean;
 }
 
 /** Owns message delivery receipts; creation is owned by CreationService. */
 export class MessageReceipts {
   private readonly pending = new Map<string, Promise<void>>();
   constructor(private readonly directory: string) {}
+
+  async admits(agentId: string, messageId: string, fingerprint: string): Promise<boolean> {
+    const receipt = await readReceipt(
+      path.join(this.directory, `${digest(["send", agentId, messageId])}.json`),
+    );
+    return receipt !== null && receipt.fingerprint === fingerprint && receipt.state !== "preparing";
+  }
 
   send(input: SendMessageInput): Promise<void> {
     // Preserve the existing on-disk identity and shape across daemon upgrades.
@@ -43,16 +61,29 @@ export class MessageReceipts {
     const fingerprint = digest(input.request);
     const existing = await readReceipt(file);
     if (existing) {
-      if (existing.fingerprint !== fingerprint) throw new Error("agent_request_key_conflict");
+      if (existing.fingerprint !== fingerprint)
+        throw new MessageNotAdmittedError(new Error("agent_request_key_conflict"));
       if (existing.state === "completed") return;
       // A provider may have accepted the message before its receipt was committed.
-      throw new Error("agent_request_outcome_unknown");
+      if (existing.state === "pending") throw new Error("agent_request_outcome_unknown");
     }
-    await input.prepare?.();
     const receipt = { fingerprint, agentId: input.agentId };
-    await writeJsonFileAtomic(file, { ...receipt, state: "pending" });
+    const writeReceipt = input.durable ? writeConversationReceipt : writeJsonFileAtomic;
+    // Reserve the fingerprint durably BEFORE publishing any mention intent. A crash
+    // during preparation may retry this request, but can never admit a different one.
+    try {
+      if (input.durable) {
+        await mkdir(this.directory, { recursive: true, mode: 0o700 });
+        await syncConversationReceiptDirectory(this.directory);
+      }
+      await writeReceipt(file, { ...receipt, state: "preparing" });
+      await input.prepare?.(fingerprint);
+    } catch (error) {
+      throw new MessageNotAdmittedError(error);
+    }
+    await writeReceipt(file, { ...receipt, state: "pending" });
     await input.send();
-    await writeJsonFileAtomic(file, { ...receipt, state: "completed" });
+    await writeReceipt(file, { ...receipt, state: "completed" });
   }
 }
 

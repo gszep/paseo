@@ -10,6 +10,7 @@ import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { createTestPaseoDaemon } from "./paseo-daemon.js";
 import { createTestAgentClient } from "./fake-agent-client.js";
 import { z } from "zod";
+import { mentionFixtureTitle, purgeMentionFixtureSources } from "./chi-mention-fixture-sources.js";
 
 const repo = "github:gszep/chi-synthetic-two-actor-20260925";
 interface NativeMessage {
@@ -21,12 +22,42 @@ interface NativeMessage {
 }
 
 /** Live Chi identities and storage; a synthetic provider owns the native IDs and makes no model calls. */
-export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty", origin: string) {
+export async function startMentionActor(
+  actor: "sava-the-owl" | "mochi-the-kitty",
+  origin: string,
+  runId: string,
+) {
   if (process.env.CI) throw new Error("Live Chi acceptance refuses CI");
   const credentials = process.env.CHI_MENTION_TEST_ACTORS_DIR;
   if (!credentials)
     throw new Error("Set CHI_MENTION_TEST_ACTORS_DIR to the private test-account token directory");
   const token = (await readFile(join(credentials, `${actor}.chi-token`), "utf8")).trim();
+  async function removeSource(sourceId: string) {
+    const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+    url.searchParams.set("sourceId", sourceId);
+    const response = await fetch(url, {
+      method: "DELETE",
+      redirect: "error",
+      headers: { authorization: `Bearer ${token}`, "x-chi-repo": repo },
+    });
+    if (!response.ok) throw new Error(`Synthetic source purge failed: ${response.status}`);
+    await response.body?.cancel();
+  }
+  await purgeMentionFixtureSources({
+    actor,
+    remove: removeSource,
+    list: async (cursor) => {
+      const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+      url.searchParams.set("limit", "100");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url, {
+        redirect: "error",
+        headers: { authorization: `Bearer ${token}`, "x-chi-repo": repo },
+      });
+      if (!response.ok) throw new Error(`Synthetic source listing failed: ${response.status}`);
+      return response.json();
+    },
+  });
   const cwd = await mkdtemp(join(tmpdir(), "paseo-mention-project-"));
   execFileSync("git", ["init", "-q", cwd]);
   execFileSync("git", [
@@ -47,7 +78,7 @@ export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty
     export: async (sessionId) => ({
       info: {
         id: sessionId,
-        title: "Synthetic human mention acceptance",
+        title: `${mentionFixtureTitle} ${runId}`,
         location: { directory: cwd },
       },
       messages: messages.get(sessionId) ?? [],
@@ -142,7 +173,7 @@ export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty
     provider: "opencode",
     cwd,
     workspaceId: workspace.id,
-    title: `Mention acceptance ${actor}`,
+    title: `Mention acceptance ${actor} ${runId}`,
     modeId: "default",
   });
   async function sourceRequest(path: string, method: string, body?: unknown) {
@@ -178,16 +209,7 @@ export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty
     },
     async close() {
       try {
-        for (const sourceId of createdSources) {
-          const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
-          url.searchParams.set("sourceId", sourceId);
-          const response = await fetch(url, {
-            method: "DELETE",
-            redirect: "error",
-            headers: { authorization: `Bearer ${token}`, "x-chi-repo": repo },
-          });
-          if (!response.ok) throw new Error(`Synthetic source purge failed: ${response.status}`);
-        }
+        for (const sourceId of createdSources) await removeSource(sourceId);
       } finally {
         await client.removeProject(project.project!.projectId);
         await client.close();
@@ -200,7 +222,8 @@ export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty
 
 const actor = z.enum(["sava-the-owl", "mochi-the-kitty"]).parse(process.argv[2]);
 const origin = z.string().url().parse(process.argv[3]);
-const instance = await startMentionActor(actor, origin);
+const runId = z.string().uuid().parse(process.argv[4]);
+const instance = await startMentionActor(actor, origin, runId);
 process.send?.({
   type: "ready",
   serverId: instance.serverId,

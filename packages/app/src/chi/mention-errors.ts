@@ -1,12 +1,19 @@
 export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
   const copy: Record<string, string> = {
+    "chi-reply-storage-unavailable":
+      "Unable to update saved reply storage. The original operation is retained. Try again after storage is available.",
+    "chi-mention-text-too-long":
+      "Human mentions and replies must be 8,000 characters or fewer. Shorten the text and send again.",
+    "chi-github-login-required": "Sign in to GitHub on this host, then verify mention context.",
+    "chi-reply-rejected":
+      "The saved reply was rejected without committing. Correct it before sending a new operation.",
     "chi-share-required": "Share this session to Chi before sending a human mention.",
     "chi-mentions-unsupported": "Update this host to use Chi mentions.",
     "chi-mention-plain-text-required":
       "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",
     "chi-mention-context-changed":
-      "The host account, repository or credentials changed. Verify mention context before continuing; saved operations retain their original identity.",
+      "The host account, repository or credentials changed. Return to the original account and repository, verify mention context, then explicitly authorize the saved operation with current credentials.",
     "chi-mention-submission-unresolved":
       "A saved send is unconfirmed. Use Retry saved send to confirm that exact request before starting another send.",
     "chi-host-disconnected": "Reconnect this host, then verify mention context.",

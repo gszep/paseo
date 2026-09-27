@@ -668,8 +668,12 @@ function ReplyForm({
     state.operation !== null;
   const acknowledge = useCallback(() => void form.send("acknowledge"), [form]);
   const reply = useCallback(() => void form.send("reply"), [form]);
+  const reauthorize = useCallback(() => void form.reauthorize().catch(() => undefined), [form]);
   const refresh = useCallback(
-    () => void form.discardConflict().then(() => onSuccess(handoff)),
+    () =>
+      void form.discardConflict().then((discarded) => {
+        return discarded ? onSuccess(handoff) : undefined;
+      }),
     [form, onSuccess, handoff],
   );
   return (
@@ -702,14 +706,19 @@ function ReplyForm({
           title="Operation not confirmed"
           description={mentionError(state.error)}
         >
-          {state.operation ? (
+          {state.operation && state.status !== "blocked" ? (
             <Button variant="outline" size="sm" onPress={reply}>
               Retry saved operation
             </Button>
           ) : null}
-          {state.error === "chi-mentions-http-409" ? (
+          {state.canDiscard ? (
             <Button variant="outline" size="sm" onPress={refresh}>
-              Refresh discussion
+              Correct rejected reply
+            </Button>
+          ) : null}
+          {state.canReauthorize ? (
+            <Button variant="outline" size="sm" onPress={reauthorize}>
+              Authorize saved reply with current credentials
             </Button>
           ) : null}
         </Alert>

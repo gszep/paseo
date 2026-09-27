@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority } from "./connection.js";
+import { classifyMentionFailure } from "./mention-failure.js";
 
 const homes: string[] = [];
 function barrier() {
@@ -146,6 +147,27 @@ async function fixture() {
 }
 
 describe("Chi owner recovery", () => {
+  it.each(["reply", "acknowledge", "retry"] as const)(
+    "classifies the production missing-credential code as access loss during %s",
+    async (action) => {
+      const f = await fixture();
+      const owner = f.restart();
+      const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+      f.authority.login = async () => {
+        throw new Error("chi-github-login-required");
+      };
+      const operation =
+        action === "retry"
+          ? { action, agentId: "agent" }
+          : { action, id: "handoff", operationId: "stable", revision: 1, text: "reply" };
+      const error = await owner
+        .mentionOperation(f.home, "workspace", operation, scope.context)
+        .catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ message: "chi-github-login-required" });
+      expect(classifyMentionFailure(error)).toEqual({ accessLost: true, outcome: "unknown" });
+    },
+  );
+
   it("mention requests bind actor, repository and auth generation before mutations, while reminted sessions keep the credential generation", async () => {
     const f = await fixture();
     let actor = "github:owner",

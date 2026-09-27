@@ -177,12 +177,16 @@ function SavedSend(target: ProtectedTarget) {
     refetchInterval: 2000,
     queryFn: async () => {
       const saved = await mentionSubmissions.read(target.serverId, target.agentId);
-      if (
-        saved &&
-        (!saved.chiMentionContext || !sameMentionContext(target.identity, saved.chiMentionContext))
-      )
+      const authorization = saved?.chiMentionAuthorization ?? saved?.chiMentionContext;
+      if (saved && (!authorization || !sameMentionContext(target.identity, authorization))) {
+        if (
+          saved.chiMentionContext?.actor === target.identity.actor &&
+          saved.chiMentionContext.repo === target.identity.repo
+        )
+          return { request: null, canReauthorize: true };
         throw new Error("chi-mention-context-changed");
-      return saved;
+      }
+      return { request: saved, canReauthorize: false };
     },
   });
   const retry = useMutation({
@@ -193,25 +197,37 @@ function SavedSend(target: ProtectedTarget) {
   });
   const { mutate } = retry;
   const recover = useCallback(() => mutate(), [mutate]);
+  const authorization = useMutation({
+    mutationFn: () =>
+      mentionSubmissions.reauthorize(target.serverId, target.agentId, target.identity),
+    onSettled: () => pending.refetch(),
+  });
+  const { mutate: authorize } = authorization;
+  const reauthorize = useCallback(() => authorize(), [authorize]);
   return (
     <View>
-      {pending.isSuccess && pending.data ? (
+      {pending.isSuccess && pending.data.canReauthorize ? (
+        <Button onPress={reauthorize} disabled={authorization.isPending}>
+          Authorize saved send with current credentials
+        </Button>
+      ) : null}
+      {pending.isSuccess && pending.data.request ? (
         <View>
-          <Text style={styles.text}>Unconfirmed saved send: {pending.data.text}</Text>
+          <Text style={styles.text}>Unconfirmed saved send: {pending.data.request.text}</Text>
           <Text style={styles.text}>
-            Recipients: {pending.data.chiMentions?.join(", ")}. New sends are blocked until this
-            exact saved send is confirmed.
+            Recipients: {pending.data.request.chiMentions?.join(", ")}. New sends are blocked until
+            this exact saved send is confirmed.
           </Text>
           <Button onPress={recover} disabled={retry.isPending}>
             Retry saved send
           </Button>
         </View>
       ) : null}
-      {pending.isError || retry.isError ? (
+      {pending.isError || retry.isError || authorization.isError ? (
         <Alert
           variant="error"
           title="Saved send requires recovery"
-          description={mentionError(pending.error ?? retry.error)}
+          description={mentionError(pending.error ?? retry.error ?? authorization.error)}
         />
       ) : null}
     </View>

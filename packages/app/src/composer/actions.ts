@@ -20,6 +20,7 @@ import type { PickedImageAttachmentInput } from "@/hooks/image-attachment-picker
 import { i18n } from "@/i18n/i18next";
 import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { mentionSubmissions } from "@/chi/mention-submission-storage";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 export interface QueuedComposerMessage {
   id: string;
@@ -57,6 +58,7 @@ export interface ComposerSendClient {
       messageId: string;
       chiMentions?: string[];
       chiMentionContext?: ChiMentionContext;
+      chiMentionAuthorization?: ChiMentionContext;
       activeTurnBehavior?: ActiveTurnBehavior;
       images: Array<{ data: string; mimeType: string }>;
       attachments: ReturnType<typeof splitComposerAttachmentsForSubmit>["attachments"];
@@ -229,6 +231,9 @@ export async function dispatchComposerAgentMessage(
       : {}),
   });
   input.submission.begin(input.agentId, userMessage);
+  let mentionAttempt: string | undefined;
+  const mentionHost = input.chiMentions?.length ? input.serverId : undefined;
+  const mentions = input.mentions ?? mentionSubmissions;
   try {
     const imagesData = await input.encodeImages(wirePayload.images);
     const options = {
@@ -239,18 +244,15 @@ export async function dispatchComposerAgentMessage(
       images: imagesData ?? [],
       attachments: wirePayload.attachments,
     };
-    const mentions = input.mentions ?? mentionSubmissions;
-    if (input.serverId)
-      await mentions.prepare(input.serverId, {
-        agentId: input.agentId,
-        text: input.text,
-        ...options,
-      });
+    const request = { agentId: input.agentId, text: input.text, ...options };
+    if (input.serverId) await mentions.prepare(input.serverId, request);
+    if (mentionHost) mentionAttempt = await mentions.beginAttempt(mentionHost, request);
     await input.client.sendAgentMessage(input.agentId, input.text, options);
-    if (input.serverId && input.chiMentions?.length)
-      await mentions.complete(input.serverId, input.agentId, clientMessageId);
+    if (mentionHost) await mentions.complete(mentionHost, input.agentId, clientMessageId);
     input.submission.accept(input.agentId, clientMessageId);
   } catch (error) {
+    if (mentionHost)
+      await mentions.reject(mentionHost, input.agentId, clientMessageId, error, mentionAttempt);
     input.submission.reject(input.agentId, clientMessageId);
     throw error;
   }
@@ -274,11 +276,19 @@ export function assertMentionPrompt(input: {
   attachments: readonly unknown[];
   chiMentions?: readonly string[];
 }) {
+  if (input.chiMentions?.length && input.text.length > 8000)
+    throw new ChiOperationError("chi-mention-text-too-long", {
+      accessLost: false,
+      outcome: "not_committed",
+    });
   if (
     input.chiMentions?.length &&
     (input.text.trimStart().startsWith("/") || input.attachments.length)
   )
-    throw new Error("chi-mention-plain-text-required");
+    throw new ChiOperationError("chi-mention-plain-text-required", {
+      accessLost: false,
+      outcome: "not_committed",
+    });
 }
 
 export function queueComposerMessage(input: QueueComposerMessageInput): QueueComposerMessageResult {
@@ -372,10 +382,13 @@ export async function sendQueuedComposerMessageNow(
     await input.submitMessage(item);
     return { status: "submitted" };
   } catch (error) {
+    const uncertain = !(
+      error instanceof ChiOperationError && error.failure?.outcome === "not_committed"
+    );
     input.queue.write((prev) => {
       const next = new Map(prev);
       next.set(input.agentId, [
-        item.chiMentions?.length ? { ...item, attempted: true } : item,
+        item.chiMentions?.length ? { ...item, attempted: uncertain } : item,
         ...(prev.get(input.agentId) ?? []),
       ]);
       return next;

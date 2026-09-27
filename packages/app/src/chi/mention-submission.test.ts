@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { createMentionSubmissions, type MentionSubmission } from "./mention-submission";
 import { clearMentionSelection, selectMention, selectedRecipients } from "./mention-selection";
 import type { ComposerSendClient } from "@/composer/actions";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 const context = { actor: "github:sender", repo: "github:fixture/repo", generation: "a".repeat(64) };
 const request: MentionSubmission = {
@@ -136,4 +137,130 @@ test("late completion of an old retry cannot erase a newer unresolved send", asy
   await sends.prepare("host", next);
   await sends.complete("host", "agent", "message");
   expect(await sends.read("host", "agent")).toEqual(next);
+});
+
+test("length validation precedes persistence, and proven non-admission permits corrected or ordinary sends", async () => {
+  const storage = disk();
+  const sends = createMentionSubmissions(storage);
+  await expect(sends.prepare("host", { ...request, text: "x".repeat(8001) })).rejects.toThrow(
+    "chi-mention-text-too-long",
+  );
+  expect(await sends.read("host", "agent")).toBeNull();
+  await sends.prepare("host", request);
+  const attempt = await sends.beginAttempt("host", request);
+  await sends.reject("host", "agent", "message", new Error("chi-share-required"), attempt);
+  expect(await sends.read("host", "agent")).toEqual(request);
+  await sends.reject(
+    "host",
+    "agent",
+    "message",
+    new ChiOperationError("chi-share-required", { accessLost: false, outcome: "not_committed" }),
+    attempt,
+  );
+  expect(await sends.read("host", "agent")).toBeNull();
+  await sends.prepare("host", { ...request, messageId: "corrected", text: "@recipient corrected" });
+  await sends.complete("host", "agent", "corrected");
+  await sends.prepare("host", { agentId: "agent", text: "ordinary", messageId: "ordinary" });
+  expect(await sends.read("host", "agent")).toBeNull();
+});
+
+test("saved-send retry only releases a proven non-admission, retaining timeouts and ambiguous provider outcomes", async () => {
+  const sends = createMentionSubmissions(disk());
+  await sends.prepare("host", request);
+  const client = sender([]);
+  for (const error of [
+    new Error("timeout"),
+    new ChiOperationError("agent_request_outcome_unknown", {
+      accessLost: false,
+      outcome: "unknown",
+    }),
+  ]) {
+    client.sendAgentMessage = async () => {
+      throw error;
+    };
+    await expect(sends.retry("host", "agent", context, client)).rejects.toThrow(error.message);
+    expect(await sends.read("host", "agent")).toEqual(request);
+  }
+  client.sendAgentMessage = async () => {
+    throw new ChiOperationError("chi-mention-recipient-unavailable", {
+      accessLost: false,
+      outcome: "not_committed",
+    });
+  };
+  await expect(sends.retry("host", "agent", context, client)).rejects.toThrow(
+    "chi-mention-recipient-unavailable",
+  );
+  expect(await sends.read("host", "agent")).toBeNull();
+});
+
+test("separate store instances serialize admission and late rejection cleanup", async () => {
+  const storage = disk();
+  const first = createMentionSubmissions(storage),
+    second = createMentionSubmissions(storage);
+  const outcomes = await Promise.allSettled([
+    first.prepare("host", request),
+    second.prepare("host", { ...request, messageId: "other" }),
+  ]);
+  expect(outcomes.map((r) => r.status)).toEqual(["fulfilled", "rejected"]);
+  const attempt = await first.beginAttempt("host", request);
+  await first.complete("host", "agent", "message");
+  await second.prepare("host", { ...request, messageId: "other" });
+  await first.reject(
+    "host",
+    "agent",
+    "message",
+    new ChiOperationError("rejected", { accessLost: false, outcome: "not_committed" }),
+    attempt,
+  );
+  expect((await second.read("host", "agent"))?.messageId).toBe("other");
+});
+
+test("late non-admission cannot erase a newer attempt of the same immutable send, even after clearing and resaving", async () => {
+  const sends = createMentionSubmissions(disk());
+  const rejection = new ChiOperationError("chi-share-required", {
+    accessLost: false,
+    outcome: "not_committed",
+  });
+  await sends.prepare("host", request);
+  const a = await sends.beginAttempt("host", request);
+  const b = await sends.beginAttempt("host", request);
+  await sends.reject("host", "agent", "message", rejection, a);
+  expect(await sends.read("host", "agent")).toEqual(request);
+  await sends.reject("host", "agent", "message", rejection, b);
+  expect(await sends.read("host", "agent")).toBeNull();
+  await sends.prepare("host", request);
+  const c = await sends.beginAttempt("host", request);
+  expect(c).not.toBe(a);
+  await sends.reject("host", "agent", "message", rejection, a);
+  expect(await sends.read("host", "agent")).toEqual(request);
+  const rotated = { ...context, generation: "b".repeat(64) };
+  await sends.reauthorize("host", "agent", rotated);
+  await sends.reject("host", "agent", "message", rejection, c);
+  expect(await sends.read("host", "agent")).toEqual({
+    ...request,
+    chiMentionAuthorization: rotated,
+  });
+  await expect(sends.beginAttempt("host", request)).rejects.toThrow(
+    "chi-mention-submission-unresolved",
+  );
+});
+
+test("same-account credential rotation explicitly reauthorizes without changing the immutable request", async () => {
+  const sends = createMentionSubmissions(disk());
+  await sends.prepare("host", request);
+  const calls: MentionSubmission[] = [];
+  const rotated = { ...context, generation: "b".repeat(64) };
+  await expect(sends.retry("host", "agent", rotated, sender(calls))).rejects.toThrow(
+    "chi-mention-context-changed",
+  );
+  await expect(
+    sends.reauthorize("host", "agent", { ...rotated, actor: "github:other" }),
+  ).rejects.toThrow("chi-mention-context-changed");
+  await expect(
+    sends.reauthorize("host", "agent", { ...rotated, repo: "github:other/repo" }),
+  ).rejects.toThrow("chi-mention-context-changed");
+  expect(await sends.read("host", "agent")).toEqual(request);
+  await sends.reauthorize("host", "agent", rotated);
+  await sends.retry("host", "agent", rotated, sender(calls));
+  expect(calls).toEqual([{ ...request, chiMentionAuthorization: rotated }]);
 });

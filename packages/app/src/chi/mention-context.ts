@@ -3,6 +3,7 @@ import type {
   ChiMentionOperation,
   ChiMentionResult,
 } from "@getpaseo/protocol/chi-mentions";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 export type ScopedMentionResult = ChiMentionResult & { context: ChiMentionContext };
 interface ScopeState {
@@ -81,7 +82,10 @@ export function createMentionScope(
         state.generation !== current.generation ||
         !sameMentionContext(result.context, current.context)
       )
-        throw new Error("chi-mention-context-changed");
+        throw new ChiOperationError("chi-mention-context-changed", {
+          accessLost: true,
+          outcome: "unknown",
+        });
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "chi-mentions-unavailable";
@@ -93,7 +97,7 @@ export function createMentionScope(
       // always clears every protected view; read acquisition failures do too.
       if (
         state.generation === current.generation &&
-        (!mutation || /context|identity|repository|http-40[134]/.test(message))
+        (!mutation || (error instanceof ChiOperationError && error.failure?.accessLost))
       )
         lose(message);
       throw error;

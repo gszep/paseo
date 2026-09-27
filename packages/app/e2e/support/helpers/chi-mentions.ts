@@ -23,11 +23,15 @@ const responseSchema = z.discriminatedUnion("ok", [
 ]);
 type Action = "lose-create" | "lose-reply" | "hide" | "attempts" | "close";
 
-export async function startMentionActor(actor: "sava-the-owl" | "mochi-the-kitty", origin: string) {
+export async function startMentionActor(
+  actor: "sava-the-owl" | "mochi-the-kitty",
+  origin: string,
+  runId: string,
+) {
   const root = path.resolve(__dirname, "../../../../..");
   const child = spawnTsx(
     path.join(root, "packages/server/src/server/test-utils/chi-mention-acceptance.ts"),
-    [actor, origin],
+    [actor, origin, runId],
     {
       cwd: root,
       env: { ...process.env, PASEO_SUPERVISED: "0" },

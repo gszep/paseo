@@ -1355,6 +1355,7 @@ export const FetchAgentRequestMessageSchema = z.object({
 export const SendAgentMessageRequestSchema = z.object({
   chiMentions: ChiMentionRecipientsSchema.optional(),
   chiMentionContext: ChiMentionContextSchema.optional(),
+  chiMentionAuthorization: ChiMentionContextSchema.optional(),
   type: z.literal("send_agent_message_request"),
   requestId: z.string(),
   /** Accepts full ID, unique prefix, or exact full title (server resolves). */
@@ -5016,6 +5017,7 @@ export const SendAgentMessageResponseMessageSchema = z.object({
     agentId: z.string(),
     accepted: z.boolean(),
     error: z.string().nullable(),
+    admission: z.enum(["not_admitted", "unknown"]).optional(),
   }),
 });
 

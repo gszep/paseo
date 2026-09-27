@@ -6,6 +6,21 @@ const principal = z.string().regex(/^github:[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
 const text = z.string().min(1).max(8000);
 export const ChiMentionContextSchema = z.object({ actor: principal, repo: id, generation: hash });
 export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
+export const ChiFailureSchema = z.object({
+  accessLost: z.boolean(),
+  outcome: z.enum(["not_committed", "unknown"]),
+});
+export type ChiFailure = z.infer<typeof ChiFailureSchema>;
+
+export class ChiOperationError extends Error {
+  constructor(
+    message: string,
+    public readonly failure?: ChiFailure,
+  ) {
+    super(message);
+    this.name = "ChiOperationError";
+  }
+}
 export const ChiParticipantSchema = z.object({ ownerId: principal, handle: id });
 export type ChiParticipant = z.infer<typeof ChiParticipantSchema>;
 export const ChiMentionRecipientsSchema = z.array(principal).min(1).max(8);
@@ -152,6 +167,11 @@ export const ChiMentionResponseSchema = z.object({
       result: ChiMentionResultSchema,
       context: ChiMentionContextSchema.optional(),
     }),
-    z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
+    z.object({
+      requestId: z.string(),
+      outcome: z.literal("failed"),
+      error: z.string(),
+      failure: ChiFailureSchema.optional(),
+    }),
   ]),
 });

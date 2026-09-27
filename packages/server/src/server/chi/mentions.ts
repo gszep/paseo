@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { MessageReceipts } from "../message-receipts/index.js";
+import type { SendAgentMessageRequest } from "@getpaseo/protocol/messages";
 import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/http";
 import {
   readConversationReceipt,
@@ -36,6 +38,7 @@ const receiptSchema = z.object({
   actor: z.string(),
   endpoint: z.string(),
   text: z.string(),
+  admission: z.string().optional(),
   source: ChiSourceSchema.nullable(),
   deliveries: z.array(ChiDeliverySchema),
 });
@@ -61,6 +64,24 @@ const handoffSchema = z.object({ ok: z.literal(true), handoff: ChiHandoffSchema 
 export function mentionFailure(error: unknown): string {
   if (error instanceof Error && /^chi-[a-z0-9-]+$/.test(error.message)) return error.message;
   return "chi-mentions-unavailable";
+}
+
+export function assertMentionSend(msg: SendAgentMessageRequest) {
+  if (!msg.chiMentions) return;
+  if (msg.text.length > 8000) throw new Error("chi-mention-text-too-long");
+  if (
+    msg.chiMentionAuthorization &&
+    (msg.chiMentionAuthorization.actor !== msg.chiMentionContext?.actor ||
+      msg.chiMentionAuthorization.repo !== msg.chiMentionContext?.repo)
+  )
+    throw new Error("chi-mention-context-changed");
+  if (
+    !msg.messageId ||
+    msg.text.trimStart().startsWith("/") ||
+    msg.images?.length ||
+    msg.attachments?.length
+  )
+    throw new Error("chi-mention-plain-text-required");
 }
 
 /** Private delivery receipts hold intent and immutable pins; Chi owns all messages and ACLs. */
@@ -153,6 +174,7 @@ export class ChiMentions {
     text: string;
     recipients: string[];
     identity: MentionIdentity;
+    admission: string;
   }) {
     return this.exclusive(input.agentId, async () => {
       const recipients = [...new Set(input.recipients.map((id) => id.toLowerCase()))].sort();
@@ -169,6 +191,10 @@ export class ChiMentions {
           !sameRecipients
         )
           throw new Error("chi-mention-conflict");
+        if (receipt.admission && receipt.admission !== input.admission)
+          throw new Error("chi-mention-conflict");
+        if (!receipt.admission)
+          await writeConversationReceipt(path, { ...receipt, admission: input.admission });
         return;
       }
       if (input.text.length > 8000) throw new Error("chi-mention-text-too-long");
@@ -189,6 +215,7 @@ export class ChiMentions {
         actor: input.identity.actor,
         endpoint: this.authority.endpoint,
         text: input.text,
+        admission: input.admission,
         source: null,
         deliveries: selected.map((recipient) => ({
           messageId: input.messageId,
@@ -213,6 +240,7 @@ export class ChiMentions {
     return this.exclusive(input.agentId, async () => {
       for (const receipt of await this.receipts(input.agentId)) {
         if (!this.matches(receipt, input.identity)) continue;
+        if (!(await this.admitted(receipt))) continue;
         if (receipt.deliveries.every((d) => d.status === "delivered")) continue;
         if (!receipt.source) {
           const matches = input.messages.filter((message) => {
@@ -244,6 +272,7 @@ export class ChiMentions {
     });
   }
   private async deliver(receipt: Receipt, identity: MentionIdentity) {
+    if (!(await this.admitted(receipt))) return;
     if (!receipt.source) return;
     for (const delivery of receipt.deliveries) {
       if (delivery.status === "delivered") continue;
@@ -277,11 +306,20 @@ export class ChiMentions {
       let needsCapture = false;
       for (const receipt of await this.receipts(agentId)) {
         if (!this.matches(receipt, identity)) continue;
+        if (!(await this.admitted(receipt))) continue;
         if (!receipt.source) needsCapture = true;
         else await this.deliver(receipt, identity);
       }
       return needsCapture;
     });
+  }
+  private async admitted(receipt: Receipt) {
+    if (!receipt.admission) return false;
+    return new MessageReceipts(join(this.home, "agent-requests")).admits(
+      receipt.agentId,
+      receipt.messageId,
+      receipt.admission,
+    );
   }
   async status(agentId: string, identity: MentionIdentity): Promise<ChiMentionResult> {
     const receipts = await this.receipts(agentId);

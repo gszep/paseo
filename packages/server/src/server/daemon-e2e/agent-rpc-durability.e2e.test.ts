@@ -28,6 +28,8 @@ test("mention intent is created only inside admitted message receipts, and trans
     actor = "github:sender";
   const submitted: string[] = [];
   const backendWrites: string[] = [];
+  let credentialGeneration = "original",
+    loggedOut = false;
   const host = await createTestPaseoDaemon({
     mcpEnabled: false,
     agentClients: {
@@ -39,7 +41,10 @@ test("mention intent is created only inside admitted message receipts, and trans
     },
     chiAuthority: {
       endpoint: "https://chi.invalid",
-      login: async () => ({ sessionToken: "fixture", chiUserId: actor }),
+      login: async () => {
+        if (loggedOut) throw new Error("chi-github-login-required");
+        return { sessionToken: "fixture", chiUserId: actor, credentialGeneration };
+      },
       request: async (url, init) => {
         const target = new URL(String(url));
         if (init?.method && init.method !== "GET") backendWrites.push(target.pathname);
@@ -137,6 +142,63 @@ test("mention intent is created only inside admitted message receipts, and trans
       ...transformed.map((_, i) => `rejected-transform-${i}`),
     ]);
     expect(backendWrites).toEqual([]);
+    await expect(
+      client.sendAgentMessage(agent.id, "x".repeat(8001), {
+        messageId: "oversized",
+        chiMentions: ["github:recipient"],
+        chiMentionContext: scope.context,
+      }),
+    ).rejects.toMatchObject({ failure: { outcome: "not_committed" } });
+    await expect(
+      client.sendAgentMessage(agent.id, "@missing check", {
+        messageId: "unavailable",
+        chiMentions: ["github:missing"],
+        chiMentionContext: scope.context,
+      }),
+    ).rejects.toMatchObject({
+      message: "chi-mention-recipient-unavailable",
+      failure: { outcome: "not_committed" },
+    });
+    await client.sendAgentMessage(agent.id, "ordinary after rejection", {
+      messageId: "ordinary-after-rejection",
+    });
+    await client.waitForFinish(agent.id);
+    const saved = {
+      messageId: "rotate-credentials",
+      chiMentions: ["github:recipient"],
+      chiMentionContext: scope.context,
+    };
+    credentialGeneration = "rotated";
+    await expect(client.sendAgentMessage(agent.id, text, saved)).rejects.toMatchObject({
+      message: "chi-mention-context-changed",
+      failure: { outcome: "not_committed" },
+    });
+    const fresh = await client.chiMentions({
+      workspaceId: workspace.id,
+      operation: { action: "scope" },
+    });
+    const authorized = { ...saved, chiMentionAuthorization: fresh.context };
+    await client.sendAgentMessage(agent.id, text, authorized);
+    await client.waitForFinish(agent.id);
+    await client.sendAgentMessage(agent.id, text, authorized);
+    expect(submitted.filter((id) => id === saved.messageId)).toHaveLength(1);
+    await expect(
+      client.sendAgentMessage(agent.id, text, {
+        ...authorized,
+        chiMentionAuthorization: { ...fresh.context, actor: "github:other" },
+      }),
+    ).rejects.toMatchObject({ message: "chi-mention-context-changed" });
+    loggedOut = true;
+    await expect(
+      client.chiMentions({
+        workspaceId: workspace.id,
+        expectedContext: fresh.context,
+        operation: { action: "retry", agentId: agent.id },
+      }),
+    ).rejects.toMatchObject({
+      message: "chi-github-login-required",
+      failure: { accessLost: true, outcome: "unknown" },
+    });
   } finally {
     if (projectId) await client.removeProject(projectId);
     await client.close();

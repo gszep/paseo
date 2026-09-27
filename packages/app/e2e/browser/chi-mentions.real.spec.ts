@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import { startMentionActor } from "../support/helpers/chi-mentions";
 import { composerLocator } from "../support/helpers/composer";
 
@@ -7,8 +8,9 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
 }, testInfo) => {
   test.setTimeout(240000);
   const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
-  const sender = await startMentionActor("sava-the-owl", origin);
-  const recipient = await startMentionActor("mochi-the-kitty", origin);
+  const runId = randomUUID();
+  const sender = await startMentionActor("sava-the-owl", origin, runId);
+  const recipient = await startMentionActor("mochi-the-kitty", origin, runId);
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
   const compact = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -49,7 +51,7 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
       ),
     ).toBeVisible();
     await expect(input).toHaveValue("/review @mochi-the-kitty");
-    const question = "@mochi-the-kitty Please inspect this synthetic persisted message.";
+    const question = `@mochi-the-kitty Please inspect this synthetic persisted message. ${runId}`;
     await input.fill(question);
     await sender.loseNextCreateReply();
     await sendPage.getByRole("button", { name: "Send message", exact: true }).click();
@@ -136,6 +138,17 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
         exact: true,
       }),
     ).toBeVisible({ timeout: 30000 });
+    const authorReply = `Thanks Mochi; Sava confirms the pinned context. ${runId}`;
+    await sendPage
+      .getByRole("textbox", { name: "Reply to mention", exact: true })
+      .fill(authorReply);
+    await sendPage.getByRole("button", { name: "Send reply", exact: true }).click();
+    await expect(sendPage.getByText("acknowledged · revision 4", { exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+    await readPage.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(readPage.getByText(authorReply, { exact: true })).toBeVisible({ timeout: 30000 });
+    await expect(readPage.getByText("acknowledged · revision 4", { exact: true })).toBeVisible();
     await sendPage.screenshot({
       path: testInfo.outputPath("desktop-sender-response.png"),
       fullPage: true,

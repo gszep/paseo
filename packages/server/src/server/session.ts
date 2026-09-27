@@ -7,6 +7,9 @@ import { isAbsolute } from "node:path";
 import { CreationService } from "./creation/index.js";
 import type { CreationSnapshot, AgentCreateRequest } from "@getpaseo/protocol/messages";
 import type { MessageReceipts } from "./message-receipts/index.js";
+import { MessageNotAdmittedError } from "./message-receipts/index.js";
+import { classifyMentionFailure } from "./chi/mention-failure.js";
+import { assertMentionSend } from "./chi/mentions.js";
 import equal from "fast-deep-equal";
 import { SessionDelivery, type OwnedSubscription } from "./session/owned-subscriptions/index.js";
 import { v4 as uuidv4 } from "uuid";
@@ -3069,7 +3072,12 @@ export class Session {
     } catch (error) {
       this.emit({
         type: "chi.mentions.execute.response",
-        payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
+        payload: {
+          requestId: msg.requestId,
+          outcome: "failed",
+          error: safeChiError(error),
+          failure: classifyMentionFailure(error),
+        },
       });
     }
   }
@@ -8189,6 +8197,7 @@ export class Session {
   private async handleSendAgentMessageRequest(
     msg: Extract<SessionInboundMessage, { type: "send_agent_message_request" }>,
   ): Promise<void> {
+    let attempted = false;
     const resolved = await this.resolveAgentIdentifier(msg.agentId);
     if (!resolved.ok) {
       this.emit({
@@ -8198,6 +8207,8 @@ export class Session {
           agentId: msg.agentId,
           accepted: false,
           error: resolved.error,
+          // The agent may have disappeared after accepting an earlier attempt.
+          admission: "unknown",
         },
       });
       return;
@@ -8207,14 +8218,7 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
-      if (
-        msg.chiMentions &&
-        (!msg.messageId ||
-          msg.text.trimStart().startsWith("/") ||
-          msg.images?.length ||
-          msg.attachments?.length)
-      )
-        throw new Error("chi-mention-plain-text-required");
+      assertMentionSend(msg);
       this.sessionLogger.trace(
         {
           agentId,
@@ -8244,8 +8248,10 @@ export class Session {
         }
       };
       if (msg.messageId) {
+        attempted = true;
         await this.messageReceipts.send({
           agentId,
+          durable: Boolean(msg.chiMentions),
           messageId: msg.messageId,
           request: {
             prompt,
@@ -8253,11 +8259,9 @@ export class Session {
             ...(msg.chiMentions ? { chiMentions: msg.chiMentions } : {}),
             ...(msg.chiMentionContext ? { chiMentionContext: msg.chiMentionContext } : {}),
           },
-          prepare: async () => {
+          prepare: async (fingerprint) => {
             await this.prepareAgentMessage(agentId, msg.text);
-            // Serialized after fingerprint admission, before the provider's pending receipt.
-            // A rejected ID reuse cannot persist intent; failed preflight never marks a
-            // provider turn as outcome-unknown when it was not attempted.
+            // The durable preparing fingerprint owns any mention intent published here.
             if (msg.chiMentions) {
               if (!this.agentManager.chi) throw new Error("chi-unavailable");
               await this.agentManager.chi.prepareMentions(
@@ -8265,13 +8269,15 @@ export class Session {
                 msg.messageId,
                 msg.text,
                 msg.chiMentions,
-                msg.chiMentionContext,
+                msg.chiMentionAuthorization ?? msg.chiMentionContext,
+                fingerprint,
               );
             }
           },
           send,
         });
       } else {
+        attempted = true;
         await send();
       }
 
@@ -8294,6 +8300,8 @@ export class Session {
           agentId: resolved.agentId,
           accepted: false,
           error: errorToFriendlyMessage(error),
+          admission:
+            !attempted || error instanceof MessageNotAdmittedError ? "not_admitted" : "unknown",
         },
       });
     }

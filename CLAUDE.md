@@ -145,7 +145,10 @@ Chi human mentions and inbox reuse source-linked handoffs and the existing expli
 Share flow. Admission, queued-send recovery and protected inbox state are specified
 in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
 regressions and isolated two-account rendered acceptance in
-[testing](docs/testing.md#test-organization); the latter is a separate release gate.
+[testing](docs/testing.md#test-organization); the latter is a separate release gate
+and runs serially because its test-account fixture purges stale owned evidence.
+Saved operation recovery must distinguish proven rejection from uncertain delivery;
+credential rotation requires explicit same-principal reauthorization.
 
 ## Platform gating
 

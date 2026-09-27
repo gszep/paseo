@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import type { ChiHandoff, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { openReplyForm } from "./reply-model";
 
 const handoff: ChiHandoff = {
@@ -88,7 +89,10 @@ test("an acknowledged response remains discussion and an explicit conflict refre
       throw new Error("No successful response");
     },
     execute: async () => {
-      throw new Error("chi-mentions-http-409");
+      throw new ChiOperationError("chi-mentions-http-409", {
+        accessLost: false,
+        outcome: "not_committed",
+      });
     },
   });
   form.setText("Conflicting reply");
@@ -230,4 +234,294 @@ test("a saved reply from another auth generation blocks instead of adopting a ne
   });
   await next.send("reply");
   expect(next.getState().status).toBe("blocked");
+});
+
+test("closed A completion cannot erase B after remount observes committed A and B loses its response", async () => {
+  const disk = storage();
+  let finishA!: (value: import("@getpaseo/protocol/chi-mentions").ChiMentionResult) => void;
+  let enteredA!: () => void;
+  const started = new Promise<void>((resolve) => {
+    enteredA = resolve;
+  });
+  const response = new Promise<import("@getpaseo/protocol/chi-mentions").ChiMentionResult>(
+    (resolve) => {
+      finishA = resolve;
+    },
+  );
+  const aId = "fb2aed79-8a81-46f4-bf03-311f9a61337e";
+  const bId = "ab2aed79-8a81-46f4-bf03-311f9a61337e";
+  const committed = {
+    ...handoff,
+    revision: 3,
+    replies: [{ id: aId, actor: context.actor, text: "A", at: "now", revision: 3 }],
+  };
+  const deps = {
+    handoff,
+    context,
+    key: "race",
+    storage: disk,
+    uuid: () => aId,
+    onSuccess: () => undefined,
+  };
+  const a = openReplyForm({
+    ...deps,
+    execute: async () => {
+      enteredA();
+      return response;
+    },
+  });
+  a.setText("A");
+  const sendingA = a.send("reply");
+  await started;
+  a.close();
+  const b = openReplyForm({
+    ...deps,
+    handoff: committed,
+    uuid: () => bId,
+    execute: async () => {
+      throw new Error("B committed, response lost");
+    },
+  });
+  // Await the real restore transaction by subscribing to its state transition.
+  await new Promise<void>((resolve) => {
+    const unsubscribe = b.subscribe(() => {
+      if (b.getState().status === "sent") {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+  b.setText("B");
+  await b.send("reply");
+  const savedB = await disk.getItem("race");
+  finishA({ kind: "handoff", actor: context.actor, handoff: committed });
+  await sendingA;
+  expect(await disk.getItem("race")).toBe(savedB);
+  b.close();
+  const operations: ChiMentionOperation[] = [];
+  const restored = openReplyForm({
+    ...deps,
+    handoff: committed,
+    execute: async (op) => {
+      operations.push(op);
+      throw new Error("still uncertain");
+    },
+  });
+  await restored.send("reply");
+  expect(operations).toEqual([
+    { action: "reply", id: handoff.id, operationId: bId, text: "B", revision: 3 },
+  ]);
+});
+
+test.each([409, 413, 422])(
+  "proven %s rejection survives reload and permits explicit correction",
+  async (status) => {
+    const disk = storage();
+    const deps = {
+      handoff,
+      context,
+      key: "rejected",
+      storage: disk,
+      uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+      onSuccess: () => undefined,
+    };
+    const first = openReplyForm({
+      ...deps,
+      execute: async () => {
+        throw new ChiOperationError(`chi-mentions-http-${status}`, {
+          accessLost: false,
+          outcome: "not_committed",
+        });
+      },
+    });
+    first.setText("Rejected content");
+    await first.send("reply");
+    first.close();
+    const calls: ChiMentionOperation[] = [];
+    const next = openReplyForm({
+      ...deps,
+      uuid: () => "ab2aed79-8a81-46f4-bf03-311f9a61337e",
+      execute: async (op) => {
+        calls.push(op);
+        return { kind: "handoff", actor: context.actor, handoff };
+      },
+    });
+    await new Promise<void>((resolve) => {
+      const off = next.subscribe(() => {
+        off();
+        resolve();
+      });
+    });
+    expect(next.getState().canDiscard).toBe(true);
+    await next.discardConflict();
+    next.setText("Corrected");
+    await next.send("reply");
+    expect(calls).toEqual([
+      {
+        action: "reply",
+        id: handoff.id,
+        operationId: "ab2aed79-8a81-46f4-bf03-311f9a61337e",
+        revision: 2,
+        text: "Corrected",
+      },
+    ]);
+  },
+);
+
+test("oversized reply never persists or dispatches and is immediately editable", async () => {
+  const disk = storage();
+  let calls = 0;
+  const form = openReplyForm({
+    handoff,
+    context,
+    key: "bounds",
+    storage: disk,
+    uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+    onSuccess: () => undefined,
+    execute: async () => {
+      calls++;
+      return { kind: "handoff", actor: context.actor, handoff };
+    },
+  });
+  form.setText("x".repeat(8001));
+  await form.send("reply");
+  expect(form.getState()).toMatchObject({
+    status: "failed",
+    operation: null,
+    error: "chi-mention-text-too-long",
+  });
+  expect(await disk.getItem("bounds")).toBeNull();
+  expect(calls).toBe(0);
+  form.setText("Corrected");
+  await form.send("reply");
+  expect(calls).toBe(1);
+});
+
+test("failed rejected-operation cleanup stays locked and reports the storage failure", async () => {
+  const disk = storage();
+  const form = openReplyForm({
+    handoff,
+    context,
+    key: "rejected-cleanup",
+    storage: {
+      ...disk,
+      removeItem: async () => {
+        throw new Error("storage unavailable");
+      },
+    },
+    uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+    onSuccess: () => undefined,
+    execute: async () => {
+      throw new ChiOperationError("chi-mentions-http-422", {
+        accessLost: false,
+        outcome: "not_committed",
+      });
+    },
+  });
+  form.setText("Rejected text");
+  await form.send("reply");
+  const saved = await disk.getItem("rejected-cleanup");
+  expect(await form.discardConflict()).toBe(false);
+  form.setText("Cannot replace yet");
+  expect(form.getState()).toMatchObject({
+    status: "failed",
+    text: "Rejected text",
+    error: "chi-reply-storage-unavailable",
+  });
+  expect(await disk.getItem("rejected-cleanup")).toBe(saved);
+});
+
+test("a stale reply rejection cannot unlock correction after a remounted retry loses its response", async () => {
+  const disk = storage();
+  let rejectFirst!: (error: Error) => void;
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const response = new Promise<never>((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  const deps = {
+    handoff,
+    context,
+    key: "reply-attempts",
+    storage: disk,
+    uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+    onSuccess: () => undefined,
+  };
+  const a = openReplyForm({
+    ...deps,
+    execute: async () => {
+      started();
+      return response;
+    },
+  });
+  a.setText("Retry identity");
+  const first = a.send("reply");
+  await entered;
+  const b = openReplyForm({
+    ...deps,
+    execute: async () => {
+      throw new Error("committed, response lost");
+    },
+  });
+  await b.send("reply");
+  const saved = await disk.getItem(deps.key);
+  rejectFirst(
+    new ChiOperationError("chi-mentions-http-422", { accessLost: false, outcome: "not_committed" }),
+  );
+  await first;
+  expect(a.getState().canDiscard).toBe(false);
+  expect(await a.discardConflict()).toBe(false);
+  expect(await disk.getItem(deps.key)).toBe(saved);
+  b.close();
+  const restored = openReplyForm({
+    ...deps,
+    execute: async () => {
+      throw new Error("still uncertain");
+    },
+  });
+  await restored.send("reply");
+  expect(restored.getState()).toMatchObject({
+    canDiscard: false,
+    operation: { operationId: deps.uuid() },
+  });
+});
+
+test("credential rotation requires explicit same-principal reauthorization and preserves reply UUID", async () => {
+  const disk = storage();
+  const calls: ChiMentionOperation[] = [];
+  const deps = {
+    handoff,
+    context,
+    key: "rotation",
+    storage: disk,
+    uuid: () => "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+    onSuccess: () => undefined,
+    execute: async (op: ChiMentionOperation) => {
+      calls.push(op);
+      throw new Error("uncertain");
+    },
+  };
+  const first = openReplyForm(deps);
+  first.setText("Original reply");
+  await first.send("reply");
+  first.close();
+  const other = openReplyForm({ ...deps, context: { ...context, actor: "github:other" } });
+  await other.send("reply");
+  expect(other.getState()).toMatchObject({
+    status: "blocked",
+    canReauthorize: false,
+    text: "",
+    operation: null,
+  });
+  await other.reauthorize();
+  other.close();
+  const rotated = openReplyForm({ ...deps, context: { ...context, generation: "b".repeat(64) } });
+  await rotated.send("reply");
+  expect(calls).toHaveLength(1);
+  expect(rotated.getState()).toMatchObject({ status: "blocked", canReauthorize: true, text: "" });
+  await rotated.reauthorize();
+  await rotated.send("reply");
+  expect(calls).toEqual([calls[0], calls[0]]);
 });
