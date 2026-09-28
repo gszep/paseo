@@ -53,6 +53,11 @@ the locked installed package beneath `packages/server/node_modules`: npm omits a
 hoisted workspace dependency even when named in `bundleDependencies`. It is a
 source-integration artifact, not a published package release.
 
+Capture association errors retain the HTTP status and an allowlisted public Chi
+reason (for example `evidence-http-413-native-store-limit`). The native client
+reads at most 1 KiB of a failed response; unknown, malformed and oversized bodies
+remain status-only. Protected response text never becomes an association label.
+
 Continuation request identity survives client reloads. The owner reacquires source
 access and matches the receipt's actor, deployment, runtime origin, pin and workspace
 before recovering a ready fork. Paseo's runtime identity is the existing stable
