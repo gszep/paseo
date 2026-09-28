@@ -1700,6 +1700,8 @@ export const ko: TranslationResources = {
       },
     },
     link: {
+      targetHost: "호스트: {{serverId}}",
+      targetRelay: "릴레이: {{endpoint}}",
       title: "페어링 링크 붙여넣기",
       helper: "서버에서 받은 페어링 링크를 붙여넣으세요.",
       label: "페어링 링크",

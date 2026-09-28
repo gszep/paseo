@@ -39,8 +39,17 @@ export function startPairingCamera({ video, onScan, onError }: CameraSessionOpti
   function stop() {
     stopped = true;
     clearTimeout(timer);
-    stream?.getTracks().forEach((track) => track.stop());
+    stream?.getTracks().forEach((track) => {
+      track.removeEventListener("ended", ended);
+      track.stop();
+    });
     video.srcObject = null;
+  }
+
+  function ended() {
+    if (stopped) return;
+    stop();
+    onError(new DOMException("Camera disconnected", "NotReadableError"));
   }
 
   async function start() {
@@ -58,6 +67,11 @@ export function startPairingCamera({ video, onScan, onError }: CameraSessionOpti
         return;
       }
       stream = acquired;
+      stream.getTracks().forEach((track) => track.addEventListener("ended", ended));
+      if (stream.getVideoTracks().some((track) => track.readyState === "ended")) {
+        ended();
+        return;
+      }
       video.srcObject = stream;
       await video.play();
       let detector = await createDetector();

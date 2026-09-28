@@ -63,6 +63,10 @@ Open the hosted app and select **Scan QR code** or **Paste pairing link**. Camer
 scanning requires HTTPS and camera access; permission is requested only after
 opening the scanner. If access was denied, allow the camera in the browser's
 site settings and retry. The camera stops on navigation or when the app is hidden.
+Unrelated QR codes are ignored. Scanned offers open the same confirmation as
+pasted links, with the daemon ID and relay endpoint shown before **Pair** opens
+a connection or saves a host. Cancel leaves both untouched. A disconnected camera
+stops decoding and offers the existing permission/retry control.
 Test iOS home-screen installation separately from Safari tabs.
 
 The web scanner bundles `jsQR` as its fallback when `BarcodeDetector` cannot

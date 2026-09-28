@@ -1692,6 +1692,8 @@ export const ar: TranslationResources = {
       },
     },
     link: {
+      targetHost: "المضيف: {{serverId}}",
+      targetRelay: "الترحيل: {{endpoint}}",
       title: "الصق رابط الاقتران",
       helper: "الصق رابط الاقتران من الخادم الخاص بك.",
       label: "رابط الاقتران",

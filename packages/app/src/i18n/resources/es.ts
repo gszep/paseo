@@ -1738,6 +1738,8 @@ export const es: TranslationResources = {
       },
     },
     link: {
+      targetHost: "Host: {{serverId}}",
+      targetRelay: "Relé: {{endpoint}}",
       title: "Pegar enlace de emparejamiento",
       helper: "Pegue el enlace de emparejamiento de su servidor.",
       label: "Enlace de emparejamiento",

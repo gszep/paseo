@@ -1721,6 +1721,8 @@ export const ru: TranslationResources = {
       },
     },
     link: {
+      targetHost: "Хост: {{serverId}}",
+      targetRelay: "Ретранслятор: {{endpoint}}",
       title: "Вставить ссылку для сопряжения",
       helper: "Вставьте ссылку на сопряжение с вашего сервера.",
       label: "Ссылка на сопряжение",

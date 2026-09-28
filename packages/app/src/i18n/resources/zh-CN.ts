@@ -1673,6 +1673,8 @@ export const zhCN: TranslationResources = {
       },
     },
     link: {
+      targetHost: "主机：{{serverId}}",
+      targetRelay: "中继：{{endpoint}}",
       title: "粘贴配对链接",
       helper: "粘贴来自 server 的配对链接。",
       label: "配对链接",

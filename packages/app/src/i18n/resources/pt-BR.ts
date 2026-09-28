@@ -1723,6 +1723,8 @@ export const ptBR: TranslationResources = {
       },
     },
     link: {
+      targetHost: "Host: {{serverId}}",
+      targetRelay: "Relay: {{endpoint}}",
       title: "Colar link de pareamento",
       helper: "Cole o link de pareamento do seu servidor.",
       label: "Link de pareamento",

@@ -1716,6 +1716,8 @@ export const en = {
       },
     },
     link: {
+      targetHost: "Host: {{serverId}}",
+      targetRelay: "Relay: {{endpoint}}",
       title: "Paste pairing link",
       helper: "Paste the pairing link from your server.",
       label: "Pairing link",

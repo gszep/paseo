@@ -3,9 +3,12 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import QRCode from "qrcode";
+import { startLocalWorkerRelay } from "../support/helpers/local-worker-relay";
+import { startIsolatedHostDaemon } from "../support/helpers/isolated-host-daemon";
+import { generateLocalPairingOffer } from "../../../server/src/server/pairing-offer";
 
 // A real Y4M camera frame, generated without ffmpeg or checked-in binary fixtures.
-async function qrVideo(directory: string, text: string): Promise<string> {
+function qrFrame(text: string): Buffer {
   const qr = QRCode.create(text, { errorCorrectionLevel: "M" }).modules;
   const size = 640;
   const pixels = Buffer.alloc(size * size, 235);
@@ -25,14 +28,15 @@ async function qrVideo(directory: string, text: string): Promise<string> {
     pixels,
     Buffer.alloc((size * size) / 2, 128),
   ]);
+  return frame;
+}
+
+async function qrVideo(directory: string, texts: string[]): Promise<string> {
   const video = path.join(directory, "qr.y4m");
+  const frames = texts.flatMap((text) => Array<Buffer>(20).fill(qrFrame(text)));
   await writeFile(
     video,
-    Buffer.concat([
-      Buffer.from(`YUV4MPEG2 W${size} H${size} F5:1 Ip A1:1 C420jpeg\n`),
-      frame,
-      frame,
-    ]),
+    Buffer.concat([Buffer.from("YUV4MPEG2 W640 H640 F5:1 Ip A1:1 C420jpeg\n"), ...frames]),
   );
   return video;
 }
@@ -49,7 +53,10 @@ for (const prefix of ["https://app.paseo.sh/", "https://hosted.example.com/"]) {
         relay: { endpoint: "localhost:1" },
       }),
     ).toString("base64url");
-    const video = await qrVideo(directory, `${prefix}#offer=${encoded}`);
+    const video = await qrVideo(directory, [
+      "https://example.com/unrelated-menu",
+      `${prefix}#offer=${encoded}`,
+    ]);
     const browser = await chromium.launch({
       args: [
         "--disable-blink-features=BarcodeDetector",
@@ -62,11 +69,12 @@ for (const prefix of ["https://app.paseo.sh/", "https://hosted.example.com/"]) {
       const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
       await page.goto(`http://localhost:${process.env.E2E_METRO_PORT}/pair-scan`);
       expect(await page.evaluate(() => "BarcodeDetector" in globalThis)).toBe(false);
-      await expect(page.getByRole("alert")).toContainText("Invalid input");
-      await expect(page.getByRole("button", { name: "Scan again" })).toBeVisible();
+      await expect(page.getByTestId("pair-link-modal")).toBeVisible();
+      await expect(page.getByTestId("pair-link-input")).toHaveValue(`${prefix}#offer=${encoded}`);
+      await expect(page.getByText(/Invalid input/)).toHaveCount(0);
       await expect(page.locator("video")).toHaveCount(0);
-      await page.getByRole("button", { name: "Scan again" }).click();
-      await expect(page.getByRole("alert")).toContainText("Invalid input");
+      await page.getByTestId("pair-link-submit").click();
+      await expect(page.getByText(/Invalid input/)).toBeVisible();
     } finally {
       await browser.close();
       await rm(directory, { recursive: true, force: true });
@@ -121,6 +129,159 @@ test("camera tracks stop when navigating away from the scanner", async () => {
     await page.getByRole("button", { name: "Back", exact: true }).click();
     await expect(page.locator("video")).toHaveCount(0);
     expect(await track.evaluate((value) => value.readyState)).toBe("ended");
+  } finally {
+    await browser.close();
+  }
+});
+
+test("scanned offers connect and persist only after Pair; Cancel has no side effects", async () => {
+  test.setTimeout(150_000);
+  const relay = await startLocalWorkerRelay();
+  const directory = await mkdtemp(path.join(tmpdir(), "paseo-confirm-qr-"));
+  const daemon = await startIsolatedHostDaemon("qr-confirmation-host", {
+    mutableRelay: { enabled: true, endpoint: relay.endpoint },
+  });
+  try {
+    const offer = await generateLocalPairingOffer({
+      paseoHome: daemon.paseoHome,
+      relayEndpoint: relay.endpoint,
+      relayUseTls: false,
+      includeQr: false,
+    });
+    if (!offer.url) throw new Error("Missing real daemon offer");
+    const video = await qrVideo(directory, [offer.url]);
+    const browser = await chromium.launch({
+      args: [
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+        `--use-file-for-fake-video-capture=${video}`,
+      ],
+    });
+    try {
+      const page = await browser.newPage();
+      const connections: string[] = [];
+      page.on("websocket", (socket) => {
+        if (socket.url().startsWith(`ws://${relay.endpoint}/`)) connections.push(socket.url());
+      });
+      await page.goto(`http://localhost:${process.env.E2E_METRO_PORT}/`);
+      await page.getByTestId("welcome-scan-qr").click();
+      await expect(page.getByTestId("pair-link-target")).toContainText(`Host: ${daemon.serverId}`);
+      await expect(page.getByTestId("pair-link-target")).toContainText(`Relay: ${relay.endpoint}`);
+      expect(connections).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(localStorage.getItem("@paseo:daemon-registry") ?? "[]"),
+        ),
+      ).toEqual([]);
+      await page.getByTestId("pair-link-cancel").click();
+      await expect(page.getByTestId("welcome-scan-qr")).toBeVisible();
+      expect(connections).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(localStorage.getItem("@paseo:daemon-registry") ?? "[]"),
+        ),
+      ).toEqual([]);
+
+      await page.getByTestId("welcome-scan-qr").click();
+      await expect(page.getByTestId("pair-link-target")).toContainText(`Host: ${daemon.serverId}`);
+      expect(connections).toEqual([]);
+      await page.getByTestId("pair-link-submit").click();
+      await expect(page.getByTestId("pair-link-modal")).toHaveCount(0);
+      await expect.poll(() => connections.length).toBeGreaterThan(0);
+      await expect
+        .poll(() => page.evaluate(() => localStorage.getItem("@paseo:daemon-registry")))
+        .toContain(daemon.serverId);
+      await page.reload();
+      await expect
+        .poll(() => page.evaluate(() => localStorage.getItem("@paseo:daemon-registry")))
+        .toContain(daemon.serverId);
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    await daemon.close();
+    await relay.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("device termination stops capture, shows retry, and disposes old track listeners", async () => {
+  const browser = await chromium.launch({
+    args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`http://localhost:${process.env.E2E_METRO_PORT}/pair-scan`);
+    await page.waitForFunction(() => document.querySelector("video")?.readyState === 4);
+    const track = await page.evaluateHandle(() => {
+      const stream = document.querySelector("video")?.srcObject;
+      if (!(stream instanceof MediaStream)) throw new Error("Missing stream");
+      return stream.getVideoTracks()[0];
+    });
+    // Browser dispatches this event on device removal; stop() alone does not emit it.
+    await track.evaluate((value) => value.dispatchEvent(new Event("ended")));
+    await expect(page.getByText(/The camera could not be opened/)).toBeVisible();
+    expect(await track.evaluate((value) => value.readyState)).toBe("ended");
+    expect(
+      await page
+        .locator("video")
+        .evaluate((video) => video instanceof HTMLVideoElement && video.srcObject === null),
+    ).toBe(true);
+    await page.getByRole("button", { name: "Grant permission" }).click();
+    await page.waitForFunction(() => document.querySelector("video")?.readyState === 4);
+    await track.evaluate((value) => value.dispatchEvent(new Event("ended")));
+    await expect(page.getByText(/The camera could not be opened/)).toHaveCount(0);
+    expect(
+      await page
+        .locator("video")
+        .evaluate(
+          (video) =>
+            video instanceof HTMLVideoElement &&
+            video.srcObject instanceof MediaStream &&
+            video.srcObject.active,
+        ),
+    ).toBe(true);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("page suspension stops capture and restoration acquires a new stream", async () => {
+  const browser = await chromium.launch({
+    args: ["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.goto(`http://localhost:${process.env.E2E_METRO_PORT}/pair-scan`);
+    await page.waitForFunction(() => document.querySelector("video")?.readyState === 4);
+    const track = await page.evaluateHandle(() => {
+      const stream = document.querySelector("video")?.srcObject;
+      if (!(stream instanceof MediaStream)) throw new Error("Missing stream");
+      return stream.getVideoTracks()[0];
+    });
+    await page.evaluate(() =>
+      window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })),
+    );
+    expect(await track.evaluate((value) => value.readyState)).toBe("ended");
+    expect(
+      await page
+        .locator("video")
+        .evaluate((video) => video instanceof HTMLVideoElement && video.srcObject === null),
+    ).toBe(true);
+    await page.evaluate(() =>
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })),
+    );
+    await page.waitForFunction(() => document.querySelector("video")?.readyState === 4);
+    expect(
+      await track.evaluate((value) => {
+        const stream = document.querySelector("video")?.srcObject;
+        return (
+          stream instanceof MediaStream &&
+          stream.active &&
+          stream.getVideoTracks()[0].id !== value.id
+        );
+      }),
+    ).toBe(true);
   } finally {
     await browser.close();
   }

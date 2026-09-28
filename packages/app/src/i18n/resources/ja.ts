@@ -1708,6 +1708,8 @@ export const ja: TranslationResources = {
       },
     },
     link: {
+      targetHost: "ホスト: {{serverId}}",
+      targetRelay: "リレー: {{endpoint}}",
       title: "ペアリングリンクを貼り付け",
       helper: "サーバーからのペアリングリンクを貼り付けてください。",
       label: "ペアリングリンク",

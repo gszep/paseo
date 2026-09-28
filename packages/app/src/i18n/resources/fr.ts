@@ -1742,6 +1742,8 @@ export const fr: TranslationResources = {
       },
     },
     link: {
+      targetHost: "Hôte : {{serverId}}",
+      targetRelay: "Relais : {{endpoint}}",
       title: "Coller le lien d'association",
       helper: "Collez le lien d'appairage depuis votre serveur.",
       label: "Lien d'appariement",
