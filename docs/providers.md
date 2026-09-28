@@ -88,6 +88,13 @@ Pi RPC extension UI dialog requests (`select`, `input`, `editor`, `confirm`) are
 
 OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than the tested 2.0.10 SDK at runtime selection. Runtime selection uses the configured command and environment and lasts until provider configuration reload. Keep upstream SDK types inside the version-specific adapter. OpenCode owns storage migration; a missing native session must fail resume rather than create a replacement. V2 has no native archive/unarchive operation: archiving affects Paseo only. V1 retains native archiving.
 
+V2 shell environments are per native session and process-local, not per directory.
+Rebind the full inherited environment with that agent's identity on each event-stream
+connection, including reconnects. The bridge's tool binding is a separate session map.
+This cannot repair automatic recovery on an independent OpenCode service before Paseo
+connects; OpenCode must wait for previously client-bound environments instead of falling
+back to the recovering server's environment (upstream issue anomalyco/opencode#51784).
+
 The V2 transfer preflight uses the credential owner's bounded HTTP adapter for destination
 session lookup. Only HTTP 404 means the replica is absent. The SDK wraps transport errors,
 so testing a caught SDK error directly for the underlying HTTP-error class loses that distinction.

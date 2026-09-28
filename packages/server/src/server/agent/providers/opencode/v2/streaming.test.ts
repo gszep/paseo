@@ -19,6 +19,57 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
+  test("restores each same-directory agent environment on reconnect and resume", async () => {
+    const first = new V2Harness();
+    const second = new V2Harness();
+    first.info.id = "session-first";
+    second.info.id = "session-second";
+    const environments = new Map<string, Record<string, string>>();
+    const bind = vi.fn(async (input: { sessionID: string; variables: Record<string, string> }) => {
+      environments.set(input.sessionID, { ...input.variables });
+    });
+    first.api.session.environment = bind;
+    second.api.session.environment = bind;
+    const clients = [first, second].map(
+      (harness) =>
+        new OpenCodeV2AgentClient({ logger: createTestLogger(), runtime: harness.runtime }),
+    );
+    const config = { provider: "opencode" as const, cwd: "/tmp/project" };
+    const launches = ["first", "second"].map((id) => ({
+      env: { PASEO_AGENT_ID: id, PASEO_AGENT_CWD: config.cwd },
+    }));
+    const sessions = await Promise.all(
+      clients.map((client, i) => client.createSession(config, launches[i])),
+    );
+    try {
+      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
+      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
+      expect(environments.get(first.info.id)?.PATH).toBe(process.env.PATH);
+      environments.clear(); // A replacement server has no process-local bindings.
+      first.push({ id: "reconnected-first", created: 2, type: "server.connected", data: {} });
+      second.push({ id: "reconnected-second", created: 2, type: "server.connected", data: {} });
+      await vi.waitFor(() => expect(bind).toHaveBeenCalledTimes(4));
+      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
+      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
+    } finally {
+      await Promise.all(sessions.map((session) => session.close()));
+    }
+    environments.clear();
+    const resumed = await Promise.all(
+      clients.map((client, i) =>
+        client.resumeSession(sessions[i].describePersistence(), undefined, launches[i]),
+      ),
+    );
+    try {
+      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
+      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
+      expect(first.prompts).toEqual([]);
+      expect(second.prompts).toEqual([]);
+    } finally {
+      await Promise.all(resumed.map((session) => session.close()));
+    }
+  });
+
   test("importing a verified fork does not append a same-agent or same-model switch", async () => {
     const harness = new V2Harness();
     harness.info.model = { providerID: "fixture", id: "local", variant: "default" };

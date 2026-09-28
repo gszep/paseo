@@ -65,6 +65,7 @@ export class OpenCodeV2Session implements AgentSession {
   private modes: AgentMode[] = [];
   private models: ModelInfo[] = [];
   private usage: AgentUsage | undefined;
+  private environment: Record<string, string> | undefined;
   constructor(
     private readonly connection: V2Connection,
     private info: SessionInfo,
@@ -123,11 +124,7 @@ export class OpenCodeV2Session implements AgentSession {
       await awaitPaseoPlugin({ client: this.client, location, signal: this.abort.signal });
     // OpenCode runs session shells with these variables as the whole environment, not
     // an overlay on its own, so they must carry the daemon's inherited environment.
-    if (launch?.env)
-      await this.client.session.environment({
-        sessionID: this.id,
-        variables: { ...inheritedEnvironment(), ...launch.env },
-      });
+    this.environment = launch?.env ? { ...inheritedEnvironment(), ...launch.env } : undefined;
     for (const [server, config] of Object.entries(this.config.mcpServers ?? {})) {
       await this.client.mcp.add({
         server,
@@ -351,6 +348,10 @@ export class OpenCodeV2Session implements AgentSession {
     }
   }
   private async reconcileConnection() {
+    // OpenCode's session environment is process-local. Restore this exact binding
+    // on every connection before observing recovered execution or reconciling it.
+    if (this.environment)
+      await this.client.session.environment({ sessionID: this.id, variables: this.environment });
     // Model limits are location-scoped metadata. Refresh on connection, not on
     // each streamed token or native step. Unknown limits must not prevent resume.
     this.models = [];
