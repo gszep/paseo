@@ -125,6 +125,13 @@ and synchronous. Keep the directory in memory across popup close/reopen; revalid
 in the background on popup open, focus/reconnect and a 30-second foreground interval.
 Same-scope revalidation keeps people visible while pending. A pending file search
 never delays people, and an empty-state row waits for all initial sources to settle.
+Failed refreshes clear protected data and disable the directory query. The scope
+owner independently retries acquisition on the next foreground interval, focus or
+online transition, so a failed refresh cannot permanently stop discovery. Failed
+acquisitions do not schedule immediate retries. React Query's focus manager shares
+the app's lifetime AppState/document visibility store: native background/inactive
+states pause polling, and foregrounding revalidates stale data even when the host
+connection never changed.
 
 The daemon coalesces directory acquisition per workspace for 30 seconds. The
 `/participants` endpoint enforces session/repository authorization and its `self`

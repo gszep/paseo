@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { focusManager, onlineManager } from "@tanstack/react-query";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient } from "@/data/query-client";
 import { createMentionScope, type MentionScope } from "./mention-context";
 import { clearHostMentionSelection } from "./mention-selection";
+
+export const mentionRefreshIntervalMs = 30_000;
 
 const scopes = new Map<string, { client: DaemonClient | null; scope: MentionScope }>();
 function scopeFor(host: string, workspace: string, client: DaemonClient | null) {
@@ -36,7 +39,22 @@ export function useMentionScope(
   const scope = useMemo(() => scopeFor(host, workspace, client), [host, workspace, client]);
   const state = useSyncExternalStore(scope.subscribe, scope.getState, scope.getState);
   useEffect(() => {
-    if (active && !scope.getState().context) void scope.acquire().catch(() => undefined);
+    if (!active) return;
+    function reacquire() {
+      if (focusManager.isFocused() && onlineManager.isOnline() && !scope.getState().context)
+        void scope.acquire().catch(() => undefined);
+    }
+    // Protected queries are disabled after access loss. Recovery must outlive those
+    // queries, and must not retry immediately on every failed acquisition's state change.
+    const unsubscribeFocus = focusManager.subscribe(reacquire);
+    const unsubscribeOnline = onlineManager.subscribe(reacquire);
+    const interval = setInterval(reacquire, mentionRefreshIntervalMs);
+    reacquire();
+    return () => {
+      clearInterval(interval);
+      unsubscribeFocus();
+      unsubscribeOnline();
+    };
   }, [scope, active]);
   return { scope, state };
 }

@@ -34,7 +34,7 @@ if (isWeb && typeof document !== "undefined") {
   window.addEventListener("blur", notify);
 }
 
-function subscribeToVisibility(listener: () => void): () => void {
+export function subscribeToVisibility(listener: () => void): () => void {
   visibilityListeners.add(listener);
   return () => visibilityListeners.delete(listener);
 }
@@ -44,7 +44,7 @@ function subscribeToActiveVisibility(listener: () => void): () => void {
   return () => activeVisibilityListeners.delete(listener);
 }
 
-function getVisibilitySnapshot(): boolean {
+export function getVisibilitySnapshot(): boolean {
   return visible;
 }
 

@@ -3,7 +3,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { focusManager, onlineManager, QueryClientProvider } from "@tanstack/react-query";
 import { ChiOperationError, type ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { queryClient } from "@/data/query-client";
 import { loseHostMentionScopes } from "@/chi/use-mention-scope";
@@ -14,6 +14,30 @@ const fixture = vi.hoisted(() => ({
   client: { chiMentions: vi.fn(), getDirectorySuggestions: vi.fn() },
   connected: true,
   workspace: "workspace",
+  native: false,
+  appState: "active",
+  appStateListeners: new Set<(state: string) => void>(),
+}));
+vi.mock("react-native", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-native")>()),
+  AppState: {
+    get currentState() {
+      return fixture.appState;
+    },
+    addEventListener: (_event: string, listener: (state: string) => void) => {
+      fixture.appStateListeners.add(listener);
+      return { remove: () => fixture.appStateListeners.delete(listener) };
+    },
+  },
+}));
+vi.mock("@/constants/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/constants/platform")>()),
+  get isNative() {
+    return fixture.native;
+  },
+  get isWeb() {
+    return !fixture.native;
+  },
 }));
 vi.mock("@/runtime/host-runtime", () => ({
   useHostRuntimeClient: () => fixture.client,
@@ -87,7 +111,15 @@ function render(text: string, host = "host") {
 function person() {
   return container.querySelector('[data-testid="autocomplete-option-human:github:sava-the-owl"]');
 }
+function changeAppState(state: "active" | "inactive" | "background") {
+  fixture.appState = state;
+  for (const listener of fixture.appStateListeners) listener(state);
+}
 beforeEach(() => {
+  fixture.native = false;
+  changeAppState("active");
+  focusManager.setFocused(true);
+  onlineManager.setOnline(true);
   fixture.connected = true;
   fixture.workspace = "workspace";
   fixture.client.chiMentions.mockReset();
@@ -108,6 +140,9 @@ afterEach(() => {
   loseHostMentionScopes("host");
   loseHostMentionScopes("other");
   queryClient.clear();
+  changeAppState("active");
+  focusManager.setFocused(true);
+  onlineManager.setOnline(true);
   vi.useRealTimers();
 });
 
@@ -241,4 +276,125 @@ it("discovers newly added people on the background TTL with the popup closed", a
     container.querySelector('[data-testid="autocomplete-option-human:github:samantha"]')
       ?.textContent,
   ).toContain("samantha");
+});
+
+it.each(["interval", "focus", "reconnect"])(
+  "reacquires a cleared scope on the next %s after a transient periodic failure",
+  async (trigger) => {
+    vi.useFakeTimers();
+    render("");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fixture.client.chiMentions).toHaveBeenCalledTimes(2);
+    fixture.client.chiMentions.mockRejectedValue(new Error("temporary transport failure"));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fixture.client.chiMentions).toHaveBeenCalledTimes(3);
+    expect(
+      queryClient
+        .getQueryCache()
+        .getAll()
+        .filter(
+          (query) => query.queryKey.includes("participants") && query.state.status === "success",
+        ),
+    ).toEqual([]);
+
+    fixture.client.chiMentions.mockImplementation(async ({ operation }) =>
+      operation.action === "scope"
+        ? { kind: "scope", actor: context.actor, context }
+        : participants(),
+    );
+    if (trigger === "focus") {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    }
+    if (trigger === "reconnect") {
+      onlineManager.setOnline(false);
+      onlineManager.setOnline(true);
+    }
+    await vi.advanceTimersByTimeAsync(trigger === "interval" ? 30_000 : 10);
+    expect(fixture.client.chiMentions.mock.calls.map(([input]) => input.operation.action)).toEqual([
+      "scope",
+      "participants",
+      "participants",
+      "scope",
+      "participants",
+    ]);
+    render("@sa");
+    expect(person()?.textContent).toContain("sava-the-owl");
+  },
+);
+
+it.each(["inactive", "background"] as const)(
+  "pauses native participant polling while %s and refreshes on foreground without reconnecting",
+  async (hidden) => {
+    vi.useFakeTimers();
+    fixture.native = true;
+    render("");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fixture.client.chiMentions).toHaveBeenCalledTimes(2);
+    changeAppState(hidden);
+    expect(focusManager.isFocused()).toBe(false);
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(fixture.client.chiMentions).toHaveBeenCalledTimes(2);
+    changeAppState("active");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(focusManager.isFocused()).toBe(true);
+    expect(fixture.connected).toBe(true);
+    expect(fixture.client.chiMentions.mock.calls.map(([input]) => input.operation.action)).toEqual([
+      "scope",
+      "participants",
+      "participants",
+    ]);
+  },
+);
+
+it("keeps failed native scopes cleared in background and reacquires on foreground without a host transition", async () => {
+  vi.useFakeTimers();
+  fixture.native = true;
+  render("");
+  await vi.advanceTimersByTimeAsync(10);
+  fixture.client.chiMentions.mockRejectedValue(new Error("temporarily unavailable"));
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(fixture.client.chiMentions).toHaveBeenCalledTimes(3);
+  // Continued failures get one acquisition attempt per interval, not a render/error loop.
+  await vi.advanceTimersByTimeAsync(90_000);
+  expect(fixture.client.chiMentions).toHaveBeenCalledTimes(6);
+  changeAppState("background");
+  fixture.client.chiMentions.mockImplementation(async ({ operation }) =>
+    operation.action === "scope"
+      ? { kind: "scope", actor: context.actor, context }
+      : participants(),
+  );
+  await vi.advanceTimersByTimeAsync(90_000);
+  expect(fixture.client.chiMentions).toHaveBeenCalledTimes(6);
+  expect(
+    queryClient
+      .getQueryCache()
+      .getAll()
+      .filter(
+        (query) => query.queryKey.includes("participants") && query.state.status === "success",
+      ),
+  ).toEqual([]);
+  changeAppState("active");
+  await vi.advanceTimersByTimeAsync(10);
+  expect(fixture.connected).toBe(true);
+  expect(
+    fixture.client.chiMentions.mock.calls.slice(6).map(([input]) => input.operation.action),
+  ).toEqual(["scope", "participants"]);
+  render("@sa");
+  expect(person()?.textContent).toContain("sava-the-owl");
+});
+
+it("defers initial native scope acquisition when the composer mounts in background", async () => {
+  vi.useFakeTimers();
+  fixture.native = true;
+  changeAppState("background");
+  render("");
+  await vi.advanceTimersByTimeAsync(90_000);
+  expect(fixture.client.chiMentions).not.toHaveBeenCalled();
+  changeAppState("active");
+  await vi.advanceTimersByTimeAsync(10);
+  expect(fixture.client.chiMentions.mock.calls.map(([input]) => input.operation.action)).toEqual([
+    "scope",
+    "participants",
+  ]);
 });

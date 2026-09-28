@@ -3,7 +3,7 @@ import { useFetchQuery } from "@/data/query";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { clearMentionSelection } from "./mention-selection";
-import { useMentionScope } from "./use-mention-scope";
+import { mentionRefreshIntervalMs, useMentionScope } from "./use-mention-scope";
 import { mentionQueryKey } from "./mention-context";
 
 export function useMentionParticipants(serverId: string, agentId: string, active: boolean) {
@@ -25,8 +25,8 @@ export function useMentionParticipants(serverId: string, agentId: string, active
     dataShape: "value",
     retry: false,
     gcTime: 5 * 60_000,
-    staleTimeMs: 30_000,
-    refetchInterval: 30_000,
+    staleTimeMs: mentionRefreshIntervalMs,
+    refetchInterval: mentionRefreshIntervalMs,
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
     queryFn: async () => {
