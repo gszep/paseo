@@ -25,6 +25,7 @@ interface HarnessProps {
   people: SelectedMention[];
   entries: DirectorySuggestionEntry[];
   onSelect: (id: string) => void;
+  isLoading?: boolean;
 }
 
 const harnessStyle = { width: 360 };
@@ -36,7 +37,7 @@ function recordSelections() {
 
 function ignoreSelection() {}
 
-function Harness({ people, entries, onSelect }: HarnessProps) {
+function Harness({ people, entries, onSelect, isLoading }: HarnessProps) {
   const selectOption = useCallback((option: AutocompleteOption) => onSelect(option.id), [onSelect]);
   const options = buildMentionAutocompleteOptions({
     text: "@",
@@ -56,6 +57,7 @@ function Harness({ people, entries, onSelect }: HarnessProps) {
         options={options}
         selectedIndex={completion.selectedIndex}
         onSelect={selectOption}
+        isLoading={isLoading}
       />
       <input aria-label="Completion input" onKeyDown={completion.onKeyPress} />
     </div>
@@ -139,3 +141,47 @@ it("keeps the default nearest the input visible when people arrive without arrow
     visible: true,
   });
 });
+
+it.each([
+  { transition: "empty", key: "Tab" },
+  { transition: "empty", key: "Enter" },
+  { transition: "loading", key: "Tab" },
+  { transition: "loading", key: "Enter" },
+])(
+  "keeps the selected row visible after $transition and accepts it with $key",
+  async ({ transition, key }) => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const { accepted, onSelect } = recordSelections();
+    flushSync(() => root.render(<Harness people={[]} entries={files} onSelect={onSelect} />));
+    await settleLayout();
+    const expected = { id: "autocomplete-option-file:file-0.ts", visible: true };
+    expect(selectedGeometry()).toEqual(expected);
+    const previousScroll = container.querySelector('[data-testid="autocomplete-scroll"]')!;
+    expect(previousScroll.scrollTop).toBeGreaterThan(0);
+
+    flushSync(() =>
+      root.render(
+        <Harness
+          people={[]}
+          entries={transition === "empty" ? [] : files}
+          isLoading={transition === "loading"}
+          onSelect={onSelect}
+        />,
+      ),
+    );
+    await settleLayout();
+    expect(container.querySelector('[data-testid="autocomplete-scroll"]')).toBeNull();
+
+    flushSync(() => root.render(<Harness people={[]} entries={files} onSelect={onSelect} />));
+    await settleLayout();
+    const restoredScroll = container.querySelector('[data-testid="autocomplete-scroll"]')!;
+    expect(restoredScroll).not.toBe(previousScroll);
+    expect(selectedGeometry()).toEqual(expected);
+    expect(restoredScroll.scrollTop).toBeGreaterThan(0);
+    await userEvent.click(container.querySelector("input")!);
+    await userEvent.keyboard(`{${key}}`);
+    expect(accepted).toEqual(["file:file-0.ts"]);
+  },
+);

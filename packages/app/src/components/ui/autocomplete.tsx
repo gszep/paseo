@@ -140,6 +140,14 @@ export function Autocomplete({
   const viewportHeightRef = useRef(0);
   const scrollOffsetRef = useRef(0);
 
+  const setScrollRef = useCallback((scroll: ScrollView | null) => {
+    scrollRef.current = scroll;
+    // Empty/loading states unmount the scroller; a new instance starts at zero.
+    scrollOffsetRef.current = 0;
+    viewportHeightRef.current = 0;
+    measurementRef.current.generation++;
+  }, []);
+
   const ensureActiveItemVisible = useCallback(() => {
     const row = selectedRowRef.current;
     const content = contentRef.current;
@@ -233,7 +241,7 @@ export function Autocomplete({
       ) : null}
       <View style={containerStyle}>
         <ScrollView
-          ref={scrollRef}
+          ref={setScrollRef}
           onLayout={handleScrollViewLayout}
           onContentSizeChange={ensureActiveItemVisible}
           onScroll={handleScroll}
