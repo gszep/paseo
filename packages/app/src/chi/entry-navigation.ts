@@ -79,12 +79,14 @@ export async function locateMention(
   };
 }
 
-export async function openMentionTarget(target: EntryTarget) {
+export async function openMentionTarget(target: EntryTarget, isCurrent: () => boolean) {
+  if (!isCurrent()) return;
   await getHostRuntimeStore().fetchAgentTimeline(
     target.host,
     target.agentId,
     planTimelinePromptJump({ epoch: target.epoch, seq: target.seq }),
   );
+  if (!isCurrent()) return;
   useEntryTarget.setState({ target });
   navigateToAgent({
     serverId: target.host,

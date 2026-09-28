@@ -19,6 +19,7 @@ const envelopeSchema = z.object({
   operation: ChiMentionOperationSchema,
   rejected: z.boolean().optional(),
   attempt: z.string().uuid().optional(),
+  legacy: z.boolean().optional(),
 });
 
 export interface ReplyState {
@@ -52,6 +53,48 @@ export function openReplyForm(input: {
     const saved = await input.storage.getItem(input.key);
     return saved ? envelopeSchema.parse(JSON.parse(saved)) : null;
   }
+  // COMPAT(chiReplyKeys): added in v0.9.0, remove after 2027-03-29 once saved operations have migrated.
+  async function migrateLegacy() {
+    if (!input.key.startsWith("chi-reply:")) return;
+    if (!input.storage.getAllKeys) throw new Error("Unable to discover saved mention operations");
+    const keys = await input.storage.getAllKeys();
+    for (const key of keys) {
+      if (!key.startsWith("chi-reply:")) continue;
+      const parts: unknown = JSON.parse(key.slice("chi-reply:".length));
+      if (
+        !Array.isArray(parts) ||
+        parts.length !== 5 ||
+        parts[2] !== input.context.repo ||
+        parts[3] !== input.context.actor ||
+        parts[4] !== input.handoff.id
+      )
+        continue;
+      const raw = await input.storage.getItem(key);
+      if (!raw) continue;
+      const legacy = envelopeSchema.parse(JSON.parse(raw));
+      if (
+        legacy.context.actor !== input.context.actor ||
+        legacy.context.repo !== input.context.repo ||
+        (legacy.operation.action !== "reply" && legacy.operation.action !== "acknowledge") ||
+        legacy.operation.id !== input.handoff.id
+      )
+        throw new Error("Invalid saved mention operation");
+      const saved = await read();
+      if (saved && JSON.stringify(saved.operation) !== JSON.stringify(legacy.operation))
+        throw new Error("Multiple unresolved mention operations require reconciliation");
+      if (!saved)
+        await input.storage.setItem(input.key, JSON.stringify({ ...legacy, legacy: true }));
+      await input.storage.removeItem(key);
+    }
+  }
+  function canReauthorize(envelope: z.infer<typeof envelopeSchema>) {
+    return (
+      envelope.context.actor === input.context.actor &&
+      envelope.context.repo === input.context.repo &&
+      (envelope.context.deployment === input.context.deployment ||
+        (envelope.legacy === true && !envelope.context.deployment))
+    );
+  }
   async function complete(operation: ChiMentionOperation) {
     await exclusive(async () => {
       const saved = await read();
@@ -67,6 +110,7 @@ export function openReplyForm(input: {
     for (const listener of listeners) listener();
   }
   const ready = exclusive(async () => {
+    await migrateLegacy();
     const envelope = await read();
     if (!envelope) {
       publish({ status: "editing" });
@@ -80,10 +124,7 @@ export function openReplyForm(input: {
       publish({
         status: "blocked",
         error: "chi-mention-context-changed",
-        canReauthorize:
-          envelope.context.actor === input.context.actor &&
-          envelope.context.deployment === input.context.deployment &&
-          envelope.context.repo === input.context.repo,
+        canReauthorize: canReauthorize(envelope),
       });
       return;
     }
@@ -221,13 +262,7 @@ export function openReplyForm(input: {
       if (!state.canReauthorize || closed) return;
       await exclusive(async () => {
         const saved = await read();
-        if (
-          !saved ||
-          saved.context.actor !== input.context.actor ||
-          saved.context.repo !== input.context.repo ||
-          saved.context.deployment !== input.context.deployment
-        )
-          throw new Error("chi-mention-context-changed");
+        if (!saved || !canReauthorize(saved)) throw new Error("chi-mention-context-changed");
         await input.storage.setItem(
           input.key,
           JSON.stringify({ ...saved, context: input.context, attempt: crypto.randomUUID() }),

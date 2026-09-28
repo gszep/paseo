@@ -6451,6 +6451,68 @@ test("sends subscribe/unsubscribe terminals messages", async () => {
   await release;
 });
 
+test("rejected subscription cleanup does not disconnect a local workspace transport", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "local-release",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connecting = client.connect();
+  mock.triggerOpen();
+  await connecting;
+  const observation = client.observeTerminals({ cwd: "/local/non-repository" });
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(1));
+  const request = parseSentFrame(mock.sent[0]);
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "terminals_changed",
+      payload: {
+        requestId: request.requestId,
+        subscriptionId: "already-released",
+        cwd: "/local/non-repository",
+        terminals: [],
+      },
+    }),
+  );
+  await observation.ready;
+  const release = observation.release();
+  const rejected = expect(release).rejects.toThrow();
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(2));
+  const cleanup = parseSentFrame(mock.sent[1]);
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "rpc_error",
+      payload: {
+        requestId: cleanup.requestId,
+        requestType: "subscription.release.request",
+        error: "Unknown subscription",
+        code: "invalid_request",
+      },
+    }),
+  );
+  await rejected;
+  expect(client.isConnected).toBe(true);
+  const next = client.observeTerminals({ cwd: "/local/non-repository" });
+  await vi.waitFor(() => expect(mock.sent).toHaveLength(3));
+  const nextRequest = parseSentFrame(mock.sent[2]);
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "terminals_changed",
+      payload: {
+        requestId: nextRequest.requestId,
+        subscriptionId: "next-observation",
+        cwd: "/local/non-repository",
+        terminals: [],
+      },
+    }),
+  );
+  await expect(next.ready).resolves.toMatchObject({ subscriptionId: "next-observation" });
+});
+
 test("dispatches terminals_changed events to typed listeners", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

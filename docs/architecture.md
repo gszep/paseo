@@ -193,11 +193,13 @@ removing it, so a late response cannot erase a newer request.
 Definitive rejection is also fenced to its persisted attempt UUID: an older refusal
 cannot unlock correction after a newer attempt of the same operation may have committed.
 
-The **Mentions** route reuses `/chi` without a workspace or host picker. It prefers
-the selected connected host advertising `chiInbox`, then another connected capable
-host. The deployment inbox uses backend keyset pagination across repositories and
-History's date sections. The transport host's GitHub identity is displayed explicitly;
-pairing to someone else's host does not sign in as a new Chi principal. Repository,
+The **Mentions** route reuses `/chi` without a workspace or host picker. The inbox
+persists its actor and deployment independently of transport. It prefers the selected
+connected host advertising `chiInbox`, then another connected capable host, only
+after verifying that host authenticates as the bound principal. A different account
+or deployment requires reconnecting the original account; transport fallback cannot
+switch recipients. The deployment inbox uses backend keyset pagination across
+repositories and History's date sections. The verified identity is displayed explicitly. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context
 browsing stay on the handoff's immutable snapshot. Structured access loss removes
@@ -233,6 +235,9 @@ reply reauthorization keeps the operation UUID, revision and text. Account or
 repository switches never adopt another principal's saved work: return to the
 original account/repository before reauthorizing. Pending payloads stay hidden
 while authority differs.
+Restore discovers legacy host/workspace reply keys before enabling the form.
+An envelope without deployment identity requires explicit reauthorization, and
+conflicting saved operations block replacement rather than minting another UUID.
 
 Acknowledgement remains a recipient-only lifecycle transition. Replies use
 `POST /handoffs/reply` on the same record and preserve its lifecycle state. A reply

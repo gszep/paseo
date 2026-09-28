@@ -3,23 +3,44 @@ import { QueryClient } from "@tanstack/react-query";
 import { createMentionScope, mentionQueryKey, type ScopedMentionResult } from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
-import { selectInboxHost } from "./inbox-host";
+import { createInboxAuthority } from "./inbox-authority";
 
-test("inbox automatically prefers the connected capable selected host and falls back without workspace selection", () => {
-  const connected = new Map([
-    ["first", "online"],
-    ["selected", "online"],
-    ["old", "online"],
+test("inbox transport stays bound to Alice across disconnect, credential rotation and reload", async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: async (key: string) => values.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      values.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      values.delete(key);
+    },
+  };
+  const alice = { actor: "github:alice", deployment: "https://chi.example" };
+  const bob = { ...alice, actor: "github:bob" };
+  const identities = new Map([
+    ["alice", alice],
+    ["bob", bob],
+    ["backup", alice],
+    ["other-deployment", { ...alice, deployment: "https://other.example" }],
   ]);
-  expect(
-    selectInboxHost(["first", "selected", "old"], "selected", connected, ["first", "selected"]),
-  ).toBe("selected");
-  connected.set("selected", "offline");
-  expect(
-    selectInboxHost(["first", "selected", "old"], "selected", connected, ["first", "selected"]),
-  ).toBe("first");
-  expect(selectInboxHost(["old"], "old", connected, [])).toBe("");
-  expect(selectInboxHost([], undefined, connected, [])).toBe("");
+  const verify = async (host: string) => identities.get(host)!;
+  const authority = createInboxAuthority(storage);
+  expect(await authority.resolve(["bob", "alice"], "alice", verify)).toBe("alice");
+  await expect(authority.resolve(["bob", "other-deployment"], "bob", verify)).rejects.toThrow(
+    "Reconnect",
+  );
+  expect(await authority.resolve(["bob", "backup"], "bob", verify)).toBe("backup");
+  expect(authority.accepts(bob)).toBe(false);
+  identities.set("alice", bob);
+  await expect(authority.resolve(["alice"], "alice", verify)).rejects.toThrow("Reconnect");
+  await expect(createInboxAuthority(storage).resolve(["bob"], "bob", verify)).rejects.toThrow(
+    "Reconnect",
+  );
+  values.clear();
+  await expect(
+    createInboxAuthority(storage).resolve(["bob", "backup"], undefined, verify),
+  ).rejects.toThrow("Multiple Chi accounts");
 });
 
 const identity: ChiMentionContext = {

@@ -119,6 +119,40 @@ class SubscriptionPeer {
   }
 }
 
+test("unknown and repeated subscription releases are acknowledged without losing the local workspace connection", async () => {
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
+  let peer: SubscriptionPeer | undefined;
+  try {
+    peer = await SubscriptionPeer.connect(daemon.port, "local-workspace-cleanup");
+    for (const requestId of ["unknown", "repeat"]) {
+      await peer.request({
+        type: "subscription.release.request",
+        requestId,
+        subscriptionId: "never-registered",
+      });
+      expect(peer.frames).toContainEqual(
+        expect.objectContaining({
+          type: "session",
+          message: {
+            type: "subscription.release.response",
+            payload: { requestId, subscriptionId: "never-registered" },
+          },
+        }),
+      );
+    }
+    await peer.request({ type: "fetch_agents_request", requestId: "still-connected" });
+    expect(peer.frames).toContainEqual(
+      expect.objectContaining({
+        type: "session",
+        message: expect.objectContaining({ type: "fetch_agents_response" }),
+      }),
+    );
+  } finally {
+    peer?.close();
+    await daemon.close();
+  }
+});
+
 test("a pure list reply belongs only to its source socket in a shared logical session", async () => {
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
   const peers: SubscriptionPeer[] = [];

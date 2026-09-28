@@ -3,7 +3,7 @@ import { Text, View, ScrollView, Pressable, FlatList } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
   ChiHandoff,
@@ -31,6 +31,7 @@ interface InboxContext {
   identity: ChiMentionContext;
   queryKey: readonly unknown[];
   execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
+  isCurrent(): boolean;
 }
 type ListRow = { key: string; section: DateSectionKey } | { key: string; handoff: ChiHandoff };
 function rowKey(row: ListRow) {
@@ -65,6 +66,9 @@ export function ChiInboxScreen() {
             identity: state.context,
             queryKey: transport.queryKey,
             execute: (operation: ChiMentionOperation) => scope.run(operation, state.context!),
+            isCurrent: () =>
+              scope.getState().generation === state.generation &&
+              scope.getState().context === state.context,
           }
         : null,
     [scope, state, transport.queryKey],
@@ -74,8 +78,10 @@ export function ChiInboxScreen() {
       <MenuHeader title="Mentions" />
       {!host ? (
         <Text style={styles.empty}>
-          No Chi-capable host is connected. Connect a host with deployment inbox support to read
-          your mentions.
+          {transport.verifying
+            ? "Verifying your Chi inbox account…"
+            : transport.transportError ||
+              "No Chi-capable host is connected. Connect a host with deployment inbox support to read your mentions."}
         </Text>
       ) : null}
       {host && (!state.context || state.loading) && !state.error ? (
@@ -447,13 +453,15 @@ function ExactSource({
   index: number;
   autoOpen: boolean;
 }) {
-  const active = useRef(true);
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
+  const lifetime = useRef({ generation: 0, active: false });
+  useFocusEffect(
+    useCallback(() => {
+      lifetime.current = { generation: lifetime.current.generation + 1, active: true };
+      return () => {
+        lifetime.current = { generation: lifetime.current.generation + 1, active: false };
+      };
+    }, []),
+  );
   const [entryId, setEntryId] = useState<string | undefined>();
   const [browse, setBrowse] = useState(false);
   const [navigated, setNavigated] = useState(!autoOpen);
@@ -480,10 +488,14 @@ function ExactSource({
     retry: false,
     mutationFn: async () => {
       if (!query.data) return;
+      const started = lifetime.current.generation;
+      const isCurrent = () =>
+        lifetime.current.active && lifetime.current.generation === started && context.isCurrent();
+      if (!isCurrent()) return;
       const target = await locateMention(handoff, query.data, context.identity);
-      if (target && active.current) {
+      if (target && isCurrent()) {
         await context.execute({ action: "read", repo: handoff.repo, id: handoff.id });
-        if (active.current) await openMentionTarget(target);
+        if (isCurrent()) await openMentionTarget(target, isCurrent);
       }
       return target;
     },
