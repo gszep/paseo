@@ -1000,6 +1000,10 @@ function WorkspaceHeaderTitleBar({
   onViewScriptTerminal,
   onOpenUrlInBrowserTab,
 }: WorkspaceHeaderTitleBarProps) {
+  const chiTarget = useMemo(
+    () => ({ serverId: normalizedServerId, workspaceId: normalizedWorkspaceId }),
+    [normalizedServerId, normalizedWorkspaceId],
+  );
   return (
     <View style={styles.headerTitleContainer}>
       {isLoading ? (
@@ -1019,6 +1023,7 @@ function WorkspaceHeaderTitleBar({
       <View style={styles.compactHeaderMenuCluster}>
         {isMobile ? (
           <WorkspaceHeaderMenuMobile
+            chiTarget={chiTarget}
             normalizedServerId={normalizedServerId}
             currentBranchName={currentBranchName}
             showWorkspaceSetup={showWorkspaceSetup}
@@ -1037,6 +1042,7 @@ function WorkspaceHeaderTitleBar({
           />
         ) : (
           <WorkspaceHeaderMenuDesktop
+            chiTarget={chiTarget}
             currentBranchName={currentBranchName}
             showWorkspaceSetup={showWorkspaceSetup}
             importAgentDisabled={importAgentDisabled}

@@ -3050,8 +3050,9 @@ export class Session {
   ): Promise<void> {
     try {
       if (!this.agentManager.chi) throw new Error("chi-unavailable");
-      const workspace = await this.workspaceRegistry.get(msg.workspaceId);
-      if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
+      const workspace = msg.workspaceId ? await this.workspaceRegistry.get(msg.workspaceId) : null;
+      if (msg.workspaceId && (!workspace || workspace.archivedAt))
+        throw new Error("chi-workspace-unavailable");
       if (msg.operation.action === "delivery" || msg.operation.action === "retry") {
         await ensureAgentLoaded(msg.operation.agentId, {
           agentManager: this.agentManager,
@@ -3059,12 +3060,14 @@ export class Session {
           logger: this.sessionLogger,
         });
       }
-      const { result, context } = await this.agentManager.chi.mentionOperation(
-        workspace.cwd,
-        workspace.workspaceId,
-        msg.operation,
-        msg.expectedContext,
-      );
+      const { result, context } = workspace
+        ? await this.agentManager.chi.mentionOperation(
+            workspace.cwd,
+            workspace.workspaceId,
+            msg.operation,
+            msg.expectedContext,
+          )
+        : await this.agentManager.chi.inboxOperation(msg.operation, msg.expectedContext);
       this.emit({
         type: "chi.mentions.execute.response",
         payload: { requestId: msg.requestId, outcome: "ready", result, context },

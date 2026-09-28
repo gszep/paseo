@@ -1168,12 +1168,6 @@ export const en = {
       search: "Search",
       schedules: "Schedules",
     },
-    worktreeSetup: {
-      title: "Set up worktree scripts",
-      description:
-        "Add setup commands so new worktrees can install dependencies and prepare themselves automatically.",
-      openProjectSettings: "Open project settings",
-    },
     project: {
       actions: {
         menu: "Project actions",

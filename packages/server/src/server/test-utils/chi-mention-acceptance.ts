@@ -69,6 +69,18 @@ export async function startMentionActor(
     "https://github.com/gszep/chi-synthetic-two-actor-20260925.git",
   ]);
   await writeFile(join(cwd, "mention-file.txt"), "Synthetic file autocomplete fixture\n");
+  execFileSync("git", ["-C", cwd, "add", "mention-file.txt"]);
+  execFileSync("git", [
+    "-C",
+    cwd,
+    "-c",
+    "user.name=Synthetic test",
+    "-c",
+    "user.email=synthetic@example.invalid",
+    "commit",
+    "-qm",
+    "Initialize synthetic workspace",
+  ]);
   const messages = new Map<string, NativeMessage[]>();
   const runtime: NativeRuntime = {
     identity: `synthetic:${actor}`,
@@ -138,14 +150,21 @@ export async function startMentionActor(
       if (!options?.clientMessageId || typeof prompt !== "string")
         throw new Error("Synthetic fixture requires a correlated text prompt");
       const previous = messages.get(sessionId) ?? [];
+      const id = `msg_synthetic_${randomUUID()}`;
       previous.push({
-        id: `msg_synthetic_${randomUUID()}`,
+        id,
         type: "user",
         text: prompt,
         metadata: { paseoClientMessageId: options.clientMessageId },
         time: { created: Date.now() },
       });
       messages.set(sessionId, previous);
+      return {
+        type: "user_message",
+        text: prompt,
+        messageId: id,
+        clientMessageId: options.clientMessageId,
+      };
     },
   });
   process.env.PASEO_SUPERVISED = "0";
@@ -177,6 +196,23 @@ export async function startMentionActor(
     title: `Mention acceptance ${actor} ${runId}`,
     modeId: "default",
   });
+  const localCwd = await mkdtemp(join(tmpdir(), "paseo-local-mention-"));
+  await writeFile(join(localCwd, "local-file.txt"), "Local file completion fixture\n");
+  const localProject = await client.addProject(localCwd);
+  if (!localProject.project) throw new Error("Local project creation failed");
+  const localWorkspace = (
+    await client.createWorkspace({
+      source: { kind: "directory", path: localCwd, projectId: localProject.project.projectId },
+    })
+  ).workspace;
+  if (!localWorkspace) throw new Error("Local workspace missing");
+  const localAgent = await client.createAgent({
+    provider: "opencode",
+    cwd: localCwd,
+    workspaceId: localWorkspace.id,
+    title: "Local workspace without a repository",
+    modeId: "default",
+  });
   async function sourceRequest(path: string, method: string, body?: unknown) {
     const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), path), {
       method,
@@ -192,6 +228,8 @@ export async function startMentionActor(
       throw new Error(`Synthetic fixture cleanup/access mutation failed: ${response.status}`);
   }
   return {
+    localAgentId: localAgent.id,
+    localWorkspaceId: localWorkspace.id,
     workspaceId: workspace.id,
     agentId: agent.id,
     serverId,
@@ -213,9 +251,11 @@ export async function startMentionActor(
         for (const sourceId of createdSources) await removeSource(sourceId);
       } finally {
         await client.removeProject(project.project!.projectId);
+        await client.removeProject(localProject.project!.projectId);
         await client.close();
         await host.close();
         await rm(cwd, { recursive: true, force: true });
+        await rm(localCwd, { recursive: true, force: true });
       }
     },
   };
@@ -230,6 +270,8 @@ process.send?.({
   serverId: instance.serverId,
   workspaceId: instance.workspaceId,
   agentId: instance.agentId,
+  localAgentId: instance.localAgentId,
+  localWorkspaceId: instance.localWorkspaceId,
   port: instance.port,
 });
 process.on("message", async (value) => {

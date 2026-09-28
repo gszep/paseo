@@ -2,7 +2,6 @@ import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { useMutation } from "@tanstack/react-query";
 import { useFetchQuery } from "@/data/query";
-import { router } from "expo-router";
 import { useCallback, useSyncExternalStore } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
@@ -45,22 +44,11 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   );
   const active = supported && shared && connected && Boolean(workspaceId);
   const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, active);
-  const open = useCallback(
-    () =>
-      router.push({
-        pathname: "/chi",
-        params: { view: "inbox", host: serverId, workspace: workspaceId },
-      }),
-    [serverId, workspaceId],
-  );
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   if (!supported || !workspaceId) return null;
   return (
     <View style={styles.rail}>
       <SelectedRecipients serverId={serverId} agentId={agentId} shared={shared} />
-      <Button size="sm" variant="ghost" onPress={open}>
-        Open mentions
-      </Button>
       {active && client && state.context ? (
         <ProtectedDelivery
           key={state.generation}
@@ -72,7 +60,7 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
           queryKey={mentionQueryKey(serverId, workspaceId, state)}
         />
       ) : null}
-      {state.error ? (
+      {state.error && !state.loading ? (
         <Alert
           variant="error"
           title="Mention context unavailable"

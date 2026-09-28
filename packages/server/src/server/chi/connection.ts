@@ -361,6 +361,7 @@ export class ChiConnection {
     return {
       actor: identity.actor,
       repo: identity.repo,
+      deployment: this.authority.endpoint,
       generation: createHash("sha256")
         .update(
           JSON.stringify([
@@ -397,6 +398,45 @@ export class ChiConnection {
       if (classifyMentionFailure(error).accessLost) {
         this.loseMentionAuthority();
       }
+      throw error;
+    }
+  }
+
+  async inboxOperation(operation: ChiMentionOperation, expected?: ChiMentionContext) {
+    const identity = async (): Promise<MentionIdentity> => {
+      try {
+        const auth = await this.authority.login();
+        return {
+          actor: auth.chiUserId.toLowerCase(),
+          token: auth.sessionToken,
+          credentialGeneration: auth.credentialGeneration,
+          repo: "*",
+        };
+      } catch (error) {
+        throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
+      }
+    };
+    try {
+      const current = await identity();
+      const context = this.mentionContext(current);
+      if (operation.action === "scope")
+        return { context, result: { kind: "scope" as const, actor: current.actor } };
+      this.requireMentionContext(current, expected);
+      if (
+        operation.action === "participants" ||
+        operation.action === "delivery" ||
+        operation.action === "retry" ||
+        operation.action === "list"
+      )
+        throw new Error("chi-mention-workspace-required");
+      const repo = operation.action === "inbox" ? "*" : operation.repo;
+      if (!repo) throw new Error("chi-mention-repository-required");
+      // Backend authorizes the supplied repository; inbox transport needs no local checkout.
+      const result = await this.mentions.execute({ ...current, repo }, operation);
+      this.requireMentionContext(await identity(), context);
+      return { context, result };
+    } catch (error) {
+      if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
       throw error;
     }
   }

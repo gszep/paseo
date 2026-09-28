@@ -2517,6 +2517,9 @@ export function useHostRuntimeConnectionStatus(serverId: string): HostRuntimeCon
 export function useHostRuntimeConnectionStatuses(
   serverIds: readonly string[],
 ): ReadonlyMap<string, HostRuntimeConnectionStatus> {
+  "use no memo";
+  // The version invalidates reads from a mutable external store. Compiler memoization
+  // otherwise treats getSnapshot as pure and retains the first connection statuses.
   const store = getHostRuntimeStore();
   const version = useSyncExternalStore(
     (onStoreChange) => store.subscribeAll(onStoreChange),

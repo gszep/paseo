@@ -3,12 +3,89 @@ import { QueryClient } from "@tanstack/react-query";
 import { createMentionScope, mentionQueryKey, type ScopedMentionResult } from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import { createInboxAuthority } from "./inbox-authority";
+
+test("inbox transport stays bound to Alice across disconnect, credential rotation and reload", async () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: async (key: string) => values.get(key) ?? null,
+    setItem: async (key: string, value: string) => {
+      values.set(key, value);
+    },
+    removeItem: async (key: string) => {
+      values.delete(key);
+    },
+  };
+  const alice = { actor: "github:alice", deployment: "https://chi.example" };
+  const bob = { ...alice, actor: "github:bob" };
+  const identities = new Map([
+    ["alice", alice],
+    ["bob", bob],
+    ["backup", alice],
+    ["other-deployment", { ...alice, deployment: "https://other.example" }],
+  ]);
+  const verify = async (host: string) => identities.get(host)!;
+  const authority = createInboxAuthority(storage);
+  expect(await authority.resolve(["bob", "alice"], "alice", verify)).toBe("alice");
+  await expect(authority.resolve(["bob", "other-deployment"], "bob", verify)).rejects.toThrow(
+    "Reconnect",
+  );
+  expect(await authority.resolve(["bob", "backup"], "bob", verify)).toBe("backup");
+  expect(authority.accepts(bob)).toBe(false);
+  identities.set("alice", bob);
+  await expect(authority.resolve(["alice"], "alice", verify)).rejects.toThrow("Reconnect");
+  await expect(createInboxAuthority(storage).resolve(["bob"], "bob", verify)).rejects.toThrow(
+    "Reconnect",
+  );
+  values.clear();
+  await expect(
+    createInboxAuthority(storage).resolve(["bob", "backup"], undefined, verify),
+  ).rejects.toThrow("Multiple Chi accounts");
+});
 
 const identity: ChiMentionContext = {
   actor: "github:sender",
   repo: "github:fixture/repo",
   generation: "a".repeat(64),
 };
+test("a transient read failure preserves scope and is not reported as access loss", async () => {
+  let clears = 0;
+  const scope = createMentionScope(
+    async (operation) => {
+      if (operation.action === "scope")
+        return { kind: "scope", actor: identity.actor, context: identity };
+      throw new ChiOperationError("chi-mentions-http-409", {
+        accessLost: false,
+        outcome: "not_committed",
+      });
+    },
+    () => {
+      clears++;
+    },
+  );
+  await scope.acquire();
+  await expect(scope.run({ action: "inbox", inbox: true })).rejects.toThrow(
+    "chi-mentions-http-409",
+  );
+  expect(scope.getState().context).toEqual(identity);
+  expect(clears).toBe(0);
+});
+
+test("pending acquisition and a network failure do not become an access-loss warning", async () => {
+  let reject!: (error: Error) => void;
+  const pending = new Promise<ScopedMentionResult>((_, fail) => {
+    reject = fail;
+  });
+  const scope = createMentionScope(
+    () => pending,
+    () => undefined,
+  );
+  const acquiring = scope.acquire();
+  expect(scope.getState()).toMatchObject({ loading: true, error: null });
+  reject(new Error("network-unavailable"));
+  await expect(acquiring).rejects.toThrow("network-unavailable");
+  expect(scope.getState()).toMatchObject({ loading: false, accessLost: false });
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -17,7 +94,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-test.each(["actor", "repo", "generation"] as const)(
+test.each(["actor", "repo", "generation", "deployment"] as const)(
   "changed %s clears parent and child caches and rejects delayed old responses",
   async (field) => {
     let context = identity;
@@ -74,7 +151,11 @@ test("a child denial clears every protected view and late parent data cannot rev
       if (operation.action === "scope")
         return { kind: "scope", actor: identity.actor, context: identity };
       if (operation.action === "list") return late.promise;
-      if (denied) throw new Error("chi-mentions-http-404");
+      if (denied)
+        throw new ChiOperationError("chi-mentions-http-404", {
+          accessLost: true,
+          outcome: "unknown",
+        });
       throw new Error("unexpected");
     },
     () => {

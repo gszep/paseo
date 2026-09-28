@@ -1152,11 +1152,6 @@ export const zhCN: TranslationResources = {
       search: "搜索",
       schedules: "计划",
     },
-    worktreeSetup: {
-      title: "设置 worktree scripts",
-      description: "添加 setup 命令，让新的 worktree 自动安装依赖并完成准备。",
-      openProjectSettings: "打开 project 设置",
-    },
     project: {
       actions: {
         menu: "Project 操作",

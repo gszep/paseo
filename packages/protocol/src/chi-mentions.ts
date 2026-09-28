@@ -4,7 +4,12 @@ const id = z.string().min(1).max(256);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const principal = z.string().regex(/^github:[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
 const text = z.string().min(1).max(8000);
-export const ChiMentionContextSchema = z.object({ actor: principal, repo: id, generation: hash });
+export const ChiMentionContextSchema = z.object({
+  actor: principal,
+  repo: id,
+  generation: hash,
+  deployment: z.string().optional(),
+});
 export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
 export const ChiFailureSchema = z.object({
   accessLost: z.boolean(),
@@ -43,6 +48,7 @@ export const ChiHandoffSchema = z.object({
   revision: z.number().int().positive(),
   createdAt: id,
   updatedAt: id,
+  readAt: id.optional(),
   events: z.array(
     z.object({ actor: principal, state, at: id, revision: z.number().int().positive() }),
   ),
@@ -83,31 +89,46 @@ export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("scope") }),
   z.object({ action: z.literal("participants") }),
   z.object({
+    action: z.literal("inbox"),
+    inbox: z.boolean(),
+    cursor: z.string().max(4096).optional(),
+  }),
+  z.object({
     action: z.literal("list"),
     inbox: z.boolean(),
     offset: z.number().int().nonnegative(),
   }),
-  z.object({ action: z.literal("read"), id: z.string().uuid() }),
+  z.object({ action: z.literal("read"), id: z.string().uuid(), repo: id.optional() }),
+  z.object({
+    action: z.literal("viewed"),
+    id: z.string().uuid(),
+    revision: z.number().int().positive(),
+    repo: id.optional(),
+  }),
   z.object({
     action: z.literal("source"),
+    repo: id.optional(),
     id: z.string().uuid(),
     index: z.number().int().min(0).max(7),
     entryId: id.optional(),
   }),
   z.object({
     action: z.literal("context"),
+    repo: id.optional(),
     id: z.string().uuid(),
     index: z.number().int().min(0).max(7),
     cursor: z.string().max(4096).optional(),
   }),
   z.object({
     action: z.literal("acknowledge"),
+    repo: id.optional(),
     id: z.string().uuid(),
     operationId: z.string().uuid(),
     revision: z.number().int().positive(),
   }),
   z.object({
     action: z.literal("reply"),
+    repo: id.optional(),
     id: z.string().uuid(),
     operationId: z.string().uuid(),
     revision: z.number().int().positive(),
@@ -119,6 +140,13 @@ export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
 export type ChiMentionOperation = z.infer<typeof ChiMentionOperationSchema>;
 export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("scope"), actor: principal }),
+  z.object({
+    kind: z.literal("inbox"),
+    actor: principal,
+    handoffs: z.array(ChiHandoffSchema),
+    nextCursor: z.string().nullable(),
+    unreadCount: z.number().int().nonnegative(),
+  }),
   z.object({
     kind: z.literal("participants"),
     actor: principal,
@@ -136,6 +164,7 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
     actor: principal,
     source: ChiSourceSchema,
     payload: z.string().max(1024 * 1024),
+    origin: z.object({ hostId: id, sessionId: id }).optional(),
   }),
   z.object({
     kind: z.literal("context"),
@@ -154,7 +183,7 @@ export type ChiMentionResult = z.infer<typeof ChiMentionResultSchema>;
 export const ChiMentionRequestSchema = z.object({
   type: z.literal("chi.mentions.execute.request"),
   requestId: z.string(),
-  workspaceId: id,
+  workspaceId: id.optional(),
   operation: ChiMentionOperationSchema,
   expectedContext: ChiMentionContextSchema.optional(),
 });

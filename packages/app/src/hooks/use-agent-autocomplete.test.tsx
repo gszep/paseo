@@ -11,8 +11,10 @@ import { useAgentAutocomplete } from "./use-agent-autocomplete";
 import { Autocomplete } from "@/components/ui/autocomplete";
 
 const fixture = vi.hoisted(() => ({
-  client: { chiMentions: vi.fn(), getDirectorySuggestions: vi.fn() },
+  client: { chiMentions: vi.fn(), getDirectorySuggestions: vi.fn(), getCheckoutStatus: vi.fn() },
   connected: true,
+  isGit: true,
+  remoteUrl: "https://github.com/fixture/repo.git" as string | null,
   workspace: "workspace",
   native: false,
   appState: "active",
@@ -51,7 +53,15 @@ function sessionState() {
   const session = {
     serverInfo: { features: { chiMentions: true } },
     agents: new Map([
-      ["agent", { provider: "opencode", cwd: "/workspace", workspaceId: fixture.workspace }],
+      [
+        "agent",
+        {
+          provider: "opencode",
+          cwd: "/workspace",
+          workspaceId: fixture.workspace,
+          projectPlacement: { checkout: { isGit: fixture.isGit, remoteUrl: fixture.remoteUrl } },
+        },
+      ],
     ]),
   };
   return { sessions: { host: session, other: session } };
@@ -121,6 +131,12 @@ beforeEach(() => {
   focusManager.setFocused(true);
   onlineManager.setOnline(true);
   fixture.connected = true;
+  fixture.isGit = true;
+  fixture.remoteUrl = "https://github.com/fixture/repo.git";
+  fixture.client.getCheckoutStatus.mockImplementation(async () => ({
+    isGit: fixture.isGit,
+    remoteUrl: fixture.remoteUrl,
+  }));
   fixture.workspace = "workspace";
   fixture.client.chiMentions.mockReset();
   fixture.client.getDirectorySuggestions.mockReset();
@@ -145,6 +161,26 @@ afterEach(() => {
   onlineManager.setOnline(true);
   vi.useRealTimers();
 });
+
+it.each([false, true])(
+  "a local workspace (isGit=%s, no remote) makes no mention RPC and keeps file completion",
+  async (isGit) => {
+    fixture.isGit = isGit;
+    fixture.remoteUrl = null;
+    fixture.client.getDirectorySuggestions.mockResolvedValue({
+      entries: [{ path: "local.txt", name: "local.txt", kind: "file" }],
+      error: null,
+    });
+    render("");
+    render("@local");
+    await expect
+      .poll(() => fixture.client.getDirectorySuggestions.mock.calls.length)
+      .toBeGreaterThan(0);
+    expect(fixture.client.chiMentions).not.toHaveBeenCalled();
+    expect(person()).toBeNull();
+    expect(container.textContent).not.toContain("Mention context unavailable");
+  },
+);
 
 it("prefetches before typing and renders people synchronously while files and background revalidation are pending", async () => {
   render("");
@@ -279,7 +315,7 @@ it("discovers newly added people on the background TTL with the popup closed", a
 });
 
 it.each(["interval", "focus", "reconnect"])(
-  "reacquires a cleared scope on the next %s after a transient periodic failure",
+  "retries participants on the next %s after a transient failure without losing the verified scope",
   async (trigger) => {
     vi.useFakeTimers();
     render("");
@@ -315,7 +351,6 @@ it.each(["interval", "focus", "reconnect"])(
       "scope",
       "participants",
       "participants",
-      "scope",
       "participants",
     ]);
     render("@sa");
@@ -347,7 +382,7 @@ it.each(["inactive", "background"] as const)(
   },
 );
 
-it("keeps failed native scopes cleared in background and reacquires on foreground without a host transition", async () => {
+it("pauses failed native participant reads in background and retries on foreground without a host transition", async () => {
   vi.useFakeTimers();
   fixture.native = true;
   render("");
@@ -355,7 +390,7 @@ it("keeps failed native scopes cleared in background and reacquires on foregroun
   fixture.client.chiMentions.mockRejectedValue(new Error("temporarily unavailable"));
   await vi.advanceTimersByTimeAsync(30_000);
   expect(fixture.client.chiMentions).toHaveBeenCalledTimes(3);
-  // Continued failures get one acquisition attempt per interval, not a render/error loop.
+  // Continued failures get one read attempt per interval, not a render/error loop.
   await vi.advanceTimersByTimeAsync(90_000);
   expect(fixture.client.chiMentions).toHaveBeenCalledTimes(6);
   changeAppState("background");
@@ -379,7 +414,7 @@ it("keeps failed native scopes cleared in background and reacquires on foregroun
   expect(fixture.connected).toBe(true);
   expect(
     fixture.client.chiMentions.mock.calls.slice(6).map(([input]) => input.operation.action),
-  ).toEqual(["scope", "participants"]);
+  ).toEqual(["participants"]);
   render("@sa");
   expect(person()?.textContent).toContain("sava-the-owl");
 });

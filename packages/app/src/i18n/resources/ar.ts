@@ -1160,12 +1160,6 @@ export const ar: TranslationResources = {
       search: "بحث",
       schedules: "الجداول",
     },
-    worktreeSetup: {
-      title: "إعداد البرامج النصية لشجرة العمل",
-      description:
-        "أضف أوامر الإعداد حتى تتمكن أشجار العمل الجديدة من تثبيت التبعيات وإعداد نفسها تلقائيًا.",
-      openProjectSettings: "افتح إعدادات المشروع",
-    },
     project: {
       actions: {
         menu: "إجراءات المشروع",

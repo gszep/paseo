@@ -3,6 +3,22 @@ import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 import { buildTimelinePromptIndex } from "./timeline-prompt-index.js";
 
 describe("buildTimelinePromptIndex", () => {
+  it("maps a reconciled client prompt to its authoritative native entry rather than its client ID", () => {
+    const index = buildTimelinePromptIndex("epoch", [
+      {
+        seq: 42,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        providerMessageId: "native-entry",
+        item: {
+          type: "user_message",
+          text: "same text",
+          messageId: "client-id",
+          clientMessageId: "client-id",
+        },
+      },
+    ]);
+    expect(index.prompts[0]).toMatchObject({ seq: 42, messageId: "native-entry" });
+  });
   it("indexes every canonical user prompt with a stable timeline position", () => {
     const rows: AgentTimelineRow[] = [
       {

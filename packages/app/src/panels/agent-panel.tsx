@@ -1,7 +1,5 @@
 import { getHostRuntimeStore } from "@/runtime/host-runtime";
 import { Button } from "@/components/ui/button";
-import { ChiShare } from "@/chi/share";
-import { MentionDelivery } from "@/chi/mention-delivery";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { TFunction } from "i18next";
@@ -1274,9 +1272,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   );
 
   const dockContent = (
-    <View style={styles.contentContainer}>
-      <ChiShare serverId={serverId} agentId={agentId} />
-      <MentionDelivery serverId={serverId} agentId={agentId} />
+    <View style={styles.contentContainer} testID="conversation-chat-feed">
       {streamContent}
 
       {showHistorySyncError ? (

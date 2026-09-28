@@ -3,6 +3,9 @@ import {
   skipToken,
   useQueries,
   useQuery,
+  useInfiniteQuery,
+  type InfiniteData,
+  type UseInfiniteQueryOptions,
   type QueryKey,
   type QueryClient,
   type UseQueryOptions,
@@ -61,6 +64,23 @@ export function useFetchQueries<TData>(
   inputs: FetchQueryInput<TData, Error, TData, QueryKey>[],
 ): UseQueryResult<TData, Error>[] {
   return useQueries({ queries: inputs.map((input) => fetchQueryOptions(input)) });
+}
+
+export function useFetchInfiniteQuery<TPage, TPageParam>(
+  input: Omit<
+    UseInfiniteQueryOptions<TPage, Error, InfiniteData<TPage, TPageParam>, QueryKey, TPageParam>,
+    "initialData" | "placeholderData" | "staleTime" | "refetchOnMount"
+  > & { staleTimeMs: number },
+) {
+  const { staleTimeMs, meta, ...options } = input;
+  if (!Number.isFinite(staleTimeMs))
+    throw new Error("Fetch queries must declare a finite staleTimeMs.");
+  return useInfiniteQuery({
+    ...options,
+    staleTime: staleTimeMs,
+    refetchOnMount: "always",
+    meta: { ...meta, serverDataPolicy: { class: "fetch", dataShape: "list" } },
+  });
 }
 
 function replicaQueryOptions<

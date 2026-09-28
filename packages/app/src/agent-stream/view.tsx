@@ -1,4 +1,5 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
+import { useEntryJump } from "@/chi/use-entry-jump";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -624,6 +625,16 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       visibleItemIds: visibleHistoryItemIds,
       revealLoadedItem: revealLoadedHistory,
     });
+    const referencedEntryId = useEntryJump({
+      host: resolvedServerId,
+      agentId,
+      active: isActive,
+      items: effectiveStreamItems,
+      head: effectiveStreamHead,
+      visible: visibleHistoryItemIds,
+      reveal: revealLoadedHistory,
+      viewport: viewportRef,
+    });
 
     useImperativeHandle(
       ref,
@@ -858,7 +869,18 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         const item = layoutItem.item;
         switch (item.kind) {
           case "user_message":
-            return renderUserMessageItem(layoutItem, item);
+            return referencedEntryId &&
+              item.timelineCursor?.epoch === referencedEntryId.epoch &&
+              item.timelineCursor.seq === referencedEntryId.seq ? (
+              <View
+                testID={`referenced-entry-${referencedEntryId.entryId}`}
+                style={stylesheet.referencedEntry}
+              >
+                {renderUserMessageItem(layoutItem, item)}
+              </View>
+            ) : (
+              renderUserMessageItem(layoutItem, item)
+            );
 
           case "assistant_message":
             return renderAssistantMessageItem(layoutItem, item);
@@ -900,6 +922,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         renderThoughtItem,
         renderToolCallItem,
         resolvedServerId,
+        referencedEntryId,
       ],
     );
 
@@ -1612,6 +1635,7 @@ function PermissionRequestCard({
 }
 
 const stylesheet = StyleSheet.create((theme) => ({
+  referencedEntry: { backgroundColor: theme.colors.surface2, borderRadius: theme.borderRadius.lg },
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface0,

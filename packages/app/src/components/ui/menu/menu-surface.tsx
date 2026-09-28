@@ -421,17 +421,19 @@ function MenuSheetSurface({
         showsVerticalScrollIndicator={false}
         testID={testID ? `${testID}-content` : undefined}
       >
-        {openPage ? (
-          <>
-            <MenuSheetHeader title={openPage.title} onBack={menu.goBack} />
-            <MenuPage depth={depth}>{openPage.content}</MenuPage>
-          </>
-        ) : (
-          <>
-            {sheetTitle ? <MenuSheetHeader title={sheetTitle} onBack={null} /> : null}
-            <MenuPage depth={0}>{children}</MenuPage>
-          </>
-        )}
+        <View testID={testID}>
+          {openPage ? (
+            <>
+              <MenuSheetHeader title={openPage.title} onBack={menu.goBack} />
+              <MenuPage depth={depth}>{openPage.content}</MenuPage>
+            </>
+          ) : (
+            <>
+              {sheetTitle ? <MenuSheetHeader title={sheetTitle} onBack={null} /> : null}
+              <MenuPage depth={0}>{children}</MenuPage>
+            </>
+          )}
+        </View>
       </BottomSheetScrollView>
     </ThemedBottomSheetModal>
   );

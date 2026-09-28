@@ -10,6 +10,8 @@ interface ScopeState {
   generation: number;
   context: ChiMentionContext | null;
   error: string | null;
+  loading?: boolean;
+  accessLost?: boolean;
 }
 export function mentionQueryKey(host: string, workspace: string, state: ScopeState) {
   return [
@@ -19,11 +21,17 @@ export function mentionQueryKey(host: string, workspace: string, state: ScopeSta
     state.context?.actor,
     state.context?.repo,
     state.context?.generation,
+    state.context?.deployment,
     state.generation,
   ] as const;
 }
 export function sameMentionContext(a: ChiMentionContext, b: ChiMentionContext) {
-  return a.actor === b.actor && a.repo === b.repo && a.generation === b.generation;
+  return (
+    a.actor === b.actor &&
+    a.repo === b.repo &&
+    a.generation === b.generation &&
+    a.deployment === b.deployment
+  );
 }
 
 /** One authority boundary for the whole inbox tree, participant picker and delivery rail. */
@@ -44,11 +52,12 @@ export function createMentionScope(
   function lose(error = "chi-mention-context-changed") {
     clear();
     acquiring = null;
-    publish({ generation: state.generation + 1, context: null, error });
+    publish({ generation: state.generation + 1, context: null, error, accessLost: true });
   }
   async function acquire() {
     if (acquiring) return acquiring;
     const generation = state.generation;
+    if (!state.context) publish({ ...state, error: null, loading: true });
     const task = (async () => {
       try {
         const result = await execute({ action: "scope" });
@@ -57,8 +66,16 @@ export function createMentionScope(
         if (state.context && !sameMentionContext(state.context, result.context)) clear();
         publish({ context: result.context, generation: generation + 1, error: null });
       } catch (error) {
-        if (state.generation === generation)
-          lose(error instanceof Error ? error.message : "chi-mentions-unavailable");
+        if (state.generation === generation) {
+          if (error instanceof ChiOperationError && error.failure?.accessLost) lose(error.message);
+          else
+            publish({
+              ...state,
+              loading: false,
+              error: error instanceof Error ? error.message : "chi-mentions-unavailable",
+              accessLost: false,
+            });
+        }
         throw error;
       }
     })();
@@ -90,15 +107,12 @@ export function createMentionScope(
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "chi-mentions-unavailable";
-      const mutation =
-        operation.action === "reply" ||
-        operation.action === "acknowledge" ||
-        operation.action === "retry";
-      // An uncertain mutation retains its immutable retry operation. Access/context loss
-      // always clears every protected view; read acquisition failures do too.
+      // Only settled structured access loss clears protected state. A transient read
+      // failure belongs to its query, and never becomes a reconnect/access warning.
       if (
         state.generation === current.generation &&
-        (!mutation || (error instanceof ChiOperationError && error.failure?.accessLost))
+        error instanceof ChiOperationError &&
+        error.failure?.accessLost
       )
         lose(message);
       throw error;

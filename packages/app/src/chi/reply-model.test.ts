@@ -21,6 +21,7 @@ const context = { actor: handoff.recipient, repo: handoff.repo, generation: "a".
 function storage() {
   const values = new Map<string, string>();
   return {
+    getAllKeys: async () => [...values.keys()],
     getItem: async (key: string) => values.get(key) ?? null,
     setItem: async (key: string, value: string) => {
       values.set(key, value);
@@ -30,6 +31,88 @@ function storage() {
     },
   };
 }
+
+test.each(["reply", "acknowledge"] as const)(
+  "discovers legacy uncertain %s and requires explicit same-actor reauthorization before immutable retry",
+  async (action) => {
+    const disk = storage();
+    const legacyKey = `chi-reply:${JSON.stringify(["old-host", "old-workspace", context.repo, context.actor, handoff.id])}`;
+    const deployed = { ...context, deployment: "https://chi.example", generation: "b".repeat(64) };
+    const key = `chi-reply:${JSON.stringify([deployed.deployment, context.repo, context.actor, handoff.id])}`;
+    const operation = {
+      action,
+      id: handoff.id,
+      operationId: "fb2aed79-8a81-46f4-bf03-311f9a61337e",
+      revision: 1,
+      ...(action === "reply" ? { text: "Unconfirmed legacy reply" } : {}),
+    };
+    await disk.setItem(legacyKey, JSON.stringify({ context, operation }));
+    const sent: ChiMentionOperation[] = [];
+    const form = openReplyForm({
+      handoff,
+      context: deployed,
+      key,
+      storage: disk,
+      execute: async (op) => {
+        sent.push(op);
+        return { kind: "handoff", actor: context.actor, handoff };
+      },
+      onSuccess: () => {},
+      uuid: () => {
+        throw new Error("Must not replace saved UUID");
+      },
+    });
+    await form.send(action);
+    expect(sent).toEqual([]);
+    expect(form.getState()).toMatchObject({ status: "blocked", canReauthorize: true });
+    form.setText("replacement");
+    await form.reauthorize();
+    await form.send(action);
+    expect(sent).toEqual([operation]);
+    expect(await disk.getItem(legacyKey)).toBeNull();
+    expect(await disk.getItem(key)).toBeNull();
+  },
+);
+
+test("conflicting legacy envelopes block replacement operations", async () => {
+  const disk = storage();
+  for (const host of ["one", "two"])
+    await disk.setItem(
+      `chi-reply:${JSON.stringify([host, "workspace", context.repo, context.actor, handoff.id])}`,
+      JSON.stringify({
+        context,
+        operation: {
+          action: "reply",
+          id: handoff.id,
+          operationId:
+            host === "one"
+              ? "fb2aed79-8a81-46f4-bf03-311f9a61337e"
+              : "3fad06da-0902-405e-9476-ac1d8fdd9480",
+          revision: 1,
+          text: host,
+        },
+      }),
+    );
+  const form = openReplyForm({
+    handoff,
+    context,
+    key: `chi-reply:${JSON.stringify([null, context.repo, context.actor, handoff.id])}`,
+    storage: disk,
+    execute: async () => {
+      throw new Error("Must not dispatch");
+    },
+    onSuccess: () => {},
+    uuid: () => {
+      throw new Error("Must not replace");
+    },
+  });
+  await form.send("reply");
+  expect(form.getState()).toMatchObject({
+    status: "blocked",
+    canReauthorize: false,
+    canDiscard: false,
+  });
+});
 
 test("reload retries the immutable reply operation without changing text, identity or expected revision", async () => {
   const disk = storage();

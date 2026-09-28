@@ -4,6 +4,9 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient } from "@/data/query-client";
 import { createMentionScope, type MentionScope } from "./mention-context";
 import { clearHostMentionSelection } from "./mention-selection";
+import { useEntryTarget } from "./entry-target";
+import { inboxAuthority } from "./inbox-identity";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 export const mentionRefreshIntervalMs = 30_000;
 
@@ -16,11 +19,22 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
   const scope = createMentionScope(
     async (operation, expectedContext) => {
       if (!client) throw new Error("chi-host-disconnected");
-      return client.chiMentions({ workspaceId: workspace, operation, expectedContext });
+      const result = await client.chiMentions({
+        workspaceId: workspace || undefined,
+        operation,
+        expectedContext,
+      });
+      if (!workspace && !inboxAuthority.accepts(result.context))
+        throw new ChiOperationError(
+          "Reconnect a host signed in to your Chi inbox account and deployment.",
+          { accessLost: true, outcome: "unknown" },
+        );
+      return result;
     },
     () => {
       queryClient.removeQueries({ queryKey: ["chi-mentions", host, workspace] });
       clearHostMentionSelection(host);
+      useEntryTarget.setState({ target: null });
     },
   );
   scopes.set(key, { client, scope });

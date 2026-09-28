@@ -143,6 +143,29 @@ export class ChiMentions {
     body?: unknown,
     query?: Record<string, string>,
   ): Promise<unknown> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.request(identity, path, method, body, query);
+      } catch (error) {
+        // Concurrent read markers move the repository fence. Reacquire GETs only;
+        // saved mutation identities and their explicit retry flow remain authoritative.
+        if (
+          method !== "GET" ||
+          attempt >= 2 ||
+          !(error instanceof Error) ||
+          error.message !== "chi-mentions-http-409"
+        )
+          throw error;
+      }
+    }
+  }
+  private async request(
+    identity: MentionIdentity,
+    path: string,
+    method: string,
+    body?: unknown,
+    query?: Record<string, string>,
+  ): Promise<unknown> {
     const url = append(endpointUrl(this.authority.endpoint), path);
     if (query) url.search = new URLSearchParams(query).toString();
     const response = await this.authority.request(url, {
@@ -336,6 +359,7 @@ export class ChiMentions {
     const actor = identity.actor;
     if (operation.action === "participants")
       return { kind: "participants", actor, participants: await this.participants(identity) };
+    if (operation.action === "inbox") return this.inbox(identity, operation);
     if (operation.action === "list") {
       const result = z
         .object({
@@ -354,7 +378,12 @@ export class ChiMentions {
       return { kind: "list", actor, handoffs: result.handoffs, nextOffset: result.nextOffset };
     }
     let result;
-    if (operation.action === "acknowledge") {
+    if (operation.action === "viewed") {
+      result = await this.call(identity, "handoffs/read", "POST", {
+        id: operation.id,
+        revision: operation.revision,
+      });
+    } else if (operation.action === "acknowledge") {
       result = await this.call(identity, "handoffs", "PATCH", {
         id: operation.id,
         operationId: operation.operationId,
@@ -411,7 +440,52 @@ export class ChiMentions {
       );
     const payload = JSON.stringify(exact.native, null, 2);
     if (payload.length > 1024 * 1024) throw new Error("chi-mention-source-too-large");
-    return { kind: "source", actor, source: { ...source, entryId }, payload };
+    const metadata = z
+      .object({
+        sourceId: z.literal(source.id),
+        nativeSessionId: z.string(),
+        workspace: z.object({ hostId: z.string() }),
+      })
+      .parse(
+        await this.call(identity, "evidence/inspect", "GET", undefined, { sourceId: source.id }),
+      );
+    return {
+      kind: "source",
+      actor,
+      source: { ...source, entryId },
+      payload,
+      origin: { hostId: metadata.workspace.hostId, sessionId: metadata.nativeSessionId },
+    };
+  }
+  private async inbox(
+    identity: MentionIdentity,
+    operation: Extract<ChiMentionOperation, { action: "inbox" }>,
+  ): Promise<ChiMentionResult> {
+    const result = z
+      .object({
+        ok: z.literal(true),
+        handoffs: z.array(ChiHandoffSchema),
+        nextCursor: z.string().nullable(),
+        unreadCount: z.number().int().nonnegative(),
+      })
+      .parse(
+        await this.call(identity, "handoffs/inbox", "GET", undefined, {
+          inbox: String(operation.inbox),
+          cursor: operation.cursor ?? "",
+        }),
+      );
+    if (
+      operation.inbox &&
+      result.handoffs.some((h) => h.recipient.toLowerCase() !== identity.actor)
+    )
+      throw new Error("chi-mention-invalid-response");
+    return {
+      kind: "inbox",
+      actor: identity.actor,
+      handoffs: result.handoffs,
+      nextCursor: result.nextCursor,
+      unreadCount: result.unreadCount,
+    };
   }
 }
 

@@ -5,10 +5,12 @@ import { useSessionStore } from "@/stores/session-store";
 import { clearMentionSelection } from "./mention-selection";
 import { mentionRefreshIntervalMs, useMentionScope } from "./use-mention-scope";
 import { mentionQueryKey } from "./mention-context";
+import { useAgentChiRepository } from "./repository";
 
 export function useMentionParticipants(serverId: string, agentId: string, active: boolean) {
   const client = useHostRuntimeClient(serverId);
   const connected = useHostRuntimeIsConnected(serverId);
+  const repository = useAgentChiRepository(serverId, agentId);
   const workspaceId = useSessionStore(
     (state) => state.sessions[serverId]?.agents.get(agentId)?.workspaceId,
   );
@@ -17,7 +19,7 @@ export function useMentionParticipants(serverId: string, agentId: string, active
       state.sessions[serverId]?.serverInfo?.features?.chiMentions === true &&
       state.sessions[serverId]?.agents.get(agentId)?.provider === "opencode",
   );
-  const enabled = supported && connected && Boolean(workspaceId);
+  const enabled = supported && repository && connected && Boolean(workspaceId);
   const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, enabled);
   const query = useFetchQuery({
     queryKey: [...mentionQueryKey(serverId, workspaceId ?? "", state), "participants"],

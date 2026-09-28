@@ -13,6 +13,7 @@ export default function ChiContinueRoute() {
     source?: string;
     snapshot?: string;
     sourceHost?: string;
+    sourceSession?: string;
     agentId?: string;
     conversationId?: string;
     transferId?: string;
@@ -30,11 +31,7 @@ export default function ChiContinueRoute() {
   return (
     <HostRouteBootstrapBoundary>
       {params.view === "inbox" ? (
-        <ChiInboxScreen
-          key={`${params.host}/${params.workspace}`}
-          host={typeof params.host === "string" ? params.host : undefined}
-          workspace={typeof params.workspace === "string" ? params.workspace : undefined}
-        />
+        <ChiInboxScreen />
       ) : (
         <ChiContinueScreen
           key={`${repo}/${sourceId}/${snapshotId}/${params.sourceHost}/${params.agentId}/${params.conversationId}/${params.transferId}`}

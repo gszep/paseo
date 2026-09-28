@@ -334,6 +334,13 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   useEffect(() => {
     const handle: StreamViewportHandle = {
+      scrollToMessage: (messageId) => {
+        const index = historyRows.findIndex((row) => row.id === messageId);
+        if (index < 0) return;
+        bottomAnchorController.detachByUser();
+        onNearBottomChange(false);
+        flatListRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0.5 });
+      },
       scrollToBottom: (reason = "jump-to-bottom") => {
         bottomAnchorController.requestLocalAnchor({
           agentId,
@@ -351,7 +358,21 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
         viewportRef.current = null;
       }
     };
-  }, [agentId, bottomAnchorController, markNativeViewportSettling, viewportRef]);
+  }, [
+    agentId,
+    bottomAnchorController,
+    markNativeViewportSettling,
+    viewportRef,
+    historyRows,
+    onNearBottomChange,
+  ]);
+
+  const handleScrollToIndexFailed = useCallback(
+    ({ index, averageItemLength }: { index: number; averageItemLength: number }) => {
+      flatListRef.current?.scrollToOffset({ offset: index * averageItemLength, animated: false });
+    },
+    [],
+  );
 
   const isScrollEventNearBottom = useStableEvent(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -575,6 +596,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
       style={listStyle}
       onLayout={handleListLayout}
       onScroll={handleScroll}
+      onScrollToIndexFailed={handleScrollToIndexFailed}
       onScrollBeginDrag={handleScrollBeginDrag}
       onScrollEndDrag={handleScrollEndDrag}
       onMomentumScrollBegin={handleMomentumScrollBegin}

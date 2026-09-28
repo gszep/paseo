@@ -1137,16 +1137,12 @@ export class DaemonClient {
       ),
     release: async (subscriptionId) => {
       if (!this.isConnected) return;
-      try {
-        await this.sendCorrelatedSessionRequest({
-          message: { type: "subscription.release.request", subscriptionId },
-          responseType: "subscription.release.response",
-        });
-      } catch (error) {
-        this.disposeTransport(1001, "Subscription release failed");
-        this.scheduleReconnect({ reason: "Subscription release failed" });
-        throw error;
-      }
+      // Liveness owns transport recovery. A rejected or stale teardown must not
+      // close every observation (or a replacement socket) on this host.
+      await this.sendCorrelatedSessionRequest({
+        message: { type: "subscription.release.request", subscriptionId },
+        responseType: "subscription.release.response",
+      });
     },
     failed: (error) => this.logger.error({ err: error }, "Subscription failed"),
   });
@@ -3168,6 +3164,8 @@ export class DaemonClient {
   ) {
     if (this.lastServerInfoMessage?.features?.chiMentions !== true)
       throw new Error("Update this host to use human mentions.");
+    if (!input.workspaceId && this.lastServerInfoMessage?.features?.chiInbox !== true)
+      throw new Error("Update this host to use the deployment inbox.");
     const requestId = this.createRequestId();
     const payload = await this.sendRequest({
       requestId,

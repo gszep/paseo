@@ -562,11 +562,6 @@ describe("translation resources", () => {
       "All recent sessions are already imported.",
     );
     expect(en.importSession.empty.noProviderSessions).toBe("No {{provider}} sessions found.");
-    expect(en.sidebar.worktreeSetup.title).toBe("Set up worktree scripts");
-    expect(en.sidebar.worktreeSetup.description).toBe(
-      "Add setup commands so new worktrees can install dependencies and prepare themselves automatically.",
-    );
-    expect(en.sidebar.worktreeSetup.openProjectSettings).toBe("Open project settings");
   });
 
   it("includes remaining small utility chrome keys for the Batch 4O migration", () => {
