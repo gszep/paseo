@@ -283,6 +283,9 @@ function resolveAutocompleteIsLoading(args: {
   isCommandsLoading: boolean;
   fileSuggestionsIsPending: boolean;
   fileSuggestionsIsLoading: boolean;
+  fileQueryIsDebouncing: boolean;
+  peopleIsLoading: boolean;
+  peopleIsFetching: boolean;
   optionsLength: number;
 }): boolean {
   if (args.mode === "command") {
@@ -290,7 +293,12 @@ function resolveAutocompleteIsLoading(args: {
   }
   if (args.mode === "file") {
     return (
-      (args.fileSuggestionsIsPending || args.fileSuggestionsIsLoading) && args.optionsLength === 0
+      (args.fileSuggestionsIsPending ||
+        args.fileSuggestionsIsLoading ||
+        args.fileQueryIsDebouncing ||
+        args.peopleIsLoading ||
+        args.peopleIsFetching) &&
+      args.optionsLength === 0
     );
   }
   return false;
@@ -301,6 +309,8 @@ function resolveAutocompleteErrorMessage(args: {
   isCommandError: boolean;
   commandError: Error | null;
   fileSuggestionsError: unknown;
+  optionsLength: number;
+  isLoading: boolean;
   t: TFunction;
 }): string | undefined {
   if (args.mode === "command") {
@@ -309,6 +319,7 @@ function resolveAutocompleteErrorMessage(args: {
       : undefined;
   }
   if (args.mode === "file") {
+    if (args.optionsLength > 0 || args.isLoading) return undefined;
     return args.fileSuggestionsError instanceof Error
       ? args.fileSuggestionsError.message
       : undefined;
@@ -442,7 +453,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
   const options = useMemo<AgentAutocompleteOption[]>(() => {
     if (!isVisible) return [];
     if (mode === "file" && activeFileMention) {
-      const canShowPeople = isConnected && people.isSuccess && !people.isFetching;
+      const canShowPeople = isConnected && people.isSuccess;
       return buildMentionAutocompleteOptions({
         text: userInput,
         mention: activeFileMention,
@@ -476,7 +487,6 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     t,
     people.data,
     people.isSuccess,
-    people.isFetching,
     isConnected,
     userInput,
   ]);
@@ -569,14 +579,19 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     mode,
     isCommandsLoading,
     fileSuggestionsIsPending: fileSuggestionsQuery.isPending,
-    fileSuggestionsIsLoading: fileSuggestionsQuery.isLoading,
+    fileSuggestionsIsLoading: fileSuggestionsQuery.isFetching,
+    fileQueryIsDebouncing: debouncedFileFilterQuery !== fileFilterQuery,
+    peopleIsLoading: people.isLoading,
+    peopleIsFetching: people.isFetching,
     optionsLength: options.length,
   });
   const errorMessage = resolveAutocompleteErrorMessage({
     mode,
     isCommandError: isError,
     commandError: error,
-    fileSuggestionsError: options.length === 0 ? fileSuggestionsQuery.error : null,
+    fileSuggestionsError: fileSuggestionsQuery.error,
+    optionsLength: options.length,
+    isLoading,
     t,
   });
 

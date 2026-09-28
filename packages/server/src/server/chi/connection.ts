@@ -41,6 +41,9 @@ import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import { createSessionLogin } from "./session-login.js";
+import { ParticipantCache } from "./participant-cache.js";
+import { classifyMentionFailure } from "./mention-failure.js";
 
 const label = "chi.native";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -119,25 +122,21 @@ export interface ChiAuthority {
   endpoint: string;
   request: typeof fetch;
   login(): Promise<AuthState & { credentialGeneration?: string }>;
+  invalidate(): void;
 }
-const deployment: ChiAuthority = {
-  endpoint: DEFAULT_BACKEND_URL,
-  request: fetch,
-  async login() {
-    const githubToken = readGitHubCliToken();
-    if (!githubToken) throw new Error("chi-github-login-required");
-    const session = await exchangeGitHubToken({ githubToken, backendUrl: DEFAULT_BACKEND_URL });
-    // Session tokens are reminted on exchange. Bind UI intent to the host credential,
-    // not the short-lived token's issue time, while still reacquiring authorization.
-    return {
-      ...session,
-      credentialGeneration: createHash("sha256").update(githubToken).digest("hex"),
-    };
-  },
-};
+function createDeployment(): ChiAuthority {
+  return {
+    endpoint: DEFAULT_BACKEND_URL,
+    request: fetch,
+    ...createSessionLogin(readGitHubCliToken, (githubToken) =>
+      exchangeGitHubToken({ githubToken, backendUrl: DEFAULT_BACKEND_URL }),
+    ),
+  };
+}
 
 export class ChiConnection {
   readonly mentions: ChiMentions;
+  private readonly participants = new ParticipantCache();
   private readonly registrationPermits = new WeakMap<
     object,
     { sessionId: string; cwd: string; workspaceId: string; labels: string }
@@ -290,17 +289,30 @@ export class ChiConnection {
   private readonly pending = new Map<string, Promise<Association>>();
   private readonly dirty = new Set<string>();
   private readonly continuing = new Set<string>();
-  private get authority(): ChiAuthority {
-    return this.options.authority ?? deployment;
-  }
+  private readonly authority: ChiAuthority;
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
   ) {
-    this.mentions = new ChiMentions(options.home, this.authority);
+    this.authority = options.authority ?? createDeployment();
+    this.mentions = new ChiMentions(options.home, {
+      endpoint: this.authority.endpoint,
+      request: async (url, init) => {
+        const response = await this.authority.request(url, init);
+        if ([401, 403, 404].includes(response.status)) {
+          this.loseMentionAuthority();
+        }
+        return response;
+      },
+    });
   }
 
-  private async mentionIdentity(cwd: string): Promise<MentionIdentity> {
+  private loseMentionAuthority() {
+    this.participants.clear();
+    this.authority.invalidate();
+  }
+
+  private async mentionIdentity(cwd: string, directoryOnly = false): Promise<MentionIdentity> {
     try {
       const remote = await execCommand("git", ["remote", "get-url", "origin"], {
         cwd,
@@ -309,7 +321,7 @@ export class ChiConnection {
       const parsed = parseGitHubRemote(remote.stdout);
       if (!parsed) throw new Error("chi-repository-mismatch");
       const repo = `github:${parsed.owner}/${parsed.repo}`;
-      const auth = await this.authorize(repo, cwd);
+      const auth = directoryOnly ? await this.authority.login() : await this.authorize(repo, cwd);
       return {
         repo,
         actor: auth.chiUserId.toLowerCase(),
@@ -317,6 +329,7 @@ export class ChiConnection {
         credentialGeneration: auth.credentialGeneration,
       };
     } catch (error) {
+      this.loseMentionAuthority();
       // A failed authority acquisition invalidates protected data even when token
       // exchange or Git reports an error outside the public Chi code vocabulary.
       throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
@@ -378,10 +391,48 @@ export class ChiConnection {
     operation: ChiMentionOperation,
     expectedContext?: ChiMentionContext,
   ) {
-    const identity = await this.mentionIdentity(cwd);
+    try {
+      return await this.readMentionOperation(cwd, workspaceId, operation, expectedContext);
+    } catch (error) {
+      if (classifyMentionFailure(error).accessLost) {
+        this.loseMentionAuthority();
+      }
+      throw error;
+    }
+  }
+
+  private async readMentionOperation(
+    cwd: string,
+    workspaceId: string,
+    operation: ChiMentionOperation,
+    expectedContext?: ChiMentionContext,
+  ) {
+    const directoryOnly = operation.action === "scope" || operation.action === "participants";
+    const identity = await this.mentionIdentity(cwd, directoryOnly);
     const context = this.mentionContext(identity);
-    if (operation.action === "scope")
-      return { context, result: { kind: "scope" as const, actor: identity.actor } };
+    const workspace = JSON.stringify([workspaceId, cwd]);
+    this.participants.observe(workspace, identity);
+    const generation = this.participants.generation;
+    if (directoryOnly) {
+      if (operation.action !== "scope") this.requireMentionContext(identity, expectedContext);
+      const participants = await this.participants.read(workspace, identity, async () => {
+        // /participants authorizes the session and x-chi-repo, and verifies self below.
+        // Fetching the entire /repos catalog adds no authority to this directory read.
+        const result = await this.mentions.execute(identity, { action: "participants" });
+        if (result.kind !== "participants") throw new Error("chi-mention-invalid-response");
+        return result.participants;
+      });
+      const current = await this.mentionIdentity(cwd, true);
+      this.participants.observe(workspace, current);
+      this.requireMentionContext(current, context);
+      if (this.participants.generation !== generation)
+        throw new Error("chi-mention-context-changed");
+      const result =
+        operation.action === "scope"
+          ? { kind: "scope" as const, actor: identity.actor }
+          : { kind: "participants" as const, actor: identity.actor, participants };
+      return { context, result };
+    }
     this.requireMentionContext(identity, expectedContext);
     const result = await this.executeMentionOperation(cwd, workspaceId, identity, operation);
     // A delayed read cannot republish data after the host changed identity/repository.
@@ -428,33 +479,38 @@ export class ChiConnection {
   }
 
   private async authorize(repo: string, cwd: string) {
-    const remote = await execCommand("git", ["remote", "get-url", "origin"], {
-      cwd,
-      timeout: 5000,
-    });
-    const parsed = parseGitHubRemote(remote.stdout);
-    if (!parsed || `github:${parsed.owner}/${parsed.repo}`.toLowerCase() !== repo.toLowerCase())
-      throw new Error("chi-repository-mismatch");
-    const session = await this.authority.login();
-    const endpoint = endpointUrl(this.authority.endpoint);
-    const get = async (path: string) => {
-      const response = await this.authority.request(append(endpoint, path), {
-        redirect: "error",
-        signal: AbortSignal.timeout(30000),
-        headers: { authorization: `Bearer ${session.sessionToken}` },
+    try {
+      const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+        cwd,
+        timeout: 5000,
       });
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`chi-http-${response.status}`);
-      }
-      return JSON.parse(await boundedText(response, 1024 * 1024));
-    };
-    const identity = authSchema.parse(await get("auth/session"));
-    if (identity.chiUserId !== session.chiUserId) throw new Error("chi-identity-mismatch");
-    const catalog = reposSchema.parse(await get("repos"));
-    if (!catalog.repos.some((entry) => entry.repo === repo))
-      throw new Error("chi-repository-denied");
-    return session;
+      const parsed = parseGitHubRemote(remote.stdout);
+      if (!parsed || `github:${parsed.owner}/${parsed.repo}`.toLowerCase() !== repo.toLowerCase())
+        throw new Error("chi-repository-mismatch");
+      const session = await this.authority.login();
+      const endpoint = endpointUrl(this.authority.endpoint);
+      const get = async (path: string) => {
+        const response = await this.authority.request(append(endpoint, path), {
+          redirect: "error",
+          signal: AbortSignal.timeout(30000),
+          headers: { authorization: `Bearer ${session.sessionToken}` },
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new Error(`chi-http-${response.status}`);
+        }
+        return JSON.parse(await boundedText(response, 1024 * 1024));
+      };
+      const identity = authSchema.parse(await get("auth/session"));
+      if (identity.chiUserId !== session.chiUserId) throw new Error("chi-identity-mismatch");
+      const catalog = reposSchema.parse(await get("repos"));
+      if (!catalog.repos.some((entry) => entry.repo === repo))
+        throw new Error("chi-repository-denied");
+      return session;
+    } catch (error) {
+      if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
+      throw error;
+    }
   }
 
   async share(agentId: string, selectedRepo?: string): Promise<Association> {

@@ -9,6 +9,9 @@ import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority } from "./connection.js";
 import { classifyMentionFailure } from "./mention-failure.js";
+import { createSessionLogin } from "./session-login.js";
+import { ParticipantCache } from "./participant-cache.js";
+import type { MentionIdentity } from "./mentions.js";
 
 const homes: string[] = [];
 function barrier() {
@@ -19,6 +22,7 @@ function barrier() {
   return { promise, resolve };
 }
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
 });
 
@@ -64,10 +68,13 @@ async function fixture() {
     const path = new URL(String(url)).pathname;
     if (path === "/auth/session") return Response.json({ ok: true, chiUserId: "github:owner" });
     if (path === "/repos") return Response.json({ ok: true, repos: [{ repo: input.repo }] });
+    if (path === "/participants")
+      return Response.json({ ok: true, self: "github:owner", participants: [] });
     if (path === "/evidence/inspect") return Response.json({ sourceId: input.sourceId });
     throw new Error(`unexpected request: ${path}`);
   });
   const authority: ChiAuthority = {
+    invalidate: () => undefined,
     endpoint: "https://chi.invalid",
     request,
     login: async () => ({ sessionToken: "fixture", chiUserId: "github:owner" }),
@@ -146,7 +153,263 @@ async function fixture() {
   };
 }
 
+describe("mention directory cache", () => {
+  const identity: MentionIdentity = {
+    repo: "github:fixture/repo",
+    actor: "github:owner",
+    token: "session",
+    credentialGeneration: "credential",
+  };
+  const people = [{ ownerId: "github:sava", handle: "sava" }];
+
+  it.each(["repo", "actor", "credentialGeneration"] as const)(
+    "discards delayed %s responses and never reuses a former scope",
+    async (field) => {
+      const cache = new ParticipantCache();
+      const gate = barrier();
+      const pending = cache.read("workspace", identity, async () => {
+        await gate.promise;
+        return people;
+      });
+      const rejection = expect(pending).rejects.toThrow("chi-mention-context-changed");
+      const next = { ...identity, [field]: "changed" };
+      expect(await cache.read("workspace", next, async () => [])).toEqual([]);
+      gate.resolve();
+      await rejection;
+      const reload = vi.fn(async () => people);
+      expect(await cache.read("workspace", identity, reload)).toEqual(people);
+      expect(reload).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("isolates workspace and host instances and returns defensive copies", async () => {
+    const cache = new ParticipantCache();
+    const load = vi.fn(async () => people);
+    const first = await cache.read("a", identity, load);
+    first[0]!.handle = "edited";
+    expect(await cache.read("a", identity, load)).toEqual(people);
+    expect(load).toHaveBeenCalledOnce();
+    await cache.read("b", identity, load);
+    await new ParticipantCache().read("a", identity, load);
+    expect(load).toHaveBeenCalledTimes(3);
+    cache.clear();
+    await cache.read("a", identity, load);
+    expect(load).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries failed acquisition rather than retaining a rejected promise", async () => {
+    const cache = new ParticipantCache();
+    await expect(
+      cache.read("workspace", identity, async () => {
+        throw new Error("denied");
+      }),
+    ).rejects.toThrow("denied");
+    expect(await cache.read("workspace", identity, async () => people)).toEqual(people);
+  });
+});
+
+describe("host Chi session cache", () => {
+  function session(token: string) {
+    return {
+      schemaVersion: 1 as const,
+      chiUserId: "github:owner",
+      sessionToken: token,
+      identityProvider: "github",
+      repoProvider: "github",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  it("coalesces exchange, expires after 60 seconds, and checks the host credential on every access", async () => {
+    let token: string | null = "first";
+    const read = vi.fn(() => token);
+    const exchange = vi.fn(async (value: string) => session(value));
+    const auth = createSessionLogin(read, exchange);
+    await Promise.all([auth.login(), auth.login(), auth.login()]);
+    expect(exchange).toHaveBeenCalledTimes(1);
+    const calls = read.mock.calls.length;
+    await auth.login();
+    expect(read).toHaveBeenCalledTimes(calls + 1);
+    token = "second";
+    expect((await auth.login()).sessionToken).toBe("second");
+    expect(exchange).toHaveBeenCalledTimes(2);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60_001);
+    await auth.login();
+    expect(exchange).toHaveBeenCalledTimes(3);
+    token = null;
+    await expect(auth.login()).rejects.toThrow("chi-github-login-required");
+    token = "second";
+    await auth.login();
+    expect(exchange).toHaveBeenCalledTimes(4);
+    auth.invalidate();
+    await auth.login();
+    expect(exchange).toHaveBeenCalledTimes(5);
+  });
+
+  it("rejects old exchanges after credential change or explicit access loss", async () => {
+    let token = "first";
+    const gate = barrier();
+    const auth = createSessionLogin(
+      () => token,
+      async (value) => {
+        await gate.promise;
+        return session(value);
+      },
+    );
+    const old = auth.login();
+    const rejected = expect(old).rejects.toThrow("chi-mention-context-changed");
+    token = "second";
+    const current = auth.login();
+    gate.resolve();
+    await rejected;
+    expect((await current).sessionToken).toBe("second");
+    const another = barrier();
+    const revoked = createSessionLogin(
+      () => token,
+      async () => {
+        await another.promise;
+        return session(token);
+      },
+    );
+    const pending = revoked.login();
+    const revokedResult = expect(pending).rejects.toThrow("chi-mention-context-changed");
+    revoked.invalidate();
+    another.resolve();
+    await revokedResult;
+  });
+});
+
 describe("Chi owner recovery", () => {
+  it("a canonical authorization denial also invalidates the warm participant directory", async () => {
+    const f = await fixture();
+    const original = f.authority.request;
+    let denied = false;
+    let directories = 0;
+    f.authority.request = async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (route === "/participants") directories++;
+      if (route === "/repos" && denied) return Response.json({ ok: true, repos: [] });
+      return original(url, init);
+    };
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    denied = true;
+    await expect(
+      owner.assertCurrent({
+        cwd: f.home,
+        labels: {
+          "chi.native": JSON.stringify({
+            repo: f.input.repo,
+            actor: "github:owner",
+            sourceId: null,
+            head: null,
+            error: null,
+            conversationId: "canonical",
+          }),
+        },
+      }),
+    ).rejects.toThrow("chi-repository-denied");
+    denied = false;
+    await owner.mentionOperation(f.home, "workspace", { action: "participants" }, scope.context);
+    expect(directories).toBe(2);
+  });
+  it.each([401, 403, 404])(
+    "scope prefetch rejects directory HTTP %s and discards cached authority",
+    async (status) => {
+      const f = await fixture();
+      f.authority.invalidate = vi.fn();
+      f.authority.request = vi.fn(async () => new Response(null, { status }));
+      await expect(
+        f.restart().mentionOperation(f.home, "workspace", { action: "scope" }),
+      ).rejects.toThrow(`chi-mentions-http-${status}`);
+      expect(f.authority.invalidate).toHaveBeenCalled();
+    },
+  );
+
+  it("never accepts the directory of a different authenticated owner", async () => {
+    const f = await fixture();
+    f.authority.request = async () =>
+      Response.json({ ok: true, self: "github:other", participants: [] });
+    await expect(
+      f.restart().mentionOperation(f.home, "workspace", { action: "scope" }),
+    ).rejects.toThrow("chi-identity-mismatch");
+  });
+  it("a structured denial clears a warm directory, and delayed participants cannot restore it", async () => {
+    const f = await fixture();
+    const original = f.authority.request;
+    const started = barrier(),
+      release = barrier();
+    let delayed = false;
+    f.authority.request = async (url, init) => {
+      const route = new URL(String(url)).pathname;
+      if (route === "/handoffs") return new Response(null, { status: 403 });
+      if (route === "/participants" && delayed) {
+        started.resolve();
+        await release.promise;
+      }
+      return original(url, init);
+    };
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    delayed = true;
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    const pending = owner.mentionOperation(
+      f.home,
+      "workspace",
+      { action: "participants" },
+      scope.context,
+    );
+    const rejection = expect(pending).rejects.toThrow("chi-mention-context-changed");
+    await started.promise;
+    await expect(
+      owner.mentionOperation(
+        f.home,
+        "workspace",
+        { action: "list", inbox: true, offset: 0 },
+        scope.context,
+      ),
+    ).rejects.toThrow("chi-mentions-http-403");
+    release.resolve();
+    await rejection;
+  });
+  it("prefetches and coalesces the authorized directory within a workspace, then revalidates after 30 seconds", async () => {
+    const f = await fixture();
+    const original = f.authority.request;
+    const request = vi.fn<typeof fetch>(async (url, init) => {
+      if (new URL(String(url)).pathname === "/participants")
+        return Response.json({
+          ok: true,
+          self: "github:owner",
+          participants: [{ ownerId: "github:sava", handle: "sava" }],
+        });
+      return original(url, init);
+    });
+    f.authority.request = request;
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    const reads = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        owner.mentionOperation(f.home, "workspace", { action: "participants" }, scope.context),
+      ),
+    );
+    expect(reads[0]?.result).toEqual({
+      kind: "participants",
+      actor: "github:owner",
+      participants: [{ ownerId: "github:sava", handle: "sava" }],
+    });
+    expect(request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/participants",
+    ]);
+    await owner.mentionOperation(f.home, "other-workspace", { action: "scope" });
+    expect(request).toHaveBeenCalledTimes(2);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    try {
+      await owner.mentionOperation(f.home, "workspace", { action: "participants" }, scope.context);
+      expect(request).toHaveBeenCalledTimes(3);
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it.each(["reply", "acknowledge", "retry"] as const)(
     "classifies the production missing-credential code as access loss during %s",
     async (action) => {
@@ -184,6 +447,8 @@ describe("Chi owner recovery", () => {
       const route = new URL(String(url)).pathname;
       if (route === "/auth/session") return Response.json({ ok: true, chiUserId: actor });
       if (route === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
+      if (route === "/participants")
+        return Response.json({ ok: true, self: actor, participants: [] });
       operations.push(`${init?.method} ${route}`);
       return Response.json({ ok: true, handoffs: [], nextOffset: null });
     };
@@ -256,6 +521,8 @@ describe("Chi owner recovery", () => {
       if (route === "/auth/session") return Response.json({ ok: true, chiUserId: "github:owner" });
       if (route === "/repos")
         return Response.json({ ok: true, repos: denied ? [] : [{ repo: f.input.repo }] });
+      if (route === "/participants")
+        return Response.json({ ok: true, self: "github:owner", participants: [] });
       started.resolve();
       await release.promise;
       return Response.json({ ok: true, handoffs: [], nextOffset: null });

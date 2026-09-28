@@ -170,7 +170,12 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
         chi: {
           home,
           serverId: "host",
-          authority: { endpoint: identity.endpoint, request: vi.fn(), login: vi.fn() },
+          authority: {
+            endpoint: identity.endpoint,
+            request: vi.fn(),
+            login: vi.fn(),
+            invalidate: vi.fn(),
+          },
         },
       });
     try {
@@ -304,6 +309,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
             serverId: "host",
             authority: {
               endpoint: identity.endpoint,
+              invalidate: vi.fn(),
               request,
               login: async () => ({ chiUserId: identity.actor, sessionToken: "synthetic" }),
             },

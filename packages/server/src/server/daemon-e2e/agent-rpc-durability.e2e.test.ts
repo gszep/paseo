@@ -40,6 +40,7 @@ test("mention intent is created only inside admitted message receipts, and trans
       }),
     },
     chiAuthority: {
+      invalidate: () => undefined,
       endpoint: "https://chi.invalid",
       login: async () => {
         if (loggedOut) throw new Error("chi-github-login-required");

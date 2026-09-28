@@ -119,8 +119,27 @@ The `/chi` route also accepts a prepared `conversationId` and `transferId`
 alongside the exact evidence coordinates. App/daemon drift is gated once by
 `chiCanonical`; there is no fallback to an independent fork.
 
-Human mentions use Chi's existing source-linked handoffs. Authenticated participants
-are a source in the composer's existing autocomplete: rank the combined sources
+Human mentions use Chi's existing source-linked handoffs. The composer prefetches the
+authorized participant directory on mount, before the first `@`. Matching is local
+and synchronous. Keep the directory in memory across popup close/reopen; revalidate
+in the background on popup open, focus/reconnect and a 30-second foreground interval.
+Same-scope revalidation keeps people visible while pending. A pending file search
+never delays people, and an empty-state row waits for all initial sources to settle.
+
+The daemon coalesces directory acquisition per workspace for 30 seconds. The
+`/participants` endpoint enforces session/repository authorization and its `self`
+must match the exact actor; directory acquisition does not enumerate `/repos`.
+Scope acquisition warms that same directory. The
+remote GitHub exchange is coalesced for 60 seconds; each RPC still reads the current
+host credential and Git remote before use and after directory reads. This bounds
+remote access reacquisition. Mutation and evidence authorization retain their live checks.
+Directory caches belong to a host/deployment and are keyed by workspace/checkout,
+exact actor/repository and credential generation. Access loss clears them and fences
+in-flight responses. The app uses the shared protected-scope invalidation below;
+directories are never persisted. `/participants` currently has no conditional HTTP
+validator, so refresh uses an authorized GET without an ETag shortcut.
+
+Participants are a source in the composer's existing autocomplete: rank the combined sources
 before positioning them above the input, so the highlighted default and Tab/Enter
 acceptance agree. An asynchronously arriving source updates the default; arrow
 navigation retains the selected option's identity and keeps its measured row visible
@@ -181,7 +200,9 @@ credential, not the Chi session token reminted during exchange. A delayed respon
 from a lost scope cannot restore it. Authority acquisition failures and structured
 access-loss responses (including host GitHub logout) clear the scope on mutations
 as well as reads. Refresh/focus and disconnect suppress previous views. This
-is pull-based access reacquisition, not recall of data already downloaded.
+is pull-based access reacquisition, not recall of data already downloaded. Participant
+suggestions alone retain same-scope stale data during background revalidation; a
+failed revalidation removes it through the same protected-scope boundary.
 
 Credential rotation requires explicit **Authorize saved send/reply with current
 credentials** after verification under the same actor and repository. Send

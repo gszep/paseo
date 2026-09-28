@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useFetchQuery } from "@/data/query";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
@@ -16,24 +17,18 @@ export function useMentionParticipants(serverId: string, agentId: string, active
       state.sessions[serverId]?.serverInfo?.features?.chiMentions === true &&
       state.sessions[serverId]?.agents.get(agentId)?.provider === "opencode",
   );
-  const { scope, state } = useMentionScope(
-    serverId,
-    workspaceId ?? "",
-    client,
-    supported && connected && active && Boolean(workspaceId),
-  );
-  return useFetchQuery({
-    queryKey: [
-      ...mentionQueryKey(serverId, workspaceId ?? "", state),
-      "participants",
-      connected,
-      active,
-    ],
-    enabled: supported && connected && active && Boolean(workspaceId) && Boolean(state.context),
+  const enabled = supported && connected && Boolean(workspaceId);
+  const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, enabled);
+  const query = useFetchQuery({
+    queryKey: [...mentionQueryKey(serverId, workspaceId ?? "", state), "participants"],
+    enabled: enabled && Boolean(state.context),
     dataShape: "value",
     retry: false,
-    gcTime: 0,
-    staleTimeMs: 0,
+    gcTime: 5 * 60_000,
+    staleTimeMs: 30_000,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
     queryFn: async () => {
       if (!client || !workspaceId) throw new Error("Host disconnected");
       try {
@@ -50,4 +45,16 @@ export function useMentionParticipants(serverId: string, agentId: string, active
       }
     },
   });
+  const { refetch } = query;
+  useEffect(() => {
+    // The popup is a freshness trigger, never part of the protected directory's key.
+    if (!active || !enabled) return;
+    if (scope.getState().context) void refetch();
+    else void scope.acquire().catch(() => undefined);
+  }, [active, enabled, scope, refetch]);
+  return {
+    ...query,
+    data: enabled && state.context ? query.data : undefined,
+    isLoading: enabled && !state.error && (!state.context || query.isLoading),
+  };
 }

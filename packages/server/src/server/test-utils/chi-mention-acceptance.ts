@@ -105,6 +105,7 @@ export async function startMentionActor(
       sessionToken: token,
       chiUserId: `github:${actor}`,
     }),
+    invalidate: () => undefined,
     request: (async (url, init) => {
       const path = new URL(String(url)).pathname;
       const response = await fetch(url, init);

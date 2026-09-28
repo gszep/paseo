@@ -99,6 +99,32 @@ test("a child denial clears every protected view and late parent data cannot rev
   expect(cleared).toBe(1);
 });
 
+test("same-scope revalidation retains the directory key and accepts an in-flight participant read", async () => {
+  const late = deferred<ScopedMentionResult>();
+  const scope = createMentionScope(
+    async (operation) => {
+      if (operation.action === "scope")
+        return { kind: "scope", actor: identity.actor, context: identity };
+      return late.promise;
+    },
+    () => {
+      throw new Error("same scope must not clear");
+    },
+  );
+  await scope.acquire();
+  const before = scope.getState();
+  const read = scope.run({ action: "participants" });
+  await scope.acquire();
+  expect(scope.getState()).toBe(before);
+  late.resolve({
+    kind: "participants",
+    actor: identity.actor,
+    context: identity,
+    participants: [],
+  });
+  expect(await read).toMatchObject({ kind: "participants", participants: [] });
+});
+
 test("uncertain mutations retain identity for exact retry, while account failures close the scope", async () => {
   let failure = "chi-mentions-unavailable";
   const expectations: Array<ChiMentionContext | undefined> = [];

@@ -53,6 +53,7 @@ export function createMentionScope(
       try {
         const result = await execute({ action: "scope" });
         if (state.generation !== generation) throw new Error("chi-mention-context-changed");
+        if (state.context && sameMentionContext(state.context, result.context)) return;
         if (state.context && !sameMentionContext(state.context, result.context)) clear();
         publish({ context: result.context, generation: generation + 1, error: null });
       } catch (error) {
