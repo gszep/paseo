@@ -1686,6 +1686,8 @@ export const ar: TranslationResources = {
       },
     },
     link: {
+      targetHost: "المضيف: {{serverId}}",
+      targetRelay: "الترحيل: {{endpoint}}",
       title: "الصق رابط الاقتران",
       helper: "الصق رابط الاقتران من الخادم الخاص بك.",
       label: "رابط الاقتران",
@@ -1706,6 +1708,11 @@ export const ar: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "اسمح بالوصول إلى الكاميرا في إعدادات الموقع في المتصفح، ثم أعد المحاولة. يمكنك أيضًا الرجوع ولصق رابط الاقتران.",
+      cameraUnavailableBody:
+        "تعذّر فتح الكاميرا. تأكد من توصيلها ومن عدم استخدامها، ثم أعد المحاولة. يمكنك أيضًا الرجوع ولصق رابط الاقتران.",
+      scanAgain: "المسح مجددًا",
       title: "مسح QR",
       webUnavailableTitle: "غير متوفر على شبكة الإنترنت",
       webUnavailableBody: 'فحص QR غير مدعوم في بناء الويب. استخدم "لصق الرابط" بدلاً من ذلك.',

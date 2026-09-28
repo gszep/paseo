@@ -1702,6 +1702,8 @@ export const ja: TranslationResources = {
       },
     },
     link: {
+      targetHost: "ホスト: {{serverId}}",
+      targetRelay: "リレー: {{endpoint}}",
       title: "ペアリングリンクを貼り付け",
       helper: "サーバーからのペアリングリンクを貼り付けてください。",
       label: "ペアリングリンク",
@@ -1722,6 +1724,11 @@ export const ja: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "ブラウザーのサイト設定でカメラへのアクセスを許可して、再試行してください。戻ってペアリングリンクを貼り付けることもできます。",
+      cameraUnavailableBody:
+        "カメラを開けませんでした。カメラが接続されていて、他で使用されていないことを確認して再試行してください。戻ってペアリングリンクを貼り付けることもできます。",
+      scanAgain: "もう一度スキャン",
       title: "QRをスキャン",
       webUnavailableTitle: "Webでは利用できません",
       webUnavailableBody:

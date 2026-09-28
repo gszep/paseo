@@ -5,10 +5,9 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { Link } from "lucide-react-native";
 import type { HostProfile } from "@/types/host-connection";
-import { useHosts, useHostMutations } from "@/runtime/host-runtime";
-import { decodeOfferFragmentPayload, normalizeHostPort } from "@/utils/daemon-endpoints";
-import { connectToDaemon } from "@/utils/test-daemon-connection";
-import { ConnectionOfferSchema } from "@getpaseo/protocol/connection-offer";
+import { useHosts } from "@/runtime/host-runtime";
+import { usePairingOffer } from "@/hooks/use-pairing-offer";
+import { parseConnectionOfferFromUrl } from "@getpaseo/protocol/connection-offer";
 import { AdaptiveModalSheet, AdaptiveTextInput, type SheetHeader } from "./adaptive-modal-sheet";
 import { Button } from "@/components/ui/button";
 import type { EditingTextInputHandle } from "@/components/ui/text-input";
@@ -49,6 +48,7 @@ const styles = StyleSheet.create((theme) => ({
 }));
 
 export interface PairLinkModalProps {
+  initialOfferUrl?: string;
   visible: boolean;
   onClose: () => void;
   onCancel?: () => void;
@@ -60,20 +60,26 @@ export interface PairLinkModalProps {
   }) => void;
 }
 
-export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkModalProps) {
+export function PairLinkModal({
+  visible,
+  onClose,
+  onCancel,
+  onSaved,
+  initialOfferUrl = "",
+}: PairLinkModalProps) {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
   const daemons = useHosts();
-  const { upsertConnectionFromOfferUrl: upsertDaemonFromOfferUrl } = useHostMutations();
+  const pairOffer = usePairingOffer();
   const isMobile = useIsCompactFormFactor();
 
-  const offerUrlRef = useRef("");
+  const [offerUrl, setOfferUrl] = useState(initialOfferUrl);
   const inputRef = useRef<EditingTextInputHandle>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
   const clearInput = useCallback(() => {
-    offerUrlRef.current = "";
+    setOfferUrl("");
     inputRef.current?.replaceText("");
   }, []);
 
@@ -98,7 +104,7 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
 
   const handleSave = useCallback(async () => {
     if (isSaving) return;
-    const raw = offerUrlRef.current.trim();
+    const raw = offerUrl.trim();
     if (!raw) {
       setErrorMessage(t("pairing.link.errors.required"));
       return;
@@ -108,48 +114,13 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
       return;
     }
 
-    const parsedOffer = (() => {
-      try {
-        const idx = raw.indexOf("#offer=");
-        const encoded = raw.slice(idx + "#offer=".length).trim();
-        if (!encoded) {
-          throw new Error(t("pairing.link.errors.emptyOffer"));
-        }
-        const payload = decodeOfferFragmentPayload(encoded);
-        return ConnectionOfferSchema.parse(payload);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : t("pairing.link.errors.invalid");
-        setErrorMessage(message);
-        if (!isMobile) {
-          Alert.alert(t("pairing.link.alert.failedTitle"), message);
-        }
-        return null;
-      }
-    })();
-
-    if (!parsedOffer) {
-      return;
-    }
-
     try {
       setIsSaving(true);
       setErrorMessage("");
 
-      const { client, hostname } = await connectToDaemon(
-        {
-          id: "probe",
-          type: "relay",
-          relayEndpoint: normalizeHostPort(parsedOffer.relay.endpoint),
-          useTls: parsedOffer.relay.useTls,
-          daemonPublicKeyB64: parsedOffer.daemonPublicKeyB64,
-        },
-        { serverId: parsedOffer.serverId },
-      );
-      await client.close().catch(() => undefined);
-
-      const isNewHost = !daemons.some((daemon) => daemon.serverId === parsedOffer.serverId);
-      const profile = await upsertDaemonFromOfferUrl(raw, hostname ?? undefined);
-      onSaved?.({ profile, serverId: parsedOffer.serverId, hostname, isNewHost });
+      const { profile, serverId, hostname } = await pairOffer(raw);
+      const isNewHost = !daemons.some((daemon) => daemon.serverId === serverId);
+      onSaved?.({ profile, serverId, hostname, isNewHost });
       handleClose();
     } catch (error) {
       const message =
@@ -161,10 +132,10 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
     } finally {
       setIsSaving(false);
     }
-  }, [daemons, handleClose, isMobile, isSaving, onSaved, t, upsertDaemonFromOfferUrl]);
+  }, [daemons, handleClose, isMobile, isSaving, onSaved, t, pairOffer, offerUrl]);
 
   const handleChangeOfferUrl = useCallback((next: string) => {
-    offerUrlRef.current = next;
+    setOfferUrl(next);
   }, []);
 
   const handleSavePress = useCallback(() => {
@@ -172,6 +143,14 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
   }, [handleSave]);
 
   const header = useMemo<SheetHeader>(() => ({ title: t("pairing.link.title") }), [t]);
+  const target = useMemo(() => {
+    try {
+      return parseConnectionOfferFromUrl(offerUrl);
+    } catch {
+      // Invalid input is reported by the existing submit validation.
+      return null;
+    }
+  }, [offerUrl]);
 
   return (
     <AdaptiveModalSheet
@@ -190,16 +169,29 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
           nativeID="pair-link-input"
           accessibilityLabel={t("pairing.link.label")}
           onChangeText={handleChangeOfferUrl}
+          initialValue={initialOfferUrl}
+          editable={!isSaving}
           placeholder={`${process.env.EXPO_PUBLIC_PASEO_APP_BASE_URL ?? "https://app.paseo.sh"}/#offer=...`}
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.input}
-          autoFocus
+          autoFocus={!initialOfferUrl}
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="url"
         />
         {errorMessage ? <Text style={styles.error}>{errorMessage}</Text> : null}
       </View>
+
+      {target ? (
+        <View style={styles.field} testID="pair-link-target">
+          <Text style={styles.label}>
+            {t("pairing.link.targetHost", { serverId: target.serverId })}
+          </Text>
+          <Text style={styles.label}>
+            {t("pairing.link.targetRelay", { endpoint: target.relay.endpoint })}
+          </Text>
+        </View>
+      ) : null}
 
       <View style={styles.actions}>
         <Button
