@@ -123,7 +123,9 @@ Human mentions use Chi's existing source-linked handoffs. Authenticated particip
 are a source in the composer's existing autocomplete: rank the combined sources
 before positioning them above the input, so the highlighted default and Tab/Enter
 acceptance agree. An asynchronously arriving source updates the default; arrow
-navigation retains the selected option's identity. Desktop and compact web share
+navigation retains the selected option's identity and keeps its measured row visible
+as sources change. File results belong to the current query; pending queries never
+offer the preceding query's files. Desktop and compact web share
 that keyboard path. Native uses the same popup and tap selection; its composer
 does not route Tab/Enter/arrows to autocomplete. People carry a person icon and
 file insertion retains its quoted-path behavior. Selecting a person records

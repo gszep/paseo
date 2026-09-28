@@ -10,6 +10,9 @@ import { daemonWsRoutePattern } from "../support/helpers/daemon-port";
 import { getServerId } from "../support/helpers/server-id";
 import { switchWorkspaceViaSidebar } from "../support/helpers/workspace-ui";
 import { expectMobileAgentSidebarVisible } from "../support/helpers/sidebar";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { installDaemonWebSocketGate } from "../support/helpers/daemon-websocket-gate";
 
 const TEST_COMMANDS = [
   {
@@ -359,6 +362,96 @@ function expectPopoverDoesNotDisappearAfterFirstVisible(frames: PopoverFrame[]):
 }
 
 test.describe("Composer autocomplete", () => {
+  for (const viewport of [
+    { name: "desktop", width: 1440, height: 1080 },
+    { name: "compact", width: 390, height: 844 },
+  ]) {
+    test(`keyboard acceptance and editor defaults on ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      const agent = await seedMockAgentWorkspace({
+        repoPrefix: "completion-keyboard-",
+        title: "Completion keyboard",
+      });
+      try {
+        await writeFile(join(agent.cwd, "keyboard-file.txt"), "keyboard completion fixture\n");
+        await openAgentRoute(page, agent);
+        const input = composerLocator(page);
+        await expect(input).toBeEditable({ timeout: 30000 });
+        const popup = page.getByTestId("composer-autocomplete-popover");
+        await input.fill("Plain draft");
+        await expect(popup).toHaveCount(0);
+        await input.press("Tab");
+        await expect(input).not.toBeFocused();
+        await expect(input).toHaveValue("Plain draft");
+        await input.fill("@keyboard-file");
+        await expect(popup.getByText("keyboard-file.txt", { exact: true })).toBeVisible();
+        const composingDefaultPrevented = await input.evaluate((element) => {
+          const event = new KeyboardEvent("keydown", {
+            key: "Enter",
+            isComposing: true,
+            bubbles: true,
+            cancelable: true,
+          });
+          element.dispatchEvent(event);
+          return event.defaultPrevented;
+        });
+        expect(composingDefaultPrevented).toBe(false);
+        await expect(input).toHaveValue("@keyboard-file");
+        await expect(page.getByTestId("user-message")).toHaveCount(0);
+        await input.press("Enter");
+        await expect(input).toHaveValue('"keyboard-file.txt"');
+        await expect(page.getByTestId("user-message")).toHaveCount(0);
+        await expect(input).toBeFocused();
+        await input.fill("Ordinary Enter");
+        await expect(popup).toHaveCount(0);
+        await input.press("Enter");
+        if (viewport.name === "desktop") {
+          await expect(input).toHaveValue("");
+          await expect(
+            page.getByTestId("user-message").filter({ hasText: "Ordinary Enter" }),
+          ).toBeVisible();
+        } else {
+          await expect(input).toHaveValue("Ordinary Enter\n");
+          await expect(page.getByTestId("user-message")).toHaveCount(0);
+        }
+      } finally {
+        await agent.cleanup();
+      }
+    });
+  }
+
+  test("does not offer or accept files from the previous query while the next response is pending", async ({
+    page,
+  }) => {
+    const gate = await installDaemonWebSocketGate(page);
+    const agent = await seedMockAgentWorkspace({
+      repoPrefix: "completion-stale-",
+      title: "Completion query ownership",
+    });
+    try {
+      await writeFile(join(agent.cwd, "previous-file.txt"), "previous\n");
+      await writeFile(join(agent.cwd, "next-file.txt"), "next\n");
+      await openAgentRoute(page, agent);
+      const input = composerLocator(page);
+      const popup = page.getByTestId("composer-autocomplete-popover");
+      await input.fill("@previous-file");
+      await expect(popup.getByText("previous-file.txt", { exact: true })).toBeVisible();
+      gate.holdNextServerMessage("directory_suggestions_response");
+      await input.fill("@next-file");
+      await gate.waitForHeldServerMessage("directory_suggestions_response");
+      await expect(popup.getByText("previous-file.txt", { exact: true })).toHaveCount(0);
+      await input.press("Tab");
+      await expect(input).toHaveValue("@next-file");
+      gate.releaseHeldServerMessage("directory_suggestions_response");
+      await input.focus();
+      await expect(popup.getByText("next-file.txt", { exact: true })).toBeVisible();
+      await input.press("Tab");
+      await expect(input).toHaveValue('"next-file.txt"');
+    } finally {
+      await agent.cleanup();
+    }
+  });
+
   test("stays visible after returning from app-wide routes", async ({ page }) => {
     await installListCommandsStub(page);
     const serverId = getServerId();

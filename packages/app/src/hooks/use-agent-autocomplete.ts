@@ -6,7 +6,7 @@ import {
   type MentionAutocompleteOption,
 } from "@/composer/autocomplete";
 import { useMentionParticipants } from "@/chi/use-participants";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AutocompleteOption } from "@/components/ui/autocomplete";
@@ -437,7 +437,6 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       isConnected,
     retry: false,
     staleTime: 15_000,
-    placeholderData: keepPreviousData,
   });
 
   const options = useMemo<AgentAutocompleteOption[]>(() => {
@@ -448,7 +447,8 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
         text: userInput,
         mention: activeFileMention,
         participants: canShowPeople ? (people.data ?? []) : [],
-        files: fileSuggestionsQuery.data ?? [],
+        files:
+          debouncedFileFilterQuery === fileFilterQuery ? (fileSuggestionsQuery.data ?? []) : [],
       });
     }
     return buildCommandAutocompleteOptions({
@@ -468,6 +468,8 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     commands,
     pluginClientSlashCommands,
     fileSuggestionsQuery.data,
+    debouncedFileFilterQuery,
+    fileFilterQuery,
     isDraftContext,
     isVisible,
     mode,
