@@ -35,13 +35,41 @@ test("two authenticated humans send, retry, read exact source, acknowledge and r
       timeout: 30000,
     });
     const input = composerLocator(sendPage);
+    const suggestions = sendPage.getByTestId("composer-autocomplete-popover");
     await input.fill("@mention-file");
-    await expect(sendPage.getByText("mention-file.txt", { exact: true })).toBeVisible();
-    await input.fill("@mochi");
-    await expect(sendPage.getByText("@mochi-the-kitty", { exact: true })).toBeVisible({
+    await expect(suggestions.getByText("mention-file.txt", { exact: true })).toBeVisible();
+    await input.press("Tab");
+    await expect(input).toHaveValue('"mention-file.txt"');
+    await expect(
+      sendPage.getByRole("button", { name: "Clear recipients", exact: true }),
+    ).toHaveCount(0);
+    await input.fill("@mo");
+    await expect(suggestions.getByText("@mochi-the-kitty", { exact: true })).toBeVisible({
       timeout: 30000,
     });
-    await sendPage.getByText("@mochi-the-kitty", { exact: true }).click();
+    await input.press("Tab");
+    await expect(input).toHaveValue("@mochi-the-kitty ");
+    await expect(
+      sendPage.getByRole("button", { name: "Clear recipients", exact: true }),
+    ).toBeVisible();
+    await expect(
+      sendPage.getByText("Mention recipients: @mochi-the-kitty", { exact: true }),
+    ).toBeVisible();
+    await sendPage.getByRole("button", { name: "Clear recipients", exact: true }).click();
+    await expect(input).toHaveValue("@mochi-the-kitty ");
+    await sendPage.setViewportSize({ width: 390, height: 844 });
+    await expect(input).toHaveValue("@mochi-the-kitty ");
+    await input.fill("@mo");
+    await expect(input).toHaveValue("@mo");
+    await expect(suggestions.getByText("@mochi-the-kitty", { exact: true })).toBeVisible({
+      timeout: 30000,
+    });
+    await input.press("Tab");
+    await expect(input).toHaveValue("@mochi-the-kitty ");
+    await expect(
+      sendPage.getByText("Mention recipients: @mochi-the-kitty", { exact: true }),
+    ).toBeVisible();
+    await sendPage.setViewportSize({ width: 1440, height: 1080 });
     await input.fill("/review @mochi-the-kitty");
     await sendPage.getByRole("button", { name: "Send message", exact: true }).click();
     await expect(

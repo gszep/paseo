@@ -119,9 +119,16 @@ The `/chi` route also accepts a prepared `conversationId` and `transferId`
 alongside the exact evidence coordinates. App/daemon drift is gated once by
 `chiCanonical`; there is no fallback to an independent fork.
 
-Human mentions use Chi's existing source-linked handoffs. The composer combines
-authenticated participant suggestions with file suggestions; people carry a person
-icon and file insertion retains its quoted-path behavior. Selecting a person records
+Human mentions use Chi's existing source-linked handoffs. Authenticated participants
+are a source in the composer's existing autocomplete: rank the combined sources
+before positioning them above the input, so the highlighted default and Tab/Enter
+acceptance agree. An asynchronously arriving source updates the default; arrow
+navigation retains the selected option's identity and keeps its measured row visible
+as sources change. File results belong to the current query; pending queries never
+offer the preceding query's files. Desktop and compact web share
+that keyboard path. Native uses the same popup and tap selection; its composer
+does not route Tab/Enter/arrows to autocomplete. People carry a person icon and
+file insertion retains its quoted-path behavior. Selecting a person records
 an explicit recipient. Sending requires the existing **Share to Chi** consent first:
 mention selection does not change visibility or implicitly share a session.
 

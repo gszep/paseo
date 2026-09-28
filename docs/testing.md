@@ -188,7 +188,7 @@ by its test actor with the `Synthetic human mention acceptance` title prefix;
 completion purges the current run's captured sources too. Run this shared-account
 fixture serially so startup cleanup cannot delete another active acceptance run.
 Its provider is synthetic:
-this checks rendered desktop/compact mention delivery, exact/context reads,
+this checks rendered desktop/compact Tab completion and mention delivery, exact/context reads,
 acknowledgement, lost-response retries, an actual Sava author reply observed by
 Mochi at revision 4, and access revocation,
 without model calls. It does not establish production installation, native
@@ -197,7 +197,9 @@ Chi**, **Send message**, **Retry mentions**, **Open mentions**, **Read exact sou
 1**, **Browse pinned context**, **Acknowledge**, **Reply to mention**, **Retry saved
 operation** and **Refresh** accessible locators. Source denial must remove the
 entire protected scope and show **Mention context unavailable**. Screenshots and
-failure traces go to the usual app `test-results` directory.
+failure traces go to the usual app `test-results` directory. Scope candidate locators
+to `composer-autocomplete-popover`: an uncontrolled textarea can retain a completed
+handle as its DOM text content after its current value changes.
 
 Deterministic coverage lives in `chi/mention-submission.test.ts`,
 `chi/reply-model.test.ts`, `chi/mention-context.test.ts`, `composer/actions.test.ts`

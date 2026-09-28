@@ -1,9 +1,64 @@
 import { describe, expect, it } from "vitest";
+import { buildMentionAutocompleteOptions } from "@/composer/autocomplete";
 import {
   applyFileMentionReplacement,
   findActiveFileMention,
   formatQuotedFileMentionPath,
 } from "./file-mention-autocomplete";
+
+describe("participant autocomplete source", () => {
+  const context = {
+    actor: "github:mochi-the-kitty",
+    repo: "github:fixture/repo",
+    generation: "a".repeat(64),
+  };
+  const participant = { ownerId: "github:sava-the-owl", handle: "Sava-the-Owl", context };
+
+  it.each(["@sa", "@SA", "@Sa"])(
+    "matches %s case-insensitively and preserves exact participant identity",
+    (text) => {
+      const mention = findActiveFileMention({ text, cursorIndex: text.length })!;
+      expect(
+        buildMentionAutocompleteOptions({ text, mention, participants: [participant], files: [] }),
+      ).toEqual([
+        {
+          type: "human",
+          id: "human:github:sava-the-owl",
+          kind: "human",
+          label: "@Sava-the-Owl",
+          description: "Person · Chi",
+          participant,
+        },
+      ]);
+    },
+  );
+
+  it.each(["@missing", "@owl", "mail@sa", "path/@sa"])(
+    "does not suggest a person for %s",
+    (text) => {
+      const mention = findActiveFileMention({ text, cursorIndex: text.length })!;
+      expect(
+        buildMentionAutocompleteOptions({ text, mention, participants: [participant], files: [] }),
+      ).toEqual([]);
+    },
+  );
+
+  it("ranks people and files together before positioning the best match nearest the input", () => {
+    const text = "Ask (@sa";
+    const mention = findActiveFileMention({ text, cursorIndex: text.length })!;
+    expect(
+      buildMentionAutocompleteOptions({
+        text,
+        mention,
+        participants: [participant],
+        files: [
+          { path: "save.ts", kind: "file" },
+          { path: "samples", kind: "directory" },
+        ],
+      }).map((option) => option.id),
+    ).toEqual(["directory:samples", "file:save.ts", "human:github:sava-the-owl"]);
+  });
+});
 
 describe("findActiveFileMention", () => {
   it("detects mentions at the start of input", () => {
