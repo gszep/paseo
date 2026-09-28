@@ -1043,9 +1043,18 @@ describe("OpenCode v2 lifecycle", () => {
       expect(harness.environments).toEqual([
         {
           sessionID: "session",
-          variables: { PASEO_AGENT_ID: "agent", PASEO_AGENT_CWD: "/tmp/project" },
+          variables: {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                (entry): entry is [string, string] => entry[1] !== undefined,
+              ),
+            ),
+            PASEO_AGENT_ID: "agent",
+            PASEO_AGENT_CWD: "/tmp/project",
+          },
         },
       ]);
+      expect(harness.environments[0]?.variables.PATH).toBe(process.env.PATH);
     } finally {
       await session.close();
     }
