@@ -1676,6 +1676,7 @@ export class VoiceAssistantWebSocketServer {
       features: {
         chiNative: this.agentManager.chi !== null,
         chiMentions: this.agentManager.chi !== null,
+        chiInbox: this.agentManager.chi !== null,
         chiCanonical: this.agentManager.chi !== null,
         ownedSubscriptions: true,
         agentRequestReceipts: true,

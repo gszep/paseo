@@ -77,6 +77,12 @@ async function fixture() {
           entry: { nativeId: target.searchParams.get("entryId") },
           native: { text: "exact content" },
         });
+      if (target.pathname === "/api/evidence/inspect")
+        return Response.json({
+          sourceId: target.searchParams.get("sourceId"),
+          nativeSessionId: "ses_source",
+          workspace: { hostId: "host" },
+        });
       if (target.pathname === "/api/evidence/entries")
         return Response.json({
           snapshot: target.searchParams.get("snapshot"),
@@ -140,6 +146,31 @@ async function fixture() {
     },
   };
 }
+
+test("inbox retries a read fence conflict but does not automatically retry a mutation", async () => {
+  const f = await fixture();
+  let attempts = 0;
+  f.authority.request = (async () => {
+    attempts++;
+    return attempts === 1
+      ? new Response(null, { status: 409 })
+      : Response.json({ ok: true, handoffs: [], nextCursor: null, unreadCount: 0 });
+  }) satisfies typeof fetch;
+  expect(
+    await f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).toMatchObject({ kind: "inbox", handoffs: [], unreadCount: 0 });
+  expect(attempts).toBe(2);
+  attempts = 0;
+  await expect(
+    f.restart().execute(f.input.identity, {
+      action: "viewed",
+      repo: f.input.identity.repo,
+      id: "record",
+      revision: 1,
+    }),
+  ).rejects.toThrow("chi-mentions-http-409");
+  expect(attempts).toBe(1);
+});
 
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {
   const f = await fixture();
@@ -357,7 +388,9 @@ test("source and neighboring context reads reacquire the handoff and retain its 
   });
   await sender.execute(f.input.identity, { action: "context", id, index: 0 });
   await sender.execute(f.input.identity, { action: "source", id, index: 0, entryId: "neighbor" });
-  const evidence = f.reads.filter((url) => url.pathname.startsWith("/api/evidence/"));
+  const evidence = f.reads.filter(
+    (url) => url.pathname === "/api/evidence/exact" || url.pathname === "/api/evidence/entries",
+  );
   expect(evidence).toHaveLength(3);
   for (const url of evidence) {
     expect(url.searchParams.get("sourceId")).toBe(f.capture.sourceId);
@@ -368,5 +401,5 @@ test("source and neighboring context reads reacquire the handoff and retain its 
   await expect(
     sender.execute(f.input.identity, { action: "source", id, index: 0 }),
   ).rejects.toThrow("chi-mentions-http-403");
-  expect(f.reads.filter((url) => url.pathname.startsWith("/api/evidence/"))).toHaveLength(3);
+  expect(f.reads.filter((url) => url.pathname.startsWith("/api/evidence/"))).toHaveLength(5);
 });

@@ -3168,6 +3168,8 @@ export class DaemonClient {
   ) {
     if (this.lastServerInfoMessage?.features?.chiMentions !== true)
       throw new Error("Update this host to use human mentions.");
+    if (!input.workspaceId && this.lastServerInfoMessage?.features?.chiInbox !== true)
+      throw new Error("Update this host to use the deployment inbox.");
     const requestId = this.createRequestId();
     const payload = await this.sendRequest({
       requestId,

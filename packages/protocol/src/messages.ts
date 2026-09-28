@@ -3640,6 +3640,7 @@ export const ServerInfoStatusPayloadSchema = z
         // COMPAT(agentRequestReceipts): added in v0.8.0; remove gate after 2027-03-05.
         chiNative: z.boolean().optional(),
         chiMentions: z.boolean().optional(),
+        chiInbox: z.boolean().optional(),
         chiCanonical: z.boolean().optional(),
         agentRequestReceipts: z.boolean().optional(),
         // COMPAT(workspaceRequestReceipts): added in v0.8.0; remove gate after 2027-03-07.
@@ -4741,6 +4742,7 @@ export const AgentTimelineListPromptsResponseMessageSchema = z.object({
         seq: z.number().int().nonnegative(),
         timestamp: z.string(),
         preview: z.string(),
+        messageId: z.string().optional(),
       }),
     ),
     error: z.string().nullable(),
