@@ -387,6 +387,36 @@ describe("Chi owner recovery", () => {
     );
   });
 
+  it.each([
+    ["native-store-limit", "evidence-http-413-native-store-limit"],
+    ["private-protected-diagnostic", "evidence-http-413"],
+  ])(
+    "persists the bounded capture reason %s without advancing the association",
+    async (reason, code) => {
+      const f = await fixture();
+      const agent = await f.registration.register("ses_fork", {
+        "chi.native": JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: f.input.sourceId,
+          head: f.input.snapshotId,
+          error: null,
+        }),
+      });
+      const request = f.authority.request;
+      f.authority.request = async (input, init) => {
+        if (new URL(String(input)).pathname === "/evidence")
+          return Response.json({ ok: false, reason }, { status: 413 });
+        return request(input, init);
+      };
+      await expect(f.restart().capture(agent.id)).rejects.toThrow("evidence-http-413");
+      expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+        head: f.input.snapshotId,
+        error: code,
+      });
+    },
+  );
+
   it("rejects capture when a whole new turn replaces an entry in the full 50-ID set during export", async () => {
     const f = await fixture();
     const agent = await f.registration.register("ses_fork", {

@@ -34,7 +34,12 @@ import {
   type AuthState,
 } from "@henkaku-center/chi-native/auth";
 import { DEFAULT_BACKEND_URL, parseGitHubRemote } from "@henkaku-center/chi-native/repository";
-import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/http";
+import {
+  append,
+  boundedText,
+  endpointUrl,
+  EvidenceHttpError,
+} from "@henkaku-center/chi-native/http";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
@@ -485,7 +490,7 @@ export class ChiConnection {
       });
     });
     const previous = associationSchema.parse(JSON.parse(encoded));
-    return this.capture(agentId, previous?.error === "evidence-http-409");
+    return this.capture(agentId, /^evidence-http-409(?:-|$)/.test(previous.error ?? ""));
   }
 
   capture(agentId: string, retryConflict = false): Promise<Association> {
@@ -863,6 +868,7 @@ export class ChiConnection {
 }
 
 export function safeChiError(error: unknown): string {
+  if (error instanceof EvidenceHttpError && error.reason) return `${error.message}-${error.reason}`;
   if (error instanceof ContinuationError) return error.message;
   if (error instanceof Error && /^(?:chi|evidence|capture)-[a-z0-9-]+$/.test(error.message))
     return error.message;
