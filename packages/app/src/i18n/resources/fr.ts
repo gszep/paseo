@@ -1762,6 +1762,11 @@ export const fr: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "Autorisez l'accès à la caméra dans les paramètres du site de votre navigateur, puis réessayez. Vous pouvez aussi revenir en arrière et coller le lien d'appairage.",
+      cameraUnavailableBody:
+        "Impossible d'ouvrir la caméra. Vérifiez qu'elle est connectée et qu'elle n'est pas utilisée, puis réessayez. Vous pouvez aussi revenir en arrière et coller le lien d'appairage.",
+      scanAgain: "Scanner à nouveau",
       title: "ScannerQR",
       webUnavailableTitle: "Non disponible sur le Web",
       webUnavailableBody:

@@ -28,16 +28,36 @@ describe("connection offer", () => {
     );
   });
 
-  it("parses connection offers from QR-style URLs", () => {
-    const offer = ConnectionOfferSchema.parse({
-      v: 2,
-      serverId: "server-123",
-      daemonPublicKeyB64: "pubkey",
-      relay: { endpoint: "relay.paseo.sh:443" },
-    });
-    const encoded = encodeBase64UrlNoPadUtf8(JSON.stringify(offer));
+  it.each(["https://app.paseo.sh/", "https://hosted.example.com/", ""])(
+    "parses scanned or pasted offers independently of prefix %s",
+    (prefix) => {
+      const offer = ConnectionOfferSchema.parse({
+        v: 2,
+        serverId: "server-123",
+        daemonPublicKeyB64: "pubkey",
+        relay: { endpoint: "relay.paseo.sh:443" },
+      });
+      const encoded = encodeBase64UrlNoPadUtf8(JSON.stringify(offer));
 
-    expect(parseConnectionOfferFromUrl(`https://app.paseo.sh/#offer=${encoded}`)).toEqual(offer);
+      expect(parseConnectionOfferFromUrl(`  ${prefix}#offer=${encoded}\n`)).toEqual(offer);
+    },
+  );
+
+  it.each(["", "https://example.com/", "#offer=", "#offer=   "])(
+    "rejects scanned text without an offer: %s",
+    (text) => {
+      expect(parseConnectionOfferFromUrl(text)).toBeNull();
+    },
+  );
+
+  it.each([
+    "!bad-base64!",
+    encodeBase64UrlNoPadUtf8("not json"),
+    encodeBase64UrlNoPadUtf8(JSON.stringify({ v: 1 })),
+  ])("rejects malformed scanned payloads: %s", (encoded) => {
+    expect(() =>
+      parseConnectionOfferFromUrl(`https://hosted.example.com/#offer=${encoded}`),
+    ).toThrow();
   });
 
   it("leaves relay TLS unset when absent", () => {

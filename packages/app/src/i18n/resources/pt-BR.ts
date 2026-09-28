@@ -1743,6 +1743,11 @@ export const ptBR: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "Permita o acesso à câmera nas configurações do site no navegador e tente novamente. Você também pode voltar e colar o link de pareamento.",
+      cameraUnavailableBody:
+        "Não foi possível abrir a câmera. Verifique se ela está conectada e não está em uso, e tente novamente. Você também pode voltar e colar o link de pareamento.",
+      scanAgain: "Escanear novamente",
       title: "Escanear QR",
       webUnavailableTitle: "Indisponível na web",
       webUnavailableBody:

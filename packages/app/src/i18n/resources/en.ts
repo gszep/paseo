@@ -1743,6 +1743,11 @@ export const en = {
       backToSettings: "Back to Settings",
       cameraPermissionTitle: "Camera permission",
       cameraPermissionBody: "Allow camera access to scan the pairing QR code from your daemon.",
+      browserPermissionBody:
+        "Allow camera access in your browser's site settings, then try again. You can also go back and paste the pairing link.",
+      cameraUnavailableBody:
+        "The camera could not be opened. Check that a camera is connected and not in use, then try again. You can also go back and paste the pairing link.",
+      scanAgain: "Scan again",
       grantPermission: "Grant permission",
       pairing: "Pairing...",
       unableToPair: "Unable to pair host",

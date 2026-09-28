@@ -1693,6 +1693,11 @@ export const zhCN: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "请在浏览器的网站设置中允许访问摄像头，然后重试。您也可以返回并粘贴配对链接。",
+      cameraUnavailableBody:
+        "无法打开摄像头。请确认摄像头已连接且未被其他应用使用，然后重试。您也可以返回并粘贴配对链接。",
+      scanAgain: "重新扫描",
       title: "扫描二维码",
       webUnavailableTitle: "Web 上不可用",
       webUnavailableBody: "Web build 不支持二维码扫描。请改用“粘贴链接”。",

@@ -1758,6 +1758,11 @@ export const es: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "Permite el acceso a la cámara en la configuración del sitio de tu navegador y vuelve a intentarlo. También puedes volver atrás y pegar el enlace de emparejamiento.",
+      cameraUnavailableBody:
+        "No se pudo abrir la cámara. Comprueba que esté conectada y que no esté en uso, y vuelve a intentarlo. También puedes volver atrás y pegar el enlace de emparejamiento.",
+      scanAgain: "Escanear de nuevo",
       title: "EscanearQR",
       webUnavailableTitle: "No disponible en la web",
       webUnavailableBody:

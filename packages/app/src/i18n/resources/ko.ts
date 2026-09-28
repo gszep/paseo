@@ -1720,6 +1720,11 @@ export const ko: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "브라우저의 사이트 설정에서 카메라 접근을 허용한 후 다시 시도하세요. 뒤로 가서 페어링 링크를 붙여넣을 수도 있습니다.",
+      cameraUnavailableBody:
+        "카메라를 열 수 없습니다. 카메라가 연결되어 있고 다른 곳에서 사용 중이 아닌지 확인한 후 다시 시도하세요. 뒤로 가서 페어링 링크를 붙여넣을 수도 있습니다.",
+      scanAgain: "다시 스캔",
       title: "QR 스캔",
       webUnavailableTitle: "웹에서 사용할 수 없습니다",
       webUnavailableBody:

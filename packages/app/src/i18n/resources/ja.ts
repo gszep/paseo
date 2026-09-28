@@ -1728,6 +1728,11 @@ export const ja: TranslationResources = {
       },
     },
     scan: {
+      browserPermissionBody:
+        "ブラウザーのサイト設定でカメラへのアクセスを許可して、再試行してください。戻ってペアリングリンクを貼り付けることもできます。",
+      cameraUnavailableBody:
+        "カメラを開けませんでした。カメラが接続されていて、他で使用されていないことを確認して再試行してください。戻ってペアリングリンクを貼り付けることもできます。",
+      scanAgain: "もう一度スキャン",
       title: "QRをスキャン",
       webUnavailableTitle: "Webでは利用できません",
       webUnavailableBody:

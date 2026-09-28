@@ -59,7 +59,20 @@ Generate a pairing offer on the intended host:
 env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD paseo daemon pair
 ```
 
-Open the hosted app and select **Paste pairing link**. An offer generated with
+Open the hosted app and select **Scan QR code** or **Paste pairing link**. Camera
+scanning requires HTTPS and camera access; permission is requested only after
+opening the scanner. If access was denied, allow the camera in the browser's
+site settings and retry. The camera stops on navigation or when the app is hidden.
+Test iOS home-screen installation separately from Safari tabs.
+
+The web scanner bundles `jsQR` as its fallback when `BarcodeDetector` cannot
+decode QR codes. Expo Camera 17's web implementation loads an older jsQR from
+a CDN into a module-global worker; using it would require widening the CSP and
+would leave that worker outside the scanner's lifetime. Keep decoding local.
+The export's existing `media-src 'self' blob:` is sufficient. Hosts that add a
+`Permissions-Policy` must allow `camera=(self)` for the top-level app.
+
+An offer generated with
 another app-origin prefix is accepted: daemon ID, public key and relay endpoint
 are carried in its fragment. Treat the whole offer as private connection material.
 The hosted app's **Pair device** links/QR codes use the build's app base URL.

@@ -1,17 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Alert, Pressable, Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
+import { useIsFocused } from "@react-navigation/native";
 import { useLocalSearchParams, useRouter, type Href } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { CameraView, useCameraPermissions } from "expo-camera";
-import type { BarcodeScanningResult, BarcodeSettings } from "expo-camera";
-import { useHostMutations } from "@/runtime/host-runtime";
-import { decodeOfferFragmentPayload, normalizeHostPort } from "@/utils/daemon-endpoints";
-import { connectToDaemon } from "@/utils/test-daemon-connection";
-import { ConnectionOfferSchema } from "@getpaseo/protocol/connection-offer";
+import { PairingCamera } from "@/components/pairing-camera";
+import { usePairingOffer } from "@/hooks/use-pairing-offer";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
-import { isWeb } from "@/constants/platform";
 import { BackHeader } from "@/components/headers/back-header";
 
 const styles = StyleSheet.create((theme) => ({
@@ -28,9 +24,6 @@ const styles = StyleSheet.create((theme) => ({
     overflow: "hidden",
     borderRadius: theme.borderRadius.xl,
     backgroundColor: theme.colors.surface2,
-  },
-  camera: {
-    flex: 1,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -110,15 +103,6 @@ const styles = StyleSheet.create((theme) => ({
   },
 }));
 
-function extractOfferUrlFromScan(result: BarcodeScanningResult): string | null {
-  const raw = typeof result.data === "string" ? result.data.trim() : "";
-  if (!raw) return null;
-
-  if (raw.includes("#offer=")) return raw;
-
-  return null;
-}
-
 export default function PairScanScreen() {
   const { theme } = useUnistyles();
   const { t } = useTranslation();
@@ -128,11 +112,15 @@ export default function PairScanScreen() {
     source?: string;
   }>();
   const source = typeof params.source === "string" ? params.source : "settings";
-  const { upsertConnectionFromOfferUrl: upsertDaemonFromOfferUrl } = useHostMutations();
-
-  const [permission, requestPermission] = useCameraPermissions();
+  const pairOffer = usePairingOffer();
+  const focused = useIsFocused();
   const [isPairing, setIsPairing] = useState(false);
-  const lastScannedRef = useRef<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string>();
+  const scanLocked = useRef(false);
+  const scanAgain = useCallback(() => {
+    scanLocked.current = false;
+    setErrorMessage(undefined);
+  }, []);
 
   const navigateToPairedHost = useCallback(
     (serverId: string) => {
@@ -153,58 +141,23 @@ export default function PairScanScreen() {
     }
   }, [router]);
 
-  useEffect(() => {
-    if (isWeb) return;
-    if (permission && permission.granted) return;
-    void requestPermission().catch(() => undefined);
-  }, [permission, requestPermission]);
-
   const handleScan = useCallback(
-    async (result: BarcodeScanningResult) => {
-      if (isPairing) return;
-      const offerUrl = extractOfferUrlFromScan(result);
-      if (!offerUrl) return;
-
-      if (lastScannedRef.current === offerUrl) return;
-      lastScannedRef.current = offerUrl;
-
+    async (text: string) => {
+      if (scanLocked.current) return;
+      scanLocked.current = true;
       try {
         setIsPairing(true);
-        const idx = offerUrl.indexOf("#offer=");
-        const encoded = offerUrl.slice(idx + "#offer=".length).trim();
-        const offerPayload = decodeOfferFragmentPayload(encoded);
-        const offer = ConnectionOfferSchema.parse(offerPayload);
-
-        const { client, hostname } = await connectToDaemon(
-          {
-            id: "probe",
-            type: "relay",
-            relayEndpoint: normalizeHostPort(offer.relay.endpoint),
-            useTls: offer.relay.useTls,
-            daemonPublicKeyB64: offer.daemonPublicKeyB64,
-          },
-          { serverId: offer.serverId },
-        );
-        await client.close().catch(() => undefined);
-
-        const profile = await upsertDaemonFromOfferUrl(offerUrl, hostname ?? undefined);
-
+        const { profile } = await pairOffer(text.trim());
         navigateToPairedHost(profile.serverId);
       } catch (error) {
-        lastScannedRef.current = null;
         const message = error instanceof Error ? error.message : t("pairing.scan.unableToPair");
-        Alert.alert(t("pairing.scan.errorTitle"), message);
+        setErrorMessage(message);
       } finally {
         setIsPairing(false);
       }
     },
-    [isPairing, navigateToPairedHost, t, upsertDaemonFromOfferUrl],
+    [navigateToPairedHost, t, pairOffer],
   );
-
-  const handleRouterBack = useCallback(() => router.back(), [router]);
-  const handleRequestPermission = useCallback(() => {
-    void requestPermission();
-  }, [requestPermission]);
 
   const bodyStyle = useMemo(
     () => [styles.body, { paddingBottom: insets.bottom + theme.spacing[6] }],
@@ -215,60 +168,47 @@ export default function PairScanScreen() {
     [theme.colors.foreground],
   );
 
-  if (isWeb) {
-    return (
-      <View style={styles.container}>
-        <BackHeader title={t("pairing.scan.title")} onBack={handleRouterBack} />
-        <View style={bodyStyle}>
-          <View style={styles.permissionCard}>
-            <Text style={styles.permissionTitle}>{t("pairing.scan.webUnavailableTitle")}</Text>
-            <Text style={styles.permissionBody}>{t("pairing.scan.webUnavailableBody")}</Text>
-            <Pressable style={styles.permissionButton} onPress={closeToSource}>
-              <Text style={styles.permissionButtonText}>{t("pairing.scan.backToSettings")}</Text>
-            </Pressable>
-          </View>
-        </View>
-      </View>
-    );
-  }
-
-  const granted = Boolean(permission?.granted);
-
   return (
     <View style={styles.container}>
       <BackHeader title={t("pairing.scan.title")} onBack={closeToSource} />
 
       <View style={bodyStyle}>
-        {!granted ? (
+        {errorMessage ? (
           <View style={styles.permissionCard}>
-            <Text style={styles.permissionTitle}>{t("pairing.scan.cameraPermissionTitle")}</Text>
-            <Text style={styles.permissionBody}>{t("pairing.scan.cameraPermissionBody")}</Text>
-            <Pressable style={styles.permissionButton} onPress={handleRequestPermission}>
-              <Text style={styles.permissionButtonText}>{t("pairing.scan.grantPermission")}</Text>
+            <Text style={styles.permissionTitle}>{t("pairing.scan.errorTitle")}</Text>
+            <Text style={styles.permissionBody} accessibilityRole="alert">
+              {errorMessage}
+            </Text>
+            <Pressable
+              style={styles.permissionButton}
+              accessibilityRole="button"
+              onPress={scanAgain}
+            >
+              <Text style={styles.permissionButtonText}>{t("pairing.scan.scanAgain")}</Text>
             </Pressable>
           </View>
         ) : (
           <View style={styles.cameraWrap}>
-            <CameraView
-              style={styles.camera}
-              facing="back"
-              barcodeScannerSettings={BARCODE_SCANNER_SETTINGS}
-              onBarcodeScanned={handleScan}
-            />
-            <View style={styles.overlay} pointerEvents="none">
-              <View style={styles.scanFrame}>
-                <View style={[styles.corner, styles.cornerTL]} />
-                <View style={[styles.corner, styles.cornerTR]} />
-                <View style={[styles.corner, styles.cornerBL]} />
-                <View style={[styles.corner, styles.cornerBR]} />
+            {focused && !isPairing && !scanLocked.current ? (
+              <PairingCamera onScan={handleScan}>
+                <View style={styles.overlay} pointerEvents="none">
+                  <View style={styles.scanFrame}>
+                    <View style={[styles.corner, styles.cornerTL]} />
+                    <View style={[styles.corner, styles.cornerTR]} />
+                    <View style={[styles.corner, styles.cornerBL]} />
+                    <View style={[styles.corner, styles.cornerBR]} />
+                  </View>
+                </View>
+              </PairingCamera>
+            ) : null}
+            {isPairing ? (
+              <View style={styles.overlay}>
+                <Text style={helperTextStyle}>{t("pairing.scan.pairing")}</Text>
               </View>
-              {isPairing ? <Text style={helperTextStyle}>{t("pairing.scan.pairing")}</Text> : null}
-            </View>
+            ) : null}
           </View>
         )}
       </View>
     </View>
   );
 }
-
-const BARCODE_SCANNER_SETTINGS: BarcodeSettings = { barcodeTypes: ["qr"] };
