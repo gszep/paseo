@@ -7,6 +7,8 @@
 
 ## Running the dev server
 
+For a separately hosted production PWA, use [web-hosting.md](web-hosting.md).
+
 ```bash
 npm run dev:server
 npm run dev:app

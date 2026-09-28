@@ -3642,6 +3642,27 @@ describe("readInitialDaemonConnectionHint", () => {
 });
 
 describe("HostRuntimeStore initial connection hint bootstrap", () => {
+  it("does not probe localhost from an explicitly hosted build", async () => {
+    vi.stubEnv("EXPO_PUBLIC_PASEO_APP_BASE_URL", "https://chi.example.com");
+    const probe = vi.fn();
+    const store = new HostRuntimeStore({
+      deps: {
+        createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
+        connectToDaemon: probe,
+        getClientId: async () => "cid_hosted",
+        readInitialConnectionHint: () => null,
+      },
+      storage: createMemoryHostRuntimeStorage(),
+    });
+    try {
+      await store.boot();
+      expect(probe).not.toHaveBeenCalled();
+      expect(store.getHostRegistryStatus()).toBe("ready");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("attempts the explicit initial connection hint before default localhost bootstrap", async () => {
     const seenProbes: { endpoint: string; useTls?: boolean }[] = [];
     const store = new HostRuntimeStore({

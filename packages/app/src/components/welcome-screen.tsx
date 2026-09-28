@@ -272,6 +272,15 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
     });
   }
 
+  // A hosted export's CSP permits its configured relay, not arbitrary direct hosts.
+  const hosted = isWeb && Boolean(process.env.EXPO_PUBLIC_PASEO_APP_BASE_URL);
+  const visibleActions = hosted
+    ? actions.filter((action) => action.key === "paste-pairing-link")
+    : actions;
+  if (hosted) {
+    for (const action of visibleActions) action.primary = true;
+  }
+
   const scrollContentContainerStyle = useMemo(
     () => [styles.container, { paddingBottom: theme.spacing[6] + insets.bottom }],
     [theme.spacing, insets.bottom],
@@ -299,7 +308,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           </View>
 
           <View style={styles.actions}>
-            {actions.map((action) => (
+            {visibleActions.map((action) => (
               <WelcomeActionButton key={action.key} action={action} />
             ))}
           </View>

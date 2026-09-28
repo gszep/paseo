@@ -190,7 +190,7 @@ export function PairLinkModal({ visible, onClose, onCancel, onSaved }: PairLinkM
           nativeID="pair-link-input"
           accessibilityLabel={t("pairing.link.label")}
           onChangeText={handleChangeOfferUrl}
-          placeholder="https://app.paseo.sh/#offer=..."
+          placeholder={`${process.env.EXPO_PUBLIC_PASEO_APP_BASE_URL ?? "https://app.paseo.sh"}/#offer=...`}
           placeholderTextColor={theme.colors.foregroundMuted}
           style={styles.input}
           autoFocus

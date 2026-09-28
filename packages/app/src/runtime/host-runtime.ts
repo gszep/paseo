@@ -1477,7 +1477,7 @@ export class HostRuntimeStore {
 
     if (override) {
       this.bootstrapConfiguredOverride(override);
-    } else {
+    } else if (!(isWeb && process.env.EXPO_PUBLIC_PASEO_APP_BASE_URL)) {
       await this.bootstrapDefaultLocalhost();
     }
   }
