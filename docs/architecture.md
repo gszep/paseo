@@ -193,23 +193,38 @@ removing it, so a late response cannot erase a newer request.
 Definitive rejection is also fenced to its persisted attempt UUID: an older refusal
 cannot unlock correction after a newer attempt of the same operation may have committed.
 
-The **Mentions** route reuses `/chi` and the paired-host/workspace selector. The
-selected host's existing GitHub identity owns its inbox and is displayed explicitly;
+The **Mentions** route reuses `/chi` without a workspace or host picker. It prefers
+the selected connected host advertising `chiInbox`, then another connected capable
+host. The deployment inbox uses backend keyset pagination across repositories and
+History's date sections. The transport host's GitHub identity is displayed explicitly;
 pairing to someone else's host does not sign in as a new Chi principal. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context
-browsing stay on the handoff's immutable snapshot. Failed reacquisition removes
+browsing stay on the handoff's immutable snapshot. Structured access loss removes
 protected query data across the shared parent/child scope, including exact payloads,
 participant suggestions and delivery state. Keys include host, workspace, verified
-actor, repository and auth generation; requests carry the expected context and the
+actor, repository, deployment and auth generation; requests carry the expected context and the
 daemon rechecks it before mutation and after reads. The generation binds the host
 credential, not the Chi session token reminted during exchange. A delayed response
-from a lost scope cannot restore it. Authority acquisition failures and structured
-access-loss responses (including host GitHub logout) clear the scope on mutations
-as well as reads. Refresh/focus and disconnect suppress previous views. This
-is pull-based access reacquisition, not recall of data already downloaded. Participant
-suggestions alone retain same-scope stale data during background revalidation; a
-failed revalidation removes it through the same protected-scope boundary.
+from a lost scope cannot restore it. Structured access-loss responses (including
+host GitHub logout) clear the scope on mutations as well as reads. Loading and
+transient read failures do not become access-loss warnings. Read-only HTTP 409
+requests reacquire the backend fence with bounded retries; mutations retain their
+explicit recovery flow. This is pull-based access reacquisition, not recall of data
+already downloaded.
+
+First view saves the recipient's durable `readAt` marker without acknowledging the
+handoff. Native source navigation maps the provider entry ID to a canonical timeline
+cursor; client submission IDs and matching text are not source coordinates. When
+the source host is unavailable, exact pinned content remains read-only. **Continue
+here** uses managed transfer preparation, which needs the source host or existing
+prepared transfer coordinates.
+
+Chi controls and errors live in Workspace actions, never in the chat feed. The
+temporary Share/Capture and cross-host Continue actions have no external evidence
+link. Local workspaces without a supported Git remote do not acquire a workspace
+mention scope or offer people completion; file completion remains available. Use
+checkout status for this decision: directory projections intentionally omit remotes.
 
 Credential rotation requires explicit **Authorize saved send/reply with current
 credentials** after verification under the same actor and repository. Send

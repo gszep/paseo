@@ -4,6 +4,7 @@ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient } from "@/data/query-client";
 import { createMentionScope, type MentionScope } from "./mention-context";
 import { clearHostMentionSelection } from "./mention-selection";
+import { useEntryTarget } from "./entry-target";
 
 export const mentionRefreshIntervalMs = 30_000;
 
@@ -16,11 +17,16 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
   const scope = createMentionScope(
     async (operation, expectedContext) => {
       if (!client) throw new Error("chi-host-disconnected");
-      return client.chiMentions({ workspaceId: workspace, operation, expectedContext });
+      return client.chiMentions({
+        workspaceId: workspace || undefined,
+        operation,
+        expectedContext,
+      });
     },
     () => {
       queryClient.removeQueries({ queryKey: ["chi-mentions", host, workspace] });
       clearHostMentionSelection(host);
+      useEntryTarget.setState({ target: null });
     },
   );
   scopes.set(key, { client, scope });

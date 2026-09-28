@@ -4,6 +4,7 @@ import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
+import { useInbox, useInboxTransport } from "@/chi/use-inbox";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItemRow } from "@/plugins/sidebar-items";
 import { canCreateWorktreeForProjectKind } from "@/projects/host-projects";
@@ -171,18 +172,24 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
 }
 
 function SidebarMentionsRow({ onBeforeNavigate }: SidebarNavRowProps) {
-  const active = useActiveWorkspaceSelection();
+  const transport = useInboxTransport();
+  const inbox = useInbox(transport);
+  const unread =
+    transport.host && transport.state.context && !inbox.isError
+      ? inbox.data?.pages[0]?.unreadCount
+      : undefined;
   const press = useCallback(() => {
     onBeforeNavigate?.();
     router.push({
       pathname: "/chi",
-      params: { view: "inbox", host: active?.serverId, workspace: active?.workspaceId },
+      params: { view: "inbox" },
     });
-  }, [active?.serverId, active?.workspaceId, onBeforeNavigate]);
+  }, [onBeforeNavigate]);
   return (
     <SidebarHeaderRow
       icon={AtSign}
       label="Mentions"
+      badge={unread}
       onPress={press}
       testID="sidebar-mentions"
       variant="compact"

@@ -82,6 +82,7 @@ export function openReplyForm(input: {
         error: "chi-mention-context-changed",
         canReauthorize:
           envelope.context.actor === input.context.actor &&
+          envelope.context.deployment === input.context.deployment &&
           envelope.context.repo === input.context.repo,
       });
       return;
@@ -223,7 +224,8 @@ export function openReplyForm(input: {
         if (
           !saved ||
           saved.context.actor !== input.context.actor ||
-          saved.context.repo !== input.context.repo
+          saved.context.repo !== input.context.repo ||
+          saved.context.deployment !== input.context.deployment
         )
           throw new Error("chi-mention-context-changed");
         await input.storage.setItem(

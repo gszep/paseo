@@ -33,6 +33,7 @@ import {
 } from "@getpaseo/protocol/terminal-profiles";
 import { buildSettingsHostSectionRoute } from "@/utils/host-routes";
 import type { Theme } from "@/styles/theme";
+import { ChiWorkspaceMenu } from "@/chi/workspace-menu";
 
 const ThemedEllipsis = withUnistyles(Ellipsis);
 const ThemedCopy = withUnistyles(Copy);
@@ -70,6 +71,7 @@ const COMPACT_HEADER_BUTTON_HIT_SLOP = { top: 8, bottom: 8 } as const;
  * from the same callbacks, so the two surfaces can't drift.
  */
 export interface WorkspaceHeaderWorkspaceActions {
+  chiTarget?: { serverId: string; workspaceId: string };
   currentBranchName: string | null;
   showWorkspaceSetup: boolean;
   importAgentDisabled: boolean;
@@ -81,6 +83,7 @@ export interface WorkspaceHeaderWorkspaceActions {
 }
 
 function WorkspaceHeaderWorkspaceActionItems({
+  chiTarget,
   currentBranchName,
   showWorkspaceSetup,
   importAgentDisabled,
@@ -130,6 +133,7 @@ function WorkspaceHeaderWorkspaceActionItems({
           </DropdownMenuItem>
         </>
       ) : null}
+      {chiTarget ? <ChiWorkspaceMenu {...chiTarget} /> : null}
     </>
   );
 }

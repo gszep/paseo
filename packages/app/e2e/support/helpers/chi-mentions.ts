@@ -10,6 +10,8 @@ const readySchema = z.object({
   serverId: z.string(),
   workspaceId: z.string(),
   agentId: z.string(),
+  localAgentId: z.string(),
+  localWorkspaceId: z.string(),
   port: z.number(),
 });
 const responseSchema = z.discriminatedUnion("ok", [

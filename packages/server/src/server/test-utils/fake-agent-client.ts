@@ -20,6 +20,7 @@ import type {
   AgentStreamEvent,
   AgentSlashCommand,
   AgentUsage,
+  AgentTimelineItem,
   FetchCatalogOptions,
 } from "../agent/agent-sdk-types.js";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
@@ -63,7 +64,7 @@ interface FakeAgentSessionOptions {
     prompt: AgentPromptInput,
     options: AgentRunOptions | undefined,
     sessionId: string,
-  ) => void;
+  ) => AgentTimelineItem | void;
 }
 
 export interface TestAgentClientOptions {
@@ -74,7 +75,7 @@ export interface TestAgentClientOptions {
     prompt: AgentPromptInput,
     options: AgentRunOptions | undefined,
     sessionId: string,
-  ) => void;
+  ) => AgentTimelineItem | void;
   supportsMcpServers?: boolean;
 }
 
@@ -453,7 +454,16 @@ class FakeAgentSession implements AgentSession {
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
     this.activeForegroundTurnId = turnId;
-    this.onStartTurn?.(prompt, options, this.id);
+    const persisted = this.onStartTurn?.(prompt, options, this.id);
+    if (persisted) {
+      const event: AgentStreamEvent = {
+        type: "timeline",
+        provider: this.providerName,
+        item: persisted,
+      };
+      await this.appendHistoryEvent(event);
+      this.notifySubscribers(event);
+    }
 
     void this.emitTurnEvents(prompt);
 

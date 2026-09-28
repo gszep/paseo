@@ -7,6 +7,7 @@ import { HostPicker } from "@/components/hosts/host-picker";
 import { useHosts, useHostRuntimeSnapshot, type HostRuntimeSnapshot } from "@/runtime/host-runtime";
 import { useFetchQuery } from "@/data/query";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { findSourceAgent } from "./entry-navigation";
 import {
   continuationRequestId,
   clearContinuationRequest,
@@ -171,6 +172,44 @@ function buttonText(pending: boolean) {
 }
 
 export function ChiContinueScreen(selection: Selection) {
+  const runtime = useHostRuntimeSnapshot(selection.sourceHost ?? "");
+  const needsAgent = Boolean(selection.sourceHost && !selection.agentId && selection.sourceId);
+  const resolved = useFetchQuery({
+    dataShape: "value",
+    queryKey: [
+      "chi-continue-source",
+      selection.sourceHost,
+      selection.sourceId,
+      runtime?.connectionStatus,
+    ],
+    enabled: needsAgent && runtime?.connectionStatus === "online",
+    gcTime: 0,
+    staleTimeMs: 0,
+    retry: false,
+    queryFn: () => findSourceAgent(selection.sourceHost!, selection.sourceId, selection.repo),
+  });
+  if (needsAgent && runtime?.connectionStatus !== "online")
+    return (
+      <Text style={styles.text}>
+        Reconnect the source host to prepare a managed transfer. The exact mention remains available
+        in Mentions.
+      </Text>
+    );
+  if (needsAgent && resolved.isFetching)
+    return <Text style={styles.text}>Finding source session…</Text>;
+  if (needsAgent && (resolved.isError || !resolved.data))
+    return (
+      <Text style={styles.text}>
+        The source session is unavailable on this host. A managed transfer must be prepared by its
+        owner before continuing.
+      </Text>
+    );
+  return (
+    <ContinueSelectionScreen {...selection} agentId={selection.agentId ?? resolved.data?.id} />
+  );
+}
+
+function ContinueSelectionScreen(selection: Selection) {
   const hosts = useHosts();
   const [target, dispatch] = useReducer(targetReducer, {
     serverId: "",
