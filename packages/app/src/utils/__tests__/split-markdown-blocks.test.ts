@@ -19,14 +19,6 @@ describe("splitMarkdownBlocks", () => {
     ]);
   });
 
-  it("keeps display math with an internal blank line as one block", () => {
-    expect(splitMarkdownBlocks("Before\n\n$$\na\n\nb\n$$\n\nAfter")).toEqual([
-      "Before",
-      "$$\na\n\nb\n$$",
-      "After",
-    ]);
-  });
-
   it("does not treat 4-space-indented backticks as a fence", () => {
     expect(splitMarkdownBlocks("Before\n\n    ```\n    code\n    ```\n\nAfter")).toEqual([
       "Before",

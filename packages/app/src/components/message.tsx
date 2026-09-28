@@ -56,7 +56,6 @@ import Animated, {
 } from "react-native-reanimated";
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "react-native-svg";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
-import { MarkdownBlockMath, MarkdownInlineMath } from "@/components/markdown/math";
 import { MarkdownRenderer, type MarkdownStyles } from "@/components/markdown/renderer";
 import type { TaskActivity, TodoEntry, UserMessageImageAttachment } from "@/types/stream";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
@@ -1833,36 +1832,6 @@ export const AssistantMessage = memo(function AssistantMessage({
           </MarkdownInheritedText>
         );
       },
-      math_inline: (
-        node: ASTNode,
-        _children: ReactNode[],
-        _parent: ASTNode[],
-        styles: MarkdownStyles,
-        inheritedStyles: TextStyle = {},
-      ) => (
-        <MarkdownInlineMath
-          key={node.key}
-          markup={node.markup}
-          tex={node.content}
-          styles={styles}
-          inheritedStyles={inheritedStyles}
-        />
-      ),
-      math_block: (
-        node: ASTNode,
-        _children: ReactNode[],
-        _parent: ASTNode[],
-        styles: MarkdownStyles,
-        inheritedStyles: TextStyle = {},
-      ) => (
-        <MarkdownBlockMath
-          key={node.key}
-          markup={node.markup}
-          tex={node.content}
-          styles={styles}
-          inheritedStyles={inheritedStyles}
-        />
-      ),
       bullet_list: (
         node: ASTNode,
         children: ReactNode[],
