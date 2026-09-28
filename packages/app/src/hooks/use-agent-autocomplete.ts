@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { SelectedMention } from "@/chi/mention-selection";
-import { selectMention } from "@/chi/mention-selection";
+import {
+  applyMentionAutocompleteOption,
+  buildMentionAutocompleteOptions,
+  type DirectorySuggestionEntry,
+  type MentionAutocompleteOption,
+} from "@/composer/autocomplete";
 import { useMentionParticipants } from "@/chi/use-participants";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
@@ -25,11 +29,7 @@ import {
   findActiveSlashCommand,
   type SlashCommandRange,
 } from "@/utils/agent-command-autocomplete";
-import {
-  applyFileMentionReplacement,
-  findActiveFileMention,
-  type FileMentionRange,
-} from "@/utils/file-mention-autocomplete";
+import { findActiveFileMention, type FileMentionRange } from "@/utils/file-mention-autocomplete";
 
 interface UseAgentAutocompleteInput {
   userInput: string;
@@ -56,18 +56,13 @@ interface AgentAutocompleteInputSnapshot {
 }
 
 type AgentAutocompleteOption =
-  | (AutocompleteOption & { type: "human"; participant: SelectedMention })
+  | MentionAutocompleteOption
   | (AutocompleteOption & { type: "client_command"; command: ClientSlashCommand })
   | (AutocompleteOption & {
       type: "plugin_command";
       command: PluginClientSlashCommand;
     })
-  | (AutocompleteOption & { type: "provider_command" })
-  | (AutocompleteOption & {
-      type: "workspace_entry";
-      entryPath: string;
-      mention: FileMentionRange;
-    });
+  | (AutocompleteOption & { type: "provider_command" });
 
 interface AgentAutocompleteResult {
   isVisible: boolean;
@@ -109,11 +104,6 @@ function resolveAgentAutocompleteSnapshot(input: {
     slashCommand: findActiveSlashCommand({ text, cursorIndex }),
     fileMention: findActiveFileMention({ text, cursorIndex }),
   };
-}
-
-interface DirectorySuggestionEntry {
-  path: string;
-  kind: "file" | "directory";
 }
 
 type AvailableCommand =
@@ -206,8 +196,6 @@ interface BuildAutocompleteOptionsInput {
   isDraftContext: boolean;
   commandFilterQuery: string;
   activeSlashCommand: SlashCommandRange | null;
-  activeFileMention: FileMentionRange | null;
-  fileSuggestions: DirectorySuggestionEntry[];
   t: TFunction;
 }
 
@@ -246,19 +234,6 @@ function buildCommandAutocompleteOptions(input: BuildAutocompleteOptionsInput) {
     );
     const orderedMatches = orderAutocompleteOptions(matches);
     return orderedMatches.map((entry) => mapCommandToOption(entry, input.t));
-  }
-
-  const activeFileMention = input.activeFileMention;
-  if (input.mode === "file" && activeFileMention) {
-    const orderedEntries = orderAutocompleteOptions(input.fileSuggestions);
-    return orderedEntries.map((entry) => ({
-      type: "workspace_entry" as const,
-      id: `${entry.kind}:${entry.path}`,
-      label: entry.path,
-      kind: entry.kind,
-      entryPath: entry.path,
-      mention: activeFileMention,
-    }));
   }
 
   return [];
@@ -315,7 +290,7 @@ function resolveAutocompleteIsLoading(args: {
   }
   if (args.mode === "file") {
     return (
-      args.fileSuggestionsIsPending || (args.fileSuggestionsIsLoading && args.optionsLength === 0)
+      (args.fileSuggestionsIsPending || args.fileSuggestionsIsLoading) && args.optionsLength === 0
     );
   }
   return false;
@@ -466,37 +441,26 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
   });
 
   const options = useMemo<AgentAutocompleteOption[]>(() => {
-    const files = buildCommandAutocompleteOptions({
-      activeFileMention,
+    if (!isVisible) return [];
+    if (mode === "file" && activeFileMention) {
+      const canShowPeople = isConnected && people.isSuccess && !people.isFetching;
+      return buildMentionAutocompleteOptions({
+        text: userInput,
+        mention: activeFileMention,
+        participants: canShowPeople ? (people.data ?? []) : [],
+        files: fileSuggestionsQuery.data ?? [],
+      });
+    }
+    return buildCommandAutocompleteOptions({
       commandFilterQuery,
       commands,
       pluginCommands: pluginClientSlashCommands,
       activeSlashCommand,
-      fileSuggestions: fileSuggestionsQuery.data ?? [],
       isDraftContext,
       isVisible,
       mode,
       t,
     });
-    const canShowPeople = mode === "file" && isConnected && people.isSuccess && !people.isFetching;
-    if (!canShowPeople) return files;
-    if (
-      activeFileMention &&
-      activeFileMention.start > 0 &&
-      !/[\s(]/.test(userInput[activeFileMention.start - 1]!)
-    )
-      return files;
-    const participants: AgentAutocompleteOption[] = (people.data ?? [])
-      .filter((p) => p.handle.toLowerCase().includes(fileFilterQuery.toLowerCase()))
-      .map((participant) => ({
-        type: "human",
-        id: `human:${participant.ownerId}`,
-        kind: "human",
-        label: `@${participant.handle}`,
-        description: "Person · Chi",
-        participant,
-      }));
-    return [...participants, ...files];
   }, [
     activeFileMention,
     activeSlashCommand,
@@ -512,7 +476,6 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     people.isSuccess,
     people.isFetching,
     isConnected,
-    fileFilterQuery,
     userInput,
   ]);
 
@@ -559,18 +522,12 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
       }
 
       if (!current.fileMention) return;
-      if (selected.type === "human") {
-        selectMention(serverId, agentId, selected.participant);
-        setUserInput(
-          `${current.text.slice(0, current.fileMention.start)}@${selected.participant.handle} ${current.text.slice(current.fileMention.end)}`,
-        );
-        onAutocompleteApplied?.();
-        return;
-      }
-      const nextInput = applyFileMentionReplacement({
+      const nextInput = applyMentionAutocompleteOption({
+        option: selected,
         text: current.text,
         mention: current.fileMention,
-        relativePath: selected.entryPath,
+        serverId,
+        agentId,
       });
       setUserInput(nextInput);
       onAutocompleteApplied?.();
@@ -617,7 +574,7 @@ export function useAgentAutocomplete(input: UseAgentAutocompleteInput): AgentAut
     mode,
     isCommandError: isError,
     commandError: error,
-    fileSuggestionsError: fileSuggestionsQuery.error,
+    fileSuggestionsError: options.length === 0 ? fileSuggestionsQuery.error : null,
     t,
   });
 

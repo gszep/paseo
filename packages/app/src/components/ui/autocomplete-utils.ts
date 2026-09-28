@@ -2,6 +2,82 @@ import { getNextActiveIndex } from "./combobox-keyboard";
 
 export type AutocompleteOptionsPosition = "above-input" | "below-input";
 
+export interface AutocompleteKeyPressEvent {
+  key: string;
+  preventDefault: () => void;
+}
+
+export interface AutocompleteSelection {
+  query: string;
+  optionId: string;
+}
+
+interface AutocompleteSelectionInput {
+  options: readonly { id: string }[];
+  query: string;
+  selection: AutocompleteSelection | null;
+  optionsPosition?: AutocompleteOptionsPosition;
+}
+
+export function getAutocompleteSelectedIndex(input: AutocompleteSelectionInput): number {
+  const selectedIndex =
+    input.selection?.query === input.query
+      ? input.options.findIndex((option) => option.id === input.selection?.optionId)
+      : -1;
+  return selectedIndex < 0
+    ? getAutocompleteFallbackIndex(input.options.length, input.optionsPosition)
+    : selectedIndex;
+}
+
+interface AutocompleteKeyPressInput<TOption, TEvent extends AutocompleteKeyPressEvent> {
+  event: TEvent;
+  isVisible: boolean;
+  options: readonly TOption[];
+  selectedIndex: number;
+  optionsPosition?: AutocompleteOptionsPosition;
+  onSelectedIndexChange: (index: number) => void;
+  onSelectOption: (option: TOption, event: TEvent) => void;
+  onEscape?: () => void;
+}
+
+export function handleAutocompleteKeyPress<TOption, TEvent extends AutocompleteKeyPressEvent>(
+  input: AutocompleteKeyPressInput<TOption, TEvent>,
+): boolean {
+  const { event, options } = input;
+  if (!input.isVisible || options.length === 0) return false;
+
+  if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    event.preventDefault();
+    input.onSelectedIndexChange(
+      getAutocompleteNextIndex({
+        currentIndex: input.selectedIndex,
+        itemCount: options.length,
+        key: event.key,
+      }),
+    );
+    return true;
+  }
+
+  if (event.key === "Tab" || event.key === "Enter") {
+    event.preventDefault();
+    const fallbackIndex = getAutocompleteFallbackIndex(options.length, input.optionsPosition);
+    const resolvedIndex =
+      input.selectedIndex >= 0 && input.selectedIndex < options.length
+        ? input.selectedIndex
+        : fallbackIndex;
+    input.onSelectOption(options[resolvedIndex]!, event);
+    return true;
+  }
+
+  if (event.key === "Escape" && input.onEscape) {
+    event.preventDefault();
+    input.onEscape();
+    return true;
+  }
+
+  return false;
+}
+
 export function orderAutocompleteOptions<T>(
   options: readonly T[],
   position: AutocompleteOptionsPosition = "above-input",
