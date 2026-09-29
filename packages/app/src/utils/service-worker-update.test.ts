@@ -14,6 +14,7 @@ interface Harness {
   fireServiceWorker(type: string): void;
   installWorker(): void;
   setWaiting(worker: { postMessage(message: unknown): void } | null): void;
+  fireInterval(index: number): void;
   flush(): Promise<void>;
 }
 
@@ -160,6 +161,7 @@ function createHarness(options: { controlled?: boolean } = {}): Harness {
               },
             };
     },
+    fireInterval: (index) => intervals[index]?.(),
     flush: async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -179,6 +181,9 @@ it("registers on load, checks for updates on focus/visibility, and polls", async
   harness.visibility = "visible";
   harness.fireDocument("visibilitychange");
   expect(harness.updates).toBe(2);
+  // The captured hourly tick polls `registration.update()` too.
+  harness.fireInterval(0);
+  expect(harness.updates).toBe(3);
 });
 
 it("never reloads while an editable control is focused", async () => {

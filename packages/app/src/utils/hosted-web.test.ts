@@ -131,6 +131,7 @@ describe("hosted export policy", () => {
       },
     );
     expect(calls.added).toBe(1);
+    expect(calls.skipped).toBe(true);
     expect(calls.deleted).toEqual(["paseo-shell-old"]);
     expect(calls.claimed).toBe(true);
     expect(handlers.message).toBeDefined();
