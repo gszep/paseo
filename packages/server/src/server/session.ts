@@ -286,6 +286,8 @@ type ProviderSubagentManagerEvent = Extract<
 const LEGACY_PROVIDER_IDS = new Set(["claude", "codex", "opencode"]);
 const MIN_VERSION_ALL_PROVIDERS = "0.1.45";
 const MIN_VERSION_EXPLICIT_WORKSPACE_RECOVERY = "0.1.105";
+/** Default drain deadline for `restart --wait-idle` when the caller omits one. */
+const DEFAULT_RESTART_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 function errorToFriendlyMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -2563,7 +2565,11 @@ export class Session {
       case "dictation_stream_cancel":
         return this.voiceSessions.handleMessage(msg);
       case "restart_server_request":
-        return this.handleRestartServerRequest(msg.requestId, msg.reason);
+        return this.handleRestartServerRequest(msg.requestId, msg.reason, {
+          waitIdle: msg.waitIdle === true,
+          idleTimeoutMs: msg.idleTimeoutMs,
+          force: msg.force === true,
+        });
       case "shutdown_server_request":
         return this.handleShutdownServerRequest(msg.requestId);
       case "client_heartbeat":
@@ -3185,8 +3191,32 @@ export class Session {
     this.terminalController.handleBinaryFrame(binaryFrame.frame, source);
   }
 
-  private async handleRestartServerRequest(requestId: string, reason?: string): Promise<void> {
+  private async handleRestartServerRequest(
+    requestId: string,
+    reason?: string,
+    options?: { waitIdle?: boolean; idleTimeoutMs?: number; force?: boolean },
+  ): Promise<void> {
     const lifecycleReason = normalizeClientRestartRpcReason(reason);
+    const waitIdle = options?.waitIdle === true;
+    const force = options?.force === true;
+
+    if (waitIdle) {
+      const drain = await this.drainForRestart({
+        requestId,
+        idleTimeoutMs: options?.idleTimeoutMs ?? DEFAULT_RESTART_IDLE_TIMEOUT_MS,
+        force,
+      });
+      if (drain !== "proceed") {
+        // "canceled": the requester went away, nothing to report.
+        // "timed_out": already emitted a restart_draining status; never restart.
+        return;
+      }
+    } else {
+      // Any other restart (plain or forced) abandons a drain in progress so
+      // admission resumes if the earlier restart is superseded.
+      this.agentManager.endDraining();
+    }
+
     const payload: { status: string } & Record<string, unknown> = {
       status: "restart_requested",
       clientId: this.clientId,
@@ -3208,6 +3238,75 @@ export class Session {
       requestId,
       reason: lifecycleReason,
     });
+  }
+
+  /**
+   * Freeze prompt admission, then wait for every agent to settle. Returns
+   * "proceed" when the worker may swap, "timed_out" when the deadline elapsed
+   * without `force`, or "canceled" when the requester disconnected. Every path
+   * leaves drain mode so a cancelled or failed restart never strands the daemon.
+   */
+  private async drainForRestart(params: {
+    requestId: string;
+    idleTimeoutMs: number;
+    force: boolean;
+  }): Promise<"proceed" | "timed_out" | "canceled"> {
+    const { requestId, idleTimeoutMs, force } = params;
+    const report = (phase: "draining" | "timed_out", runningAgents: string[]) =>
+      this.emit({
+        type: "status",
+        payload: {
+          status: "restart_draining",
+          requestId,
+          phase,
+          runningAgents,
+          idleTimeoutMs,
+          forced: force,
+        },
+      });
+
+    this.agentManager.beginDraining();
+    report(
+      "draining",
+      this.agentManager.listInFlightAgents().map((agent) => agent.agentId),
+    );
+
+    try {
+      const outcome = await this.agentManager.waitForAllIdle({
+        timeoutMs: idleTimeoutMs,
+        signal: this.delivery.requestSignal,
+        onProgress: (running) =>
+          report(
+            "draining",
+            running.map((agent) => agent.agentId),
+          ),
+      });
+
+      if (outcome.ok) {
+        this.sessionLogger.info({ requestId, idleTimeoutMs }, "Restart drain completed");
+        return "proceed";
+      }
+
+      const remaining = outcome.runningAgents.map((agent) => agent.agentId);
+      this.agentManager.endDraining();
+      if (force) {
+        this.sessionLogger.warn(
+          { requestId, remaining },
+          "Restart drain timed out; forcing restart",
+        );
+        return "proceed";
+      }
+      this.sessionLogger.warn(
+        { requestId, remaining, idleTimeoutMs },
+        "Restart drain timed out; abandoning restart",
+      );
+      report("timed_out", remaining);
+      return "timed_out";
+    } catch (error) {
+      this.agentManager.endDraining();
+      this.sessionLogger.warn({ requestId, err: error }, "Restart drain aborted");
+      return "canceled";
+    }
   }
 
   private async handleShutdownServerRequest(requestId: string): Promise<void> {
@@ -8219,6 +8318,28 @@ export class Session {
 
     try {
       const agentId = resolved.agentId;
+
+      // A draining daemon is about to swap workers. Reject before any durable
+      // receipt is written so the client gets a provably `not_admitted`,
+      // retryable response instead of an ambiguous receipt.
+      if (this.agentManager.isDraining()) {
+        this.sessionLogger.info(
+          { agentId, requestId: msg.requestId },
+          "Rejecting prompt submission during host drain",
+        );
+        this.emit({
+          type: "send_agent_message_response",
+          payload: {
+            requestId: msg.requestId,
+            agentId,
+            accepted: false,
+            error: "host_restarting",
+            errorCode: "host_restarting",
+            admission: "not_admitted",
+          },
+        });
+        return;
+      }
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
       assertMentionSend(msg);

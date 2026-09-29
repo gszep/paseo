@@ -24,6 +24,11 @@ export type AgentRunController = Pick<
   | "streamAgent"
 > & {
   reloadAgentSession(agentId: string): Promise<unknown>;
+  /**
+   * Present on the real AgentManager; optional so lightweight test fakes that
+   * never drain remain valid.
+   */
+  assertAcceptingPrompts?: () => void;
 };
 
 export interface StartAgentRunOptions {
@@ -115,6 +120,9 @@ export async function startAgentRun(
   if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
     return { disposition: "out_of_band" };
   }
+  // Admission guard for a draining daemon. Out-of-band commands above do not
+  // start a turn, so they remain available while everything else waits.
+  agentManager.assertAcceptingPrompts?.();
   try {
     return await startAgentRunInner(agentManager, agentId, prompt, logger, options);
   } catch (error) {

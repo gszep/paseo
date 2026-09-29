@@ -93,6 +93,8 @@ import {
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { extractAttention } from "../persistence-hooks.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { HostRestartingError } from "./host-restarting-error.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -471,6 +473,18 @@ export interface AgentMetricsSnapshot {
   };
 }
 
+/**
+ * One agent that keeps the daemon busy during a drain. Reported to operators so
+ * `paseo daemon restart --wait-idle` can show what it is waiting on.
+ */
+export interface DrainingAgentSummary {
+  agentId: string;
+  title: string | null;
+  provider: AgentProvider;
+  lifecycle: ManagedAgent["lifecycle"];
+  activeTurnId: string | null;
+}
+
 type ActiveManagedAgent =
   | ManagedAgentInitializing
   | ManagedAgentIdle
@@ -735,6 +749,7 @@ export class AgentManager {
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  private draining = false;
 
   constructor(options: AgentManagerOptions) {
     this.chi = options.chi ? new ChiConnection(this, options.chi) : null;
@@ -833,6 +848,100 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+  }
+
+  /**
+   * Enter drain mode: stop admitting new prompt/turn work so in-flight runs can
+   * settle, then let a restart swap the worker. Idempotent.
+   */
+  beginDraining(): void {
+    this.draining = true;
+    this.logger.info(
+      {
+        inFlight: this.listInFlightAgents().map((agent) => agent.agentId),
+      },
+      "Agent manager entered draining state",
+    );
+  }
+
+  /** Leave drain mode. Safe to call when not draining (cancelled/failed restart). */
+  endDraining(): void {
+    if (!this.draining) {
+      return;
+    }
+    this.draining = false;
+    this.logger.info("Agent manager left draining state");
+  }
+
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  /** Agents that still hold work: running/initializing lifecycles or tracked runs. */
+  listInFlightAgents(): DrainingAgentSummary[] {
+    const summaries: DrainingAgentSummary[] = [];
+    for (const agent of this.agents.values()) {
+      if (!this.isAgentBusyForDrain(agent)) {
+        continue;
+      }
+      summaries.push({
+        agentId: agent.id,
+        title: agent.config.title ?? null,
+        provider: agent.provider,
+        lifecycle: agent.lifecycle,
+        activeTurnId: agent.activeTurnId ?? agent.activeForegroundTurnId ?? null,
+      });
+    }
+    return summaries;
+  }
+
+  private isAgentBusyForDrain(agent: LiveManagedAgent): boolean {
+    return (
+      agent.lifecycle === "running" ||
+      agent.lifecycle === "initializing" ||
+      Boolean(agent.activeForegroundTurnId) ||
+      this.runs.hasRun(agent.id)
+    );
+  }
+
+  /**
+   * Poll until no agent holds work. Polling (rather than a global settle
+   * promise) is deliberate: runs are settled through several paths
+   * (foreground, autonomous, replacement), and a restart only needs a
+   * monotonic quiet-point guarantee once admission is frozen.
+   */
+  async waitForAllIdle(options: {
+    timeoutMs: number;
+    pollIntervalMs?: number;
+    onProgress?: (runningAgents: DrainingAgentSummary[]) => void;
+    signal?: AbortSignal;
+  }): Promise<{ ok: true } | { ok: false; runningAgents: DrainingAgentSummary[] }> {
+    const pollIntervalMs = options.pollIntervalMs ?? 250;
+    const deadline = Date.now() + options.timeoutMs;
+
+    for (;;) {
+      if (options.signal?.aborted) {
+        throw new Error("drain_canceled");
+      }
+      const runningAgents = this.listInFlightAgents();
+      if (runningAgents.length === 0) {
+        return { ok: true };
+      }
+      options.onProgress?.(runningAgents);
+
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        return { ok: false, runningAgents };
+      }
+      await delay(Math.min(pollIntervalMs, remainingMs));
+    }
+  }
+
+  /** Guard for every prompt entrypoint; see `startAgentRun`. */
+  assertAcceptingPrompts(): void {
+    if (this.draining) {
+      throw new HostRestartingError();
+    }
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
