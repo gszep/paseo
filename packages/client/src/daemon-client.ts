@@ -22,6 +22,7 @@ import {
   parseServerInfoStatusPayload,
   RenameTerminalResponseSchema,
   RestartRequestedStatusPayloadSchema,
+  RestartDrainingStatusPayloadSchema,
   ShutdownRequestedStatusPayloadSchema,
   DaemonUpdateResponseSchema,
   SessionInboundMessageSchema,
@@ -669,7 +670,20 @@ export interface AgentForkContextOptions {
 
 type AgentRefreshedStatusPayload = z.infer<typeof AgentRefreshedStatusPayloadSchema>;
 type RestartRequestedStatusPayload = z.infer<typeof RestartRequestedStatusPayloadSchema>;
+type RestartDrainingStatusPayload = z.infer<typeof RestartDrainingStatusPayloadSchema>;
 type ShutdownRequestedStatusPayload = z.infer<typeof ShutdownRequestedStatusPayloadSchema>;
+export interface RestartServerOptions {
+  requestId?: string;
+  timeout?: number;
+  /** Wait for every agent to settle before swapping the worker. */
+  waitIdle?: boolean;
+  /** Drain deadline in milliseconds (server default: 30 minutes). */
+  idleTimeoutMs?: number;
+  /** On drain timeout, proceed with the restart instead of failing. */
+  force?: boolean;
+  /** Called as agents settle; `runningAgents` is empty once the drain clears. */
+  onDrainProgress?: (status: RestartDrainingStatusPayload) => void;
+}
 export interface ShutdownServerOptions {
   requestId?: string;
   timeout?: number;
@@ -927,6 +941,25 @@ export class DaemonConnectionError extends Error {
   ) {
     super(message);
     this.name = "DaemonConnectionError";
+  }
+}
+
+/**
+ * A `restart --wait-idle` drain elapsed its deadline while agents were still
+ * running and no `force` was requested. The daemon did NOT restart.
+ */
+export class RestartDrainTimeoutError extends Error {
+  readonly code = "DAEMON_DRAIN_TIMEOUT";
+  constructor(
+    readonly runningAgents: string[],
+    readonly idleTimeoutMs: number,
+  ) {
+    super(
+      `Restart drain timed out after ${idleTimeoutMs}ms; still running: ${
+        runningAgents.length > 0 ? runningAgents.join(", ") : "(none)"
+      }`,
+    );
+    this.name = "RestartDrainTimeoutError";
   }
 }
 
@@ -3693,33 +3726,60 @@ export class DaemonClient {
   async restartServer(
     reason?: string,
     requestId?: string,
-    options?: { timeout?: number },
+    options?: RestartServerOptions,
   ): Promise<RestartRequestedStatusPayload> {
-    const resolvedRequestId = this.createRequestId(requestId);
+    const resolvedRequestId = this.createRequestId(options?.requestId ?? requestId);
     const message = SessionInboundMessageSchema.parse({
       type: "restart_server_request",
       ...(reason && reason.trim().length > 0 ? { reason } : {}),
       requestId: resolvedRequestId,
+      ...(options?.waitIdle ? { waitIdle: true } : {}),
+      ...(options?.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
+      ...(options?.force ? { force: true } : {}),
     });
-    return this.sendRequest({
-      requestId: resolvedRequestId,
-      message,
-      timeout: options?.timeout,
-      options: { skipQueue: true },
-      select: (msg) => {
-        if (msg.type !== "status") {
-          return null;
-        }
-        const restarted = RestartRequestedStatusPayloadSchema.safeParse(msg.payload);
-        if (!restarted.success) {
-          return null;
-        }
-        if (restarted.data.requestId !== resolvedRequestId) {
-          return null;
-        }
-        return restarted.data;
-      },
-    });
+    const unsubscribe = options?.onDrainProgress
+      ? this.on("status", (statusMessage) => {
+          if (statusMessage.payload.status !== "restart_draining") return;
+          const parsed = RestartDrainingStatusPayloadSchema.safeParse(statusMessage.payload);
+          if (!parsed.success || parsed.data.requestId !== resolvedRequestId) return;
+          options.onDrainProgress?.(parsed.data);
+        })
+      : undefined;
+    try {
+      return await this.sendRequest({
+        requestId: resolvedRequestId,
+        message,
+        timeout: options?.timeout,
+        options: { skipQueue: true },
+        select: (msg) => {
+          if (msg.type !== "status") {
+            return null;
+          }
+          const draining = RestartDrainingStatusPayloadSchema.safeParse(msg.payload);
+          if (
+            draining.success &&
+            draining.data.requestId === resolvedRequestId &&
+            draining.data.phase === "timed_out"
+          ) {
+            // Rejects the waiter; the daemon did not restart.
+            throw new RestartDrainTimeoutError(
+              draining.data.runningAgents,
+              draining.data.idleTimeoutMs ?? 0,
+            );
+          }
+          const restarted = RestartRequestedStatusPayloadSchema.safeParse(msg.payload);
+          if (!restarted.success) {
+            return null;
+          }
+          if (restarted.data.requestId !== resolvedRequestId) {
+            return null;
+          }
+          return restarted.data;
+        },
+      });
+    } finally {
+      unsubscribe?.();
+    }
   }
 
   async shutdownServer(options?: ShutdownServerOptions): Promise<ShutdownRequestedStatusPayload> {

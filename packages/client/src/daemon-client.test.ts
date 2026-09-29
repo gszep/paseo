@@ -2,6 +2,7 @@ import { afterEach, expect, expectTypeOf, test, vi } from "vitest";
 import { z } from "zod";
 import {
   DaemonClient,
+  RestartDrainTimeoutError,
   type DaemonClientTrace,
   type CreateAgentRequestOptions,
   type DaemonTransport,
@@ -3888,6 +3889,112 @@ test("restartServer remains restart-only and sends restart_server_request", asyn
     reason: "settings_update",
     requestId: "req-restart-1",
   });
+});
+
+test("restartServer forwards wait-idle options and reports drain progress", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const progress: string[][] = [];
+  const promise = client.restartServer("cli_restart", "req-restart-idle", {
+    waitIdle: true,
+    idleTimeoutMs: 42_000,
+    force: true,
+    onDrainProgress: (status) => progress.push(status.runningAgents),
+  });
+
+  expect(parseSentFrame(mock.sent[0])).toEqual({
+    type: "restart_server_request",
+    reason: "cli_restart",
+    requestId: "req-restart-idle",
+    waitIdle: true,
+    idleTimeoutMs: 42_000,
+    force: true,
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "restart_draining",
+        requestId: "req-restart-idle",
+        phase: "draining",
+        runningAgents: ["agent-a"],
+        idleTimeoutMs: 42_000,
+      },
+    }),
+  );
+  expect(progress).toEqual([["agent-a"]]);
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "restart_requested",
+        clientId: "clsk_unit_test",
+        requestId: "req-restart-idle",
+      },
+    }),
+  );
+
+  await expect(promise).resolves.toMatchObject({
+    status: "restart_requested",
+    requestId: "req-restart-idle",
+  });
+});
+
+test("restartServer rejects with RestartDrainTimeoutError when the drain times out", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const promise = client.restartServer("cli_restart", "req-restart-timeout", {
+    waitIdle: true,
+    idleTimeoutMs: 150,
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "status",
+      payload: {
+        status: "restart_draining",
+        requestId: "req-restart-timeout",
+        phase: "timed_out",
+        runningAgents: ["agent-a", "agent-b"],
+        idleTimeoutMs: 150,
+      },
+    }),
+  );
+
+  const error = await promise.catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(RestartDrainTimeoutError);
+  expect((error as RestartDrainTimeoutError).runningAgents).toEqual(["agent-a", "agent-b"]);
+  expect((error as RestartDrainTimeoutError).idleTimeoutMs).toBe(150);
 });
 
 test("transitions out of connecting when connect timeout elapses", async () => {
