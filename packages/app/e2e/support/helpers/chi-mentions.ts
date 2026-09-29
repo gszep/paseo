@@ -20,20 +20,39 @@ const responseSchema = z.discriminatedUnion("ok", [
     id: z.string(),
     createAttempts: z.array(z.string()),
     replyAttempts: z.array(z.string()),
+    port: z.number(),
+    sources: z.array(z.string()).optional(),
+    sourceVisibilities: z.record(z.string(), z.string()).optional(),
   }),
   z.object({ ok: z.literal(false), id: z.string(), error: z.string() }),
 ]);
-type Action = "lose-create" | "lose-reply" | "hide" | "attempts" | "close";
+type Action =
+  | "lose-create"
+  | "lose-reply"
+  | "hide"
+  | "attempts"
+  | "close"
+  | "fail-evidence"
+  | "allow-evidence"
+  | "restart"
+  | "seed-legacy"
+  | "sources";
+interface MentionActorOptions {
+  chi?: unknown;
+}
 
 export async function startMentionActor(
   actor: "sava-the-owl" | "mochi-the-kitty",
   origin: string,
   runId: string,
+  options: MentionActorOptions = {},
 ) {
   const root = path.resolve(__dirname, "../../../../..");
+  const args = [actor, origin, runId];
+  if (options.chi) args.push(JSON.stringify(options.chi));
   const child = spawnTsx(
     path.join(root, "packages/server/src/server/test-utils/chi-mention-acceptance.ts"),
-    [actor, origin, runId],
+    args,
     {
       cwd: root,
       env: { ...process.env, PASEO_SUPERVISED: "0" },
@@ -61,6 +80,7 @@ export async function startMentionActor(
     await killProcessTree(child);
     throw error;
   });
+  let port = ready.port;
   function request(action: Action) {
     const id = randomUUID();
     return new Promise<Extract<z.infer<typeof responseSchema>, { ok: true }>>((resolve, reject) => {
@@ -82,14 +102,32 @@ export async function startMentionActor(
   }
   return {
     ...ready,
+    get port() {
+      return port;
+    },
     loseNextCreateReply: () => request("lose-create"),
     loseNextReplyReply: () => request("lose-reply"),
     hideSources: () => request("hide"),
     attempts: () => request("attempts"),
+    failEvidence: () => request("fail-evidence"),
+    allowEvidence: () => request("allow-evidence"),
+    seedLegacyAssociation: () => request("seed-legacy"),
+    async sources() {
+      return (await request("sources")).sources ?? [];
+    },
+    async sourceVisibility(sourceId: string) {
+      return (await request("sources")).sourceVisibilities?.[sourceId] ?? null;
+    },
+    /** Recreate the daemon on the same persisted home; returns the new port. */
+    async restart() {
+      const result = await request("restart");
+      port = result.port;
+      return result.port;
+    },
     async seed(page: Page) {
       const host = buildSeededHost({
         serverId: ready.serverId,
-        endpoint: `127.0.0.1:${ready.port}`,
+        endpoint: `127.0.0.1:${port}`,
         label: actor,
         nowIso: new Date().toISOString(),
       });

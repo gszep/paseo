@@ -175,6 +175,38 @@ const MutableRelayConfigSchema = z
   })
   .passthrough();
 
+/** Who may read an uploaded source. Today's backend accepts exactly these two. */
+export const ChiAudienceSchema = z.enum(["private", "shared"]);
+export type ChiAudience = z.infer<typeof ChiAudienceSchema>;
+
+/** A configured deployment peers with the default Henkaku deployment. */
+export const ChiDestinationConfigSchema = z
+  .object({
+    name: z.string().min(1),
+    endpoint: z.string().min(1),
+  })
+  .strict();
+export type ChiDestinationConfig = z.infer<typeof ChiDestinationConfigSchema>;
+
+export const ChiMappingConfigSchema = z
+  .object({
+    // `github:owner/repo` exact or an owner wildcard `github:owner/*`; exact wins.
+    repo: z.string().min(1),
+    destination: z.string().min(1),
+    // Unspecified means owner-private.
+    audience: ChiAudienceSchema.optional(),
+  })
+  .strict();
+export type ChiMappingConfig = z.infer<typeof ChiMappingConfigSchema>;
+
+export const MutableChiConfigSchema = z
+  .object({
+    destinations: z.record(z.string(), ChiDestinationConfigSchema).default({}),
+    mappings: z.array(ChiMappingConfigSchema).default([]),
+  })
+  .strict();
+export type MutableChiConfig = z.infer<typeof MutableChiConfigSchema>;
+
 export const MutableDaemonConfigSchema = z
   .object({
     // COMPAT(relayConfig): added in v0.2.6, remove after 2027-01-31 when old daemons are unsupported.
@@ -212,6 +244,7 @@ export const MutableDaemonConfigSchema = z
     skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    chi: MutableChiConfigSchema.optional(),
   })
   .passthrough();
 
@@ -232,6 +265,7 @@ export const MutableDaemonConfigPatchSchema = z
     agentProfiles: z.array(AgentProfileSchema).optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    chi: MutableChiConfigSchema.partial().optional(),
   })
   .partial()
   .passthrough();
@@ -1848,12 +1882,24 @@ export const ChiConversationResponseSchema = z.object({
     z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
   ]),
 });
-export const ChiShareRequestSchema = z.object({
-  type: z.literal("chi.native.share.request"),
+export const ChiSyncRequestSchema = z.object({
+  type: z.literal("chi.sync.status.request"),
   requestId: z.string(),
-  agentId: z.string(),
-  repo: z.string().max(4096).optional(),
+  workspaceId: z.string(),
+  // Retry is a workspace.write action; plain status is a read.
+  action: z.enum(["status", "retry"]).optional(),
 });
+export const ChiSyncDestinationSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  endpoint: z.string(),
+  audience: ChiAudienceSchema,
+  /** Authenticated Chi account pinned on the association, if any. */
+  actor: z.string().nullable().optional(),
+  /** The mapping rule that matched, e.g. `github:owner/repo` or `github:owner/*`. */
+  matchedRule: z.string().nullable().optional(),
+});
+export type ChiSyncDestination = z.infer<typeof ChiSyncDestinationSchema>;
 export const ChiContinueResponseSchema = z.object({
   type: z.literal("chi.native.continue.response"),
   payload: z.discriminatedUnion("outcome", [
@@ -1875,15 +1921,17 @@ export const ChiContinueResponseSchema = z.object({
     z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
   ]),
 });
-export const ChiShareResponseSchema = z.object({
-  type: z.literal("chi.native.share.response"),
+export const ChiSyncResponseSchema = z.object({
+  type: z.literal("chi.sync.status.response"),
   payload: z.discriminatedUnion("outcome", [
     z.object({
       requestId: z.string(),
       outcome: z.literal("ready"),
-      sourceId: z.string(),
-      snapshotId: z.string(),
-      actor: z.string(),
+      destination: ChiSyncDestinationSchema.nullable(),
+      pending: z.boolean(),
+      error: z.string().nullable(),
+      /** False when the destination is a peer deployment that cannot deliver mentions. */
+      mentionsAvailable: z.boolean().optional(),
     }),
     z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
   ]),
@@ -3270,7 +3318,7 @@ export const SubscriptionReleaseResponseSchema = z.object({
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueRequestSchema,
   ChiConversationRequestSchema,
-  ChiShareRequestSchema,
+  ChiSyncRequestSchema,
   ChiMentionRequestSchema,
   BrowserHostRegisterRequestSchema,
   SubscriptionReleaseRequestSchema,
@@ -6879,7 +6927,7 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ChiContinueResponseSchema,
   ChiConversationResponseSchema,
-  ChiShareResponseSchema,
+  ChiSyncResponseSchema,
   ChiMentionResponseSchema,
   BrowserHostRegisterResponseSchema,
   SubscriptionReleaseResponseSchema,

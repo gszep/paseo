@@ -38,7 +38,6 @@ describe("SessionAuthorization", () => {
   test("Chi native mutations require workspace.write, not daemon.manage or workspace.read", () => {
     for (const type of [
       "chi.native.continue.request",
-      "chi.native.share.request",
       "chi.conversation.manage.request",
     ] as const) {
       expect(
@@ -50,6 +49,18 @@ describe("SessionAuthorization", () => {
         ),
       ).toBe(false);
     }
+  });
+  test("Chi sync status is a workspace read", () => {
+    expect(
+      new SessionAuthorization(["workspace.read"]).allowsInbound(
+        inboundMessage("chi.sync.status.request"),
+      ),
+    ).toBe(true);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsInbound(
+        inboundMessage("chi.sync.status.request"),
+      ),
+    ).toBe(false);
   });
   test("owner authority covers every session operation", () => {
     const authorization = new SessionAuthorization(OWNER_PERMISSIONS);

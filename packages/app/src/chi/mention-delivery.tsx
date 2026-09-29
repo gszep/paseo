@@ -12,6 +12,8 @@ import { Alert } from "@/components/ui/alert";
 import { mentionError } from "./mention-errors";
 import { useMentionScope } from "./use-mention-scope";
 import { mentionSubmissions } from "./mention-submission-storage";
+import { useSyncDestination } from "./use-sync-destination";
+import { MentionsUnavailableHint } from "./mentions-unavailable";
 import { sameMentionContext, mentionQueryKey, type MentionScope } from "./mention-context";
 import {
   mentionSelection,
@@ -39,16 +41,16 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   const supported = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.chiMentions === true,
   );
-  const shared = useSessionStore((state) =>
-    Boolean(state.sessions[serverId]?.agents.get(agentId)?.labels["chi.native"]),
-  );
-  const active = supported && shared && connected && Boolean(workspaceId);
+  const { destination, mentionsAvailable } = useSyncDestination(serverId, workspaceId ?? "");
+  const active =
+    supported && Boolean(destination) && mentionsAvailable && connected && Boolean(workspaceId);
   const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, active);
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   if (!supported || !workspaceId) return null;
   return (
     <View style={styles.rail}>
-      <SelectedRecipients serverId={serverId} agentId={agentId} shared={shared} />
+      <SelectedRecipients serverId={serverId} agentId={agentId} />
+      <MentionsUnavailableHint destination={destination} mentionsAvailable={mentionsAvailable} />
       {active && client && state.context ? (
         <ProtectedDelivery
           key={state.generation}
@@ -73,7 +75,7 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   );
 }
 
-function SelectedRecipients({ serverId, agentId, shared }: AgentTarget & { shared: boolean }) {
+function SelectedRecipients({ serverId, agentId }: AgentTarget) {
   const selected = useSyncExternalStore(
     subscribeMentionSelection,
     () => mentionSelection(serverId, agentId),
@@ -85,7 +87,6 @@ function SelectedRecipients({ serverId, agentId, shared }: AgentTarget & { share
     <View>
       <Text style={styles.text}>
         Mention recipients: {selected.map((p) => `@${p.handle}`).join(", ")}
-        {shared ? "" : " · Share to Chi before sending"}
       </Text>
       <Button size="sm" variant="ghost" onPress={clear}>
         Clear recipients

@@ -19,7 +19,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useRouter, type Href } from "expo-router";
 import * as Clipboard from "expo-clipboard";
 import { useTranslation } from "react-i18next";
-import { ChevronDown } from "lucide-react-native";
+import { ChevronDown, Database } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
@@ -27,8 +27,19 @@ import invariant from "tiny-invariant";
 import { SidebarMenuToggle } from "@/components/headers/menu-header";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { ScreenTitle } from "@/components/headers/screen-title";
-import { HostBadge } from "@/hosts/host-badge";
+import { HostBadge, HOST_BADGE_ICON_SIZE } from "@/hosts/host-badge";
 import { useHostBadges } from "@/hosts/use-host-badges";
+import { useSyncDestination, type SyncDestinationState } from "@/chi/use-sync-destination";
+import { syncAudienceLabel } from "@/chi/sync-destination";
+import { WorkspaceSyncNotice, syncNoticeReason } from "@/chi/sync-notice";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuHint,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import {
@@ -915,21 +926,28 @@ function WorkspaceHeaderProjectRow({
   subtitle,
   isSubtitleDistinct,
   serverId,
+  workspaceId,
 }: {
   subtitle: string;
   isSubtitleDistinct: boolean;
   serverId: string;
+  workspaceId: string;
 }) {
   const isCompact = useIsCompactFormFactor();
   const hostBadge = useHostBadges({ enabled: isCompact }).get(serverId) ?? null;
+  const sync = useSyncDestination(serverId, workspaceId);
   const showProject = isSubtitleDistinct || isCompact;
-  if (!showProject && !hostBadge) {
+  // Initial loading renders neither destination nor local; only a resolved
+  // response is a local verdict.
+  const showDestination = !sync.loading;
+  if (!showProject && !hostBadge && !showDestination) {
     return null;
   }
   return (
     <View style={styles.headerProjectRow}>
       {showProject ? (
         <Text
+          key="project"
           testID="workspace-header-subtitle"
           style={styles.headerProjectTitle}
           numberOfLines={1}
@@ -937,11 +955,81 @@ function WorkspaceHeaderProjectRow({
           {subtitle}
         </Text>
       ) : null}
-      {showProject && hostBadge ? <Text style={styles.headerProjectSeparator}>·</Text> : null}
-      {hostBadge ? <HostBadge badge={hostBadge} /> : null}
+      {showProject && (hostBadge || showDestination) ? (
+        <Text key="separator-project" style={styles.headerProjectSeparator}>
+          ·
+        </Text>
+      ) : null}
+      {hostBadge ? <HostBadge key="host" badge={hostBadge} /> : null}
+      {hostBadge && showDestination ? (
+        <Text key="separator-host" style={styles.headerProjectSeparator}>
+          ·
+        </Text>
+      ) : null}
+      {showDestination ? <DestinationChip key="destination" sync={sync} /> : null}
     </View>
   );
 }
+
+/**
+ * Where a workspace syncs: a database glyph and the configured destination name, or a grey
+ * glyph and `local`. One tap opens the effective destination: URL, authenticated account,
+ * matched rule, actual audience and any remediation guidance.
+ */
+function DestinationChip({ sync }: { sync: SyncDestinationState }) {
+  const destination = sync.destination;
+  const audience = destination ? syncAudienceLabel(destination.audience) : "Not uploaded";
+  const account = destination?.actor ? `@${destination.actor}` : "Not signed in";
+  return (
+    <DropdownMenu compactMode="sheet">
+      <DropdownMenuTrigger
+        testID="workspace-header-destination"
+        accessibilityLabel={
+          destination
+            ? `Syncs to ${destination.name}. Tap for details.`
+            : "Local workspace. Tap for details."
+        }
+      >
+        <View style={styles.headerDestination}>
+          <ThemedDatabase
+            size={HOST_BADGE_ICON_SIZE}
+            style={styles.headerDestinationIcon}
+            uniProps={destination ? destinationIconMapping : localIconMapping}
+          />
+          <Text
+            style={[styles.headerProjectTitle, !destination && styles.headerDestinationLocal]}
+            numberOfLines={1}
+          >
+            {destination?.name ?? "local"}
+          </Text>
+        </View>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" width={280} testID="workspace-header-destination-details">
+        <DropdownMenuLabel>{destination ? destination.name : "Local workspace"}</DropdownMenuLabel>
+        <DropdownMenuItem disabled testID="sync-destination-endpoint">
+          {`URL: ${destination?.endpoint ?? "none"}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-audience">
+          {`Audience: ${audience}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-account">
+          {`Account: ${account}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-rule">
+          {`Matched rule: ${destination?.matchedRule ?? "none"}`}
+        </DropdownMenuItem>
+        {sync.error ? <DropdownMenuHint>{syncNoticeReason(sync.error)}</DropdownMenuHint> : null}
+        {destination && !sync.mentionsAvailable ? (
+          <DropdownMenuHint>Mentions are not available for this destination.</DropdownMenuHint>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+const ThemedDatabase = withUnistyles(Database);
+const destinationIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const localIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundExtraMuted });
 
 interface WorkspaceHeaderTitleBarProps {
   isLoading: boolean;
@@ -1017,6 +1105,7 @@ function WorkspaceHeaderTitleBar({
             subtitle={subtitle}
             isSubtitleDistinct={isSubtitleDistinct}
             serverId={normalizedServerId}
+            workspaceId={normalizedWorkspaceId}
           />
         </View>
       )}
@@ -4109,6 +4198,7 @@ function WorkspaceScreenContent({
           workspaceId={normalizedWorkspaceId}
           isRouteFocused={isRouteFocused}
         />
+        <WorkspaceSyncNotice serverId={normalizedServerId} workspaceId={normalizedWorkspaceId} />
         <View style={styles.threePaneRow}>
           <FloatingPanelPortalHostNameProvider hostName={workspaceFloatingPanelPortalHostName}>
             {workspaceCenterColumn}
@@ -4219,6 +4309,19 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foregroundExtraMuted,
     fontSize: theme.fontSize.sm,
     flexShrink: 0,
+  },
+  headerDestination: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    minWidth: 0,
+    flexShrink: 1,
+  },
+  headerDestinationIcon: {
+    flexShrink: 0,
+  },
+  headerDestinationLocal: {
+    color: theme.colors.foregroundExtraMuted,
   },
   headerTitleSkeleton: {
     width: 220,

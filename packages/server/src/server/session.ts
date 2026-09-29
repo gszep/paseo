@@ -718,6 +718,8 @@ export class Session {
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
+  // Reconcile Chi sync once per client session (a real reconnect), not on every fetch.
+  private chiReconciled = false;
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
@@ -3137,24 +3139,25 @@ export class Session {
           });
         }
         return;
-      case "chi.native.share.request":
+      case "chi.sync.status.request":
         try {
           if (!this.agentManager.chi) throw new Error("chi-unavailable");
-          const result = await this.agentManager.chi.share(msg.agentId, msg.repo);
-          if (!result.sourceId || !result.head) throw new Error("chi-capture-incomplete");
+          if (msg.action === "retry" && !this.authorization.allowsPermission("workspace.write"))
+            throw new Error("chi-sync-retry-forbidden");
+          const workspace = await this.workspaceRegistry.get(msg.workspaceId);
+          if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
+          const result = await this.agentManager.chi.syncStatus({
+            workspaceId: msg.workspaceId,
+            cwd: workspace.cwd,
+            retry: msg.action === "retry",
+          });
           this.emit({
-            type: "chi.native.share.response",
-            payload: {
-              requestId: msg.requestId,
-              outcome: "ready",
-              sourceId: result.sourceId,
-              snapshotId: result.head,
-              actor: result.actor,
-            },
+            type: "chi.sync.status.response",
+            payload: { requestId: msg.requestId, outcome: "ready", ...result },
           });
         } catch (error) {
           this.emit({
-            type: "chi.native.share.response",
+            type: "chi.sync.status.response",
             payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
           });
         }
@@ -6485,6 +6488,12 @@ export class Session {
       const payload = request.sync
         ? await this.readAgentDirectorySync(request)
         : await this.listFetchAgentsEntries(request);
+      // Reconcile Chi sync on the first fetch of a client session (a real
+      // reconnect), never on every fetch — repeated reconciles add churn.
+      if (!this.chiReconciled) {
+        this.chiReconciled = true;
+        void this.agentManager.chi?.reconcilePending();
+      }
       const snapshotUpdatedAtByAgentId = new Map<string, number>();
       for (const entry of payload.entries) {
         const parsedUpdatedAt = Date.parse(entry.agent.updatedAt);

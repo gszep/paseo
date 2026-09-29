@@ -782,3 +782,34 @@ describe.skipIf(process.platform === "win32")("persisted config file permissions
     }
   });
 });
+
+describe("PersistedConfigSchema chi destinations config", () => {
+  test("accepts destinations, exact and wildcard mappings, and audiences", () => {
+    const parsed = PersistedConfigSchema.parse({
+      chi: {
+        destinations: {
+          henkaku: { name: "Henkaku", endpoint: "https://chi-backend.invalid" },
+        },
+        mappings: [
+          { repo: "github:henkaku-center/chi", destination: "henkaku", audience: "shared" },
+          { repo: "github:henkaku-center/*", destination: "henkaku" },
+        ],
+      },
+    });
+
+    expect(parsed.chi?.destinations?.henkaku?.name).toBe("Henkaku");
+    expect(parsed.chi?.mappings).toHaveLength(2);
+    expect(parsed.chi?.mappings?.[1]?.audience).toBeUndefined();
+  });
+
+  test("rejects an unknown audience value", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        chi: {
+          destinations: {},
+          mappings: [{ repo: "github:a/b", destination: "d", audience: "team" }],
+        },
+      }),
+    ).toThrow();
+  });
+});

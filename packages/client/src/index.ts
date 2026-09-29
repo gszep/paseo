@@ -497,7 +497,7 @@ export interface PaseoApi {
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
   readonly chi: {
-    share: DaemonClient["shareChi"];
+    sync: DaemonClient["chiSyncStatus"];
     mentions: DaemonClient["chiMentions"];
     continue: DaemonClient["continueChi"];
     manage: DaemonClient["manageChiConversation"];
@@ -741,7 +741,7 @@ export function createPaseoApi(
       subscribe: listenAgents,
     },
     chi: {
-      share: (input) => daemonClient.shareChi(input),
+      sync: (input) => daemonClient.chiSyncStatus(input),
       mentions: (input) => daemonClient.chiMentions(input),
       continue: (input) => daemonClient.continueChi(input),
       manage: (input) => daemonClient.manageChiConversation(input),

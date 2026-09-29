@@ -409,6 +409,7 @@ export interface PaseoDaemonConfig {
   skillSelection?: AgentSkillSelection;
   pluginsEnabled?: boolean;
   plugins?: Record<string, PluginSource>;
+  chi?: PersistedConfig["chi"];
   staticDir: string;
   mcpDebug: boolean;
   isDev?: boolean;
@@ -526,6 +527,11 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function applyChiConfig(initialConfig: MutableDaemonConfig, chi: PersistedConfig["chi"]): void {
+  if (chi === undefined) return;
+  initialConfig.chi = { destinations: chi.destinations ?? {}, mappings: chi.mappings ?? [] };
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -563,6 +569,8 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   if (config.agentProfiles !== undefined) {
     initialConfig.agentProfiles = config.agentProfiles;
   }
+
+  applyChiConfig(initialConfig, config.chi);
 
   return initialConfig;
 }
@@ -922,7 +930,14 @@ export async function createPaseoDaemon(
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
-    chi: { home: config.paseoHome, serverId, authority: dependencies.chiAuthority },
+    chi: {
+      home: config.paseoHome,
+      serverId,
+      authority: dependencies.chiAuthority,
+      getChiConfig: () => daemonConfigStore.get().chi,
+      listStoredAgents: () => agentStorage.list(),
+      getStoredAgent: (agentId) => agentStorage.get(agentId),
+    },
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
     providerDefinitions: initialAgentManagerState.providerDefinitions,
@@ -936,6 +951,11 @@ export async function createPaseoDaemon(
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
+  const refreshChiDestinations = () => {
+    void agentManager.chi?.onDestinationsChanged();
+  };
+  daemonConfigStore.onFieldChange("chi.destinations", refreshChiDestinations);
+  daemonConfigStore.onFieldChange("chi.mappings", refreshChiDestinations);
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
       providerSnapshotManager.replacePluginProviders(pluginRuntime.getProviderRegistrations()),
@@ -1763,6 +1783,8 @@ export async function createPaseoDaemon(
         }
       });
 
+      // Retry any capture that was outstanding when the daemon last stopped.
+      void agentManager.chi?.reconcilePending().catch(() => undefined);
       // Start speech service after listening so synchronous Sherpa native
       // model loading doesn't block the server from accepting connections.
       speechService.start();

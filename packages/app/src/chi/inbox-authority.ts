@@ -6,6 +6,26 @@ export function sameInboxPrincipal(a: InboxPrincipal, b: InboxPrincipal) {
   return Boolean(a.deployment && a.actor === b.actor && a.deployment === b.deployment);
 }
 
+/** Host connection states that mean a host has finished its first connection attempt. */
+export type InboxHostConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
+
+/**
+ * True once every configured host has reported a terminal connection state (or
+ * there are no hosts). Until then the inbox must show a loading state rather
+ * than claim no host is signed in — a host that is still connecting is not a
+ * settled "no match".
+ */
+export function inboxHostsSettled(
+  ids: readonly string[],
+  statusOf: (id: string) => InboxHostConnectionStatus | undefined,
+): boolean {
+  if (ids.length === 0) return true;
+  return ids.every((id) => {
+    const status = statusOf(id);
+    return status === "online" || status === "offline" || status === "error";
+  });
+}
+
 // Shared by the sidebar and inbox. Transport churn must never change the signed-in recipient.
 export function createInboxAuthority(storage: ContinuationStorage) {
   let principal: InboxPrincipal | null = null;

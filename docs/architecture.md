@@ -53,6 +53,17 @@ the locked installed package beneath `packages/server/node_modules`: npm omits a
 hoisted workspace dependency even when named in `bundleDependencies`. It is a
 source-integration artifact, not a published package release.
 
+Managed capture scans the export locally with the host `gitleaks` using the same
+extended default rules, `--ignore-gitleaks-allow` and redacted output as the
+server scan, before any evidence POST. The daemon finds `gitleaks` on `PATH` or,
+when it is absent there, under `/opt/homebrew/bin`, `/usr/local/bin` or
+`~/.local/bin`; without it capture fails closed
+(`capture-local-scanner-unavailable`) rather than uploading unscanned. A local
+finding (`capture-local-secret-rejected`) or a server rejection
+(`server-secret-scan-rejected`) is terminal: nothing is uploaded and automatic
+retries stop until the user retries explicitly. A missing scanner stays
+retryable once installed. The server scan remains the authority.
+
 Capture association errors retain the HTTP status and an allowlisted public Chi
 reason (for example `evidence-http-413-native-store-limit`). The native client
 reads at most 1 KiB of a failed response; unknown, malformed and oversized bodies
