@@ -62,7 +62,7 @@ function parseBrandFaviconSet(value, label) {
  */
 export function parseBrandJson(raw) {
   if (typeof raw !== "object" || raw === null) throw new Error("brand.json must be an object");
-  const { name, mark, workingIndicator, titleMark, icons } = raw;
+  const { name, mark, workingIndicator, titleMark, icons, attribution } = raw;
   if (typeof name !== "string" || !BRAND_NAME_PATTERN.test(name)) {
     throw new Error("Invalid brand name");
   }
@@ -78,6 +78,7 @@ export function parseBrandJson(raw) {
     workingIndicator: parseWorkingIndicatorInput(workingIndicator),
     titleMark: typeof titleMark === "string" ? titleMark : null,
     icons: parseBrandIcons(icons),
+    attribution: parseAttributionInput(attribution),
   };
 }
 
@@ -157,6 +158,28 @@ function parseBrandIcons(icons) {
   };
 }
 
+function parseAttributionInput(attribution) {
+  if (attribution === null || attribution === undefined) return null;
+  if (typeof attribution !== "object") throw new Error("Invalid brand attribution");
+  const { label, url } = attribution;
+  if (
+    typeof label !== "string" ||
+    label.trim().length === 0 ||
+    label.length > 60 ||
+    [...label].some((char) => char.charCodeAt(0) < 0x20)
+  ) {
+    throw new Error("Invalid brand attribution label");
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid brand attribution url");
+  }
+  if (parsed.protocol !== "https:") throw new Error("Brand attribution url must be HTTPS");
+  return { label: label.trim(), url };
+}
+
 /** Reads and validates `brand.json` from the given directory, or null when unset. */
 export async function readBrand(dir) {
   if (!dir) return null;
@@ -205,6 +228,7 @@ export function brandRuntimeConfig(brand) {
           },
         }
       : null,
+    attribution: brand.attribution,
   };
 }
 

@@ -18,6 +18,7 @@ const CHI_BRAND = {
     intervalMs: 90,
   },
   titleMark: "千",
+  attribution: { label: "Powered by Paseo", url: "https://paseo.sh" },
   icons: {
     themeColor: "#181b1a",
     backgroundColor: "#181b1a",
@@ -103,9 +104,19 @@ describe("hosted brand inputs", () => {
     expect(html).toContain('<script src="/register-sw.js" defer></script></head>');
   });
 
-  it("exposes a runtime brand with favicon URLs", () => {
+  it("exposes a runtime brand with favicon URLs and attribution", () => {
     const runtime = brandRuntimeConfig(parseBrandJson(CHI_BRAND));
     expect(runtime!.favicons!.light.running).toBe("/brand/favicon-light-running.png");
+    expect(runtime!.attribution).toEqual({ label: "Powered by Paseo", url: "https://paseo.sh" });
+  });
+
+  it("rejects an insecure attribution URL", () => {
+    expect(() =>
+      parseBrandJson({
+        ...CHI_BRAND,
+        attribution: { label: "Powered by Paseo", url: "http://paseo.sh" },
+      }),
+    ).toThrow();
   });
 
   it("leaves the default build untouched when no brand is supplied", () => {

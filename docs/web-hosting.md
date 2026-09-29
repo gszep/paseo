@@ -48,10 +48,11 @@ manifest and shell, and injects the runtime brand into `index.html` as
 brand — native, Electron and daemon-served builds never set it.
 
 `brand.json` carries the app name, the mark paths shown on the splash and home
-screens, the working-indicator frames and interval, the window-title mark, and
-the icon set (manifest any/maskable, apple-touch, favicon and its status
-variants). The app reads the injected value in `packages/app/src/branding`. The
-mark is authored as SVG paths, so no font is referenced at runtime.
+screens, the working-indicator frames and interval, the window-title mark, the
+icon set (manifest any/maskable, apple-touch, favicon and its status variants),
+and an optional home-screen attribution link that replaces the default community
+links. The app reads the injected value in `packages/app/src/branding`. The mark
+is authored as SVG paths, so no font is referenced at runtime.
 
 The working indicator is the turn-footer loader (`BrandWorkingIndicator`); a
 branded sequence replaces the built-in synced loader and settles under

@@ -21,6 +21,7 @@ const CHI_INPUT = {
       attention: "/brand/favicon-dark-attention.png",
     },
   },
+  attribution: { label: "Powered by Paseo", url: "https://paseo.sh" },
 };
 
 afterEach(() => {
@@ -33,6 +34,7 @@ describe("brand config", () => {
     expect(PASEO_BRAND.name).toBe("Paseo");
     expect(PASEO_BRAND.titleMark).toBeNull();
     expect(PASEO_BRAND.workingIndicator).toBeNull();
+    expect(PASEO_BRAND.attribution).toBeNull();
   });
 
   test("parses a full brand and fills optional fields", () => {
@@ -41,18 +43,21 @@ describe("brand config", () => {
     expect(brand.titleMark).toBe("千");
     expect(brand.workingIndicator).toEqual(CHI_INPUT.workingIndicator);
     expect(brand.favicons?.dark.running).toBe("/brand/favicon-dark-running.png");
+    expect(brand.attribution).toEqual({ label: "Powered by Paseo", url: "https://paseo.sh" });
   });
 
-  test("fills null working indicator, title mark and favicons", () => {
+  test("fills null working indicator, title mark, favicons and attribution", () => {
     const brand = parseBrandConfig({
       ...CHI_INPUT,
       workingIndicator: null,
       titleMark: null,
       favicons: null,
+      attribution: null,
     });
     expect(brand.workingIndicator).toBeNull();
     expect(brand.titleMark).toBeNull();
     expect(brand.favicons).toBeNull();
+    expect(brand.attribution).toBeNull();
   });
 
   test("resolves an injected brand", () => {
@@ -66,6 +71,8 @@ describe("brand config", () => {
     [{ ...CHI_INPUT, workingIndicator: { frames: [], intervalMs: 90 } }],
     [{ ...CHI_INPUT, workingIndicator: { frames: ["干"], intervalMs: 0 } }],
     [{ ...CHI_INPUT, favicons: { light: {}, dark: {} } }],
+    [{ ...CHI_INPUT, attribution: { label: "", url: "https://paseo.sh" } }],
+    [{ ...CHI_INPUT, attribution: { label: "x", url: "http://paseo.sh" } }],
   ])("rejects malformed input %#", (input) => {
     expect(() => parseBrandConfig(input)).toThrow();
   });

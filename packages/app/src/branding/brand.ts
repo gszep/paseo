@@ -33,6 +33,13 @@ export interface BrandFavicons {
   dark: BrandFaviconSet;
 }
 
+export interface BrandAttribution {
+  /** Short footer label, e.g. "Powered by Paseo". */
+  label: string;
+  /** HTTPS destination opened in the user's browser. */
+  url: string;
+}
+
 export interface BrandConfig {
   /** App name shown in the manifest, window title and PWA chrome. */
   name: string;
@@ -44,6 +51,8 @@ export interface BrandConfig {
   titleMark: string | null;
   /** Favicon URLs by colour scheme and agent status, or null for the defaults. */
   favicons: BrandFavicons | null;
+  /** Home-screen attribution, or null to keep the default community links. */
+  attribution: BrandAttribution | null;
 }
 
 /** The default Paseo brand, matching the upstream app. */
@@ -58,6 +67,7 @@ export const PASEO_BRAND: BrandConfig = {
   workingIndicator: null,
   titleMark: null,
   favicons: null,
+  attribution: null,
 };
 
 const NAME_PATTERN = /^[\p{L}\p{N} ·_-]{1,40}$/u;
@@ -123,13 +133,39 @@ function parseFavicons(value: unknown): BrandFavicons | null {
   };
 }
 
+function parseAttribution(value: unknown): BrandAttribution | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object") throw new Error("brand.attribution must be an object");
+  const { label, url } = value as Record<string, unknown>;
+  if (
+    typeof label !== "string" ||
+    label.trim().length === 0 ||
+    label.length > 60 ||
+    [...label].some((char) => char.charCodeAt(0) < 0x20)
+  ) {
+    throw new Error("brand.attribution.label is invalid");
+  }
+  if (typeof url !== "string") throw new Error("brand.attribution.url is invalid");
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("brand.attribution.url is invalid");
+  }
+  if (parsed.protocol !== "https:") throw new Error("brand.attribution.url must be HTTPS");
+  return { label: label.trim(), url };
+}
+
 /**
  * Validates an injected brand and fills missing optional fields with defaults.
  * Throws on malformed input rather than silently rendering a half-brand.
  */
 export function parseBrandConfig(input: unknown): BrandConfig {
   if (typeof input !== "object" || input === null) throw new Error("brand must be an object");
-  const { name, mark, workingIndicator, titleMark, favicons } = input as Record<string, unknown>;
+  const { name, mark, workingIndicator, titleMark, favicons, attribution } = input as Record<
+    string,
+    unknown
+  >;
   if (typeof name !== "string" || !NAME_PATTERN.test(name)) {
     throw new Error("brand.name is invalid");
   }
@@ -145,6 +181,7 @@ export function parseBrandConfig(input: unknown): BrandConfig {
     workingIndicator: parseWorkingIndicator(workingIndicator),
     titleMark: typeof titleMark === "string" ? titleMark : null,
     favicons: parseFavicons(favicons),
+    attribution: parseAttribution(attribution),
   };
 }
 
