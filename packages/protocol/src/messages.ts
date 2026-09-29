@@ -5057,6 +5057,11 @@ export const SendAgentMessageResponseMessageSchema = z.object({
     admission: z.enum(["not_admitted", "unknown"]).optional(),
     /** Stable machine code (e.g. "host_restarting") for retryable rejections. */
     errorCode: z.string().optional(),
+    /**
+     * Epoch ms when the draining host expects to swap workers. Present with
+     * `errorCode: "host_restarting"` so clients can retry until then.
+     */
+    drainDeadlineAt: z.number().int().nonnegative().optional(),
   }),
 });
 

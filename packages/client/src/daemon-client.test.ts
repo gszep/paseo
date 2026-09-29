@@ -4051,14 +4051,63 @@ function sendRequestsIn(
   return requests;
 }
 
-test("sendAgentMessage auto-resends a host_restarting rejection once with the same messageId", async () => {
+function respondHostRestarting(
+  mock: ReturnType<typeof createMockTransport>,
+  request: Record<string, unknown>,
+  drainDeadlineAt?: number,
+): void {
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "agent",
+        accepted: false,
+        error: "host_restarting",
+        errorCode: "host_restarting",
+        admission: "not_admitted",
+        ...(drainDeadlineAt !== undefined ? { drainDeadlineAt } : {}),
+      },
+    }),
+  );
+}
+
+function respondAccepted(
+  mock: ReturnType<typeof createMockTransport>,
+  request: Record<string, unknown>,
+): void {
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: request.requestId,
+        agentId: "agent",
+        accepted: true,
+        error: null,
+      },
+    }),
+  );
+}
+
+async function waitForRequestCount(
+  mock: ReturnType<typeof createMockTransport>,
+  count: number,
+): Promise<Array<Record<string, unknown>>> {
+  const deadline = Date.now() + 3_000;
+  while (sendRequestsIn(mock.sent).length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return sendRequestsIn(mock.sent);
+}
+
+test("sendAgentMessage auto-resends after the replacement worker reconnects, same messageId", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
     url: "ws://test",
     clientId: "clsk_unit_test",
     logger: createMockLogger(),
     reconnect: { enabled: true, baseDelayMs: 1, maxDelayMs: 5 },
-    hostRestartResendTimeoutMs: 2_000,
+    hostRestartRetryIntervalMs: 1,
     transportFactory: () => mock.transport,
   });
   clients.push(client);
@@ -4068,58 +4117,66 @@ test("sendAgentMessage auto-resends a host_restarting rejection once with the sa
 
   const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
   const first = sendRequestsIn(mock.sent)[0]!;
-  mock.triggerMessage(
-    wrapSessionMessage({
-      type: "send_agent_message_response",
-      payload: {
-        requestId: first.requestId,
-        agentId: "agent",
-        accepted: false,
-        error: "host_restarting",
-        errorCode: "host_restarting",
-        admission: "not_admitted",
-      },
-    }),
-  );
+  respondHostRestarting(mock, first, Date.now() + 60_000);
 
   // The draining worker's connection drops; the client reconnects to the
-  // replacement and resends without a new messageId.
+  // replacement and retries immediately, without a new messageId.
   mock.triggerClose();
   await new Promise((resolve) => setTimeout(resolve, 25));
   mock.triggerOpen({ preserveSent: true });
 
-  const deadline = Date.now() + 2_000;
-  while (sendRequestsIn(mock.sent).length < 2 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  const requests = sendRequestsIn(mock.sent);
-  expect(requests).toHaveLength(2);
+  const requests = await waitForRequestCount(mock, 2);
+  expect(requests.length).toBeGreaterThanOrEqual(2);
   expect(requests[0]!.messageId).toBe("stable-message-id");
   expect(requests[1]!.messageId).toBe("stable-message-id");
   expect(requests[1]!.requestId).not.toBe(requests[0]!.requestId);
 
-  mock.triggerMessage(
-    wrapSessionMessage({
-      type: "send_agent_message_response",
-      payload: {
-        requestId: requests[1]!.requestId,
-        agentId: "agent",
-        accepted: true,
-        error: null,
-      },
-    }),
-  );
+  respondAccepted(mock, requests[1]!);
   await expect(sent).resolves.toBeUndefined();
 });
 
-test("sendAgentMessage does not retry a second host_restarting or any other error", async () => {
+test("sendAgentMessage retries repeatedly until accepted, always with the same messageId", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
     url: "ws://test",
     clientId: "clsk_unit_test",
     logger: createMockLogger(),
-    reconnect: { enabled: true, baseDelayMs: 1, maxDelayMs: 5 },
-    hostRestartResendTimeoutMs: 2_000,
+    reconnect: { enabled: false },
+    hostRestartRetryIntervalMs: 1,
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connectPromise;
+
+  const deadlineAt = Date.now() + 60_000;
+  const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const requests = await waitForRequestCount(mock, attempt + 1);
+    respondHostRestarting(mock, requests[attempt]!, deadlineAt);
+  }
+  const requests = await waitForRequestCount(mock, 5);
+  expect(requests.length).toBeGreaterThanOrEqual(5);
+  const messageIds = new Set(requests.map((request) => request.messageId));
+  expect(messageIds).toEqual(new Set(["stable-message-id"]));
+  const requestIds = new Set(requests.map((request) => request.requestId));
+  expect(requestIds.size).toBe(requests.length);
+
+  respondAccepted(mock, requests[4]!);
+  await expect(sent).resolves.toBeUndefined();
+});
+
+test("sendAgentMessage gives up and throws the retryable error after the drain deadline", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    hostRestartResendGraceMs: 0,
+    hostRestartRetryIntervalMs: 1,
     transportFactory: () => mock.transport,
   });
   clients.push(client);
@@ -4129,46 +4186,13 @@ test("sendAgentMessage does not retry a second host_restarting or any other erro
 
   const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
   const first = sendRequestsIn(mock.sent)[0]!;
-  mock.triggerMessage(
-    wrapSessionMessage({
-      type: "send_agent_message_response",
-      payload: {
-        requestId: first.requestId,
-        agentId: "agent",
-        accepted: false,
-        error: "host_restarting",
-        errorCode: "host_restarting",
-        admission: "not_admitted",
-      },
-    }),
-  );
-  mock.triggerClose();
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  mock.triggerOpen({ preserveSent: true });
-  const deadline = Date.now() + 2_000;
-  while (sendRequestsIn(mock.sent).length < 2 && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  const requests = sendRequestsIn(mock.sent);
-  expect(requests).toHaveLength(2);
-  mock.triggerMessage(
-    wrapSessionMessage({
-      type: "send_agent_message_response",
-      payload: {
-        requestId: requests[1]!.requestId,
-        agentId: "agent",
-        accepted: false,
-        error: "host_restarting",
-        errorCode: "host_restarting",
-        admission: "not_admitted",
-      },
-    }),
-  );
+  respondHostRestarting(mock, first, Date.now() - 1_000);
+
   await expect(sent).rejects.toMatchObject({
     message: "host_restarting",
     failure: { outcome: "not_committed" },
   });
-  expect(sendRequestsIn(mock.sent)).toHaveLength(2);
+  expect(sendRequestsIn(mock.sent)).toHaveLength(1);
 });
 
 test("sendAgentMessage never retries an unrelated rejection", async () => {

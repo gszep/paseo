@@ -348,10 +348,16 @@ export interface DaemonClientConfig {
     maxDelayMs?: number;
   };
   /**
-   * How long an automatic resend of a `host_restarting`-rejected prompt waits
-   * for the replacement worker before surfacing the retryable error.
+   * Fallback window for resending a `host_restarting`-rejected prompt when the
+   * rejection did not carry a drain deadline.
    */
   hostRestartResendTimeoutMs?: number;
+  /** Retry interval while waiting for the replacement worker (default 5–15s). */
+  hostRestartRetryIntervalMs?: number;
+  /** Added to the drain deadline before giving up the automatic resend. */
+  hostRestartResendGraceMs?: number;
+  /** Set false to surface a host_restarting rejection instead of auto-resending. */
+  hostRestartAutoResend?: boolean;
   runtimeMetricsIntervalMs?: number;
   runtimeMetricsWindowMs?: number;
   trace?: DaemonClientTrace;
@@ -984,6 +990,18 @@ export class RestartDrainConflictError extends Error {
   }
 }
 
+/**
+ * A prompt rejected because the host is draining for a restart and was
+ * provably not admitted. Carries the drain's deadline so the caller can retry
+ * until the replacement worker is up.
+ */
+export class HostRestartingOperationError extends ChiOperationError {
+  constructor(readonly drainDeadlineAt: number | null) {
+    super("host_restarting", { accessLost: false, outcome: "not_committed" });
+    this.name = "HostRestartingOperationError";
+  }
+}
+
 class DaemonRpcError extends Error {
   readonly requestId: string;
   readonly requestType?: string;
@@ -1034,12 +1052,13 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
  * not admitted. Only this exact failure is safe to auto-resend; generic
  * disconnects and outcome-unknown errors are never retried here.
  */
-function isHostRestartingFailure(error: unknown): boolean {
-  return (
-    error instanceof ChiOperationError &&
-    error.message === "host_restarting" &&
-    error.failure?.outcome === "not_committed"
-  );
+function isHostRestartingFailure(error: unknown): error is HostRestartingOperationError {
+  return error instanceof HostRestartingOperationError;
+}
+
+function randomHostRestartRetryIntervalMs(): number {
+  const span = HOST_RESTART_RETRY_INTERVAL_MAX_MS - HOST_RESTART_RETRY_INTERVAL_MIN_MS;
+  return HOST_RESTART_RETRY_INTERVAL_MIN_MS + Math.floor(Math.random() * (span + 1));
 }
 
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
@@ -1055,11 +1074,14 @@ const LIVENESS_FAILURE_RECONNECT_THRESHOLD = 2;
 /** Default timeout for waiting for connection before sending queued messages */
 const DEFAULT_SEND_QUEUE_TIMEOUT_MS = DEFAULT_SESSION_RPC_TIMEOUT_MS;
 /**
- * How long an auto-resend waits for the replacement worker after a
- * `host_restarting` rejection. Long enough for a worker swap, short enough that
- * a drain which never completes still surfaces the retryable error.
+ * Fallback window for resending a `host_restarting`-rejected prompt when the
+ * rejection did not carry the drain's deadline.
  */
 const HOST_RESTART_RESEND_TIMEOUT_MS = 2 * 60 * 1000;
+/** Added to the drain deadline before the automatic resend gives up. */
+const HOST_RESTART_RESEND_GRACE_MS = 15_000;
+const HOST_RESTART_RETRY_INTERVAL_MIN_MS = 5_000;
+const HOST_RESTART_RETRY_INTERVAL_MAX_MS = 15_000;
 const DEFAULT_DICTATION_FINISH_ACCEPT_TIMEOUT_MS = DEFAULT_SESSION_RPC_TIMEOUT_MS;
 const DEFAULT_DICTATION_FINISH_FALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_DICTATION_FINISH_TIMEOUT_GRACE_MS = 5000;
@@ -3517,20 +3539,103 @@ export class DaemonClient {
         // A downgraded host may already have admitted an earlier attempt.
         outcome: "unknown",
       });
-    // One stable messageId across the automatic resend: the server's receipt
-    // fingerprint guarantees exactly-once even if the first attempt was
-    // ambiguously received.
+    // One stable messageId across every automatic retry: the server's receipt
+    // fingerprint guarantees exactly-once even if an attempt was ambiguously
+    // received.
     const messageId = options?.messageId ?? crypto.randomUUID();
+    // Snapshot before the first attempt so a reconnect that completes before
+    // the rejection is handled still triggers an immediate retry.
+    const generationBeforeSend = this.connectionGeneration;
     try {
       await this.sendAgentMessageOnce(agentId, text, options, messageId);
       return;
     } catch (error) {
-      if (!isHostRestartingFailure(error)) throw error;
-      // A draining daemon rejected this prompt before admitting it. Wait for the
-      // replacement worker's connection, then resend the identical request once.
-      const reconnected = await this.waitForReplacementWorkerConnection();
-      if (!reconnected) throw error;
-      await this.sendAgentMessageOnce(agentId, text, options, messageId);
+      if (!isHostRestartingFailure(error) || this.config.hostRestartAutoResend === false) {
+        throw error;
+      }
+      await this.retryHostRestartingPrompt(
+        agentId,
+        text,
+        options,
+        messageId,
+        error,
+        generationBeforeSend,
+      );
+    }
+  }
+
+  /**
+   * Retry a provably not-admitted `host_restarting` prompt until it is accepted,
+   * a non-host_restarting error occurs, or the drain deadline (+ grace) passes.
+   * Every rejected attempt writes nothing, so repeats are safe; the stable
+   * messageId keeps it exactly-once across the worker swap.
+   */
+  private async retryHostRestartingPrompt(
+    agentId: string,
+    text: string,
+    options: SendMessageOptions | undefined,
+    messageId: string,
+    firstError: HostRestartingOperationError,
+    generationBeforeSend: number,
+  ): Promise<void> {
+    const graceMs = this.config.hostRestartResendGraceMs ?? HOST_RESTART_RESEND_GRACE_MS;
+    const fallbackWindowMs =
+      this.config.hostRestartResendTimeoutMs ?? HOST_RESTART_RESEND_TIMEOUT_MS;
+    let lastError = firstError;
+
+    for (;;) {
+      const deadlineAt = lastError.drainDeadlineAt ?? Date.now() + fallbackWindowMs;
+      const remainingMs = deadlineAt + graceMs - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+      const intervalMs =
+        this.config.hostRestartRetryIntervalMs ?? randomHostRestartRetryIntervalMs();
+      await this.waitForRetryOpportunity(Math.min(intervalMs, remainingMs), generationBeforeSend);
+      try {
+        await this.sendAgentMessageOnce(agentId, text, options, messageId);
+        return;
+      } catch (error) {
+        if (!isHostRestartingFailure(error)) throw error;
+        lastError = error;
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Wait for the retry interval or an earlier reconnect. `sinceGeneration`
+   * predates the first attempt, so a reconnect that already completed resolves
+   * this immediately.
+   */
+  private async waitForRetryOpportunity(
+    timeoutMs: number,
+    sinceGeneration: number,
+  ): Promise<boolean> {
+    if (this.connectionState.status === "disposed") {
+      return false;
+    }
+    const subscription: { unsubscribe: (() => void) | null } = { unsubscribe: null };
+    const reconnected = new Promise<boolean>((resolve) => {
+      subscription.unsubscribe = this.subscribeConnectionStatus((status) => {
+        const grew = status.status === "connected" && this.connectionGeneration > sinceGeneration;
+        if (!grew && status.status !== "disposed") {
+          return;
+        }
+        subscription.unsubscribe?.();
+        resolve(grew);
+      });
+    });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([reconnected, timedOut]);
+    } finally {
+      subscription.unsubscribe?.();
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -3569,51 +3674,16 @@ export class DaemonClient {
       },
     });
     if (!payload.accepted) {
+      if (
+        payload.admission === "not_admitted" &&
+        (payload.errorCode === "host_restarting" || payload.error === "host_restarting")
+      ) {
+        throw new HostRestartingOperationError(payload.drainDeadlineAt ?? null);
+      }
       throw new ChiOperationError(payload.error ?? "sendAgentMessage rejected", {
         accessLost: false,
         outcome: payload.admission === "not_admitted" ? "not_committed" : "unknown",
       });
-    }
-  }
-
-  /**
-   * Wait until the client has completed a new connection after the draining
-   * worker's connection. Returns false (rather than throwing) when it already
-   * reconnected, is disposed, or the bound elapses, so the caller can surface
-   * the original retryable error.
-   */
-  private async waitForReplacementWorkerConnection(
-    timeoutMs = this.config.hostRestartResendTimeoutMs ?? HOST_RESTART_RESEND_TIMEOUT_MS,
-  ): Promise<boolean> {
-    if (this.connectionState.status === "disposed") {
-      return false;
-    }
-    const startingGeneration = this.connectionGeneration;
-    if (
-      this.connectionState.status === "connected" &&
-      this.connectionGeneration > startingGeneration
-    ) {
-      return true;
-    }
-    const subscription: { unsubscribe: (() => void) | null } = { unsubscribe: null };
-    const connected = new Promise<boolean>((resolve) => {
-      subscription.unsubscribe = this.subscribeConnectionStatus((status) => {
-        const reconnected =
-          status.status === "connected" && this.connectionGeneration > startingGeneration;
-        if (!reconnected && status.status !== "disposed") {
-          return;
-        }
-        subscription.unsubscribe?.();
-        resolve(reconnected);
-      });
-    });
-    const timedOut = new Promise<boolean>((resolve) => {
-      setTimeout(() => resolve(false), timeoutMs);
-    });
-    try {
-      return await Promise.race([connected, timedOut]);
-    } finally {
-      subscription.unsubscribe?.();
     }
   }
 
