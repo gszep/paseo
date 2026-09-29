@@ -6,7 +6,11 @@ import {
   type DaemonInstance,
 } from "@getpaseo/server/daemon-control";
 import { setTimeout as delay } from "node:timers/promises";
-import { RestartDrainTimeoutError } from "@getpaseo/client/internal/daemon-client";
+import {
+  RestartDrainConflictError,
+  RestartDrainTimeoutError,
+} from "@getpaseo/client/internal/daemon-client";
+import type { RestartDrainingStatusPayload } from "@getpaseo/client/internal/daemon-client";
 import { connectToDaemon } from "../../utils/client.js";
 import { withOutput, type CommandOptions } from "../../output/index.js";
 import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
@@ -26,7 +30,9 @@ export function daemonRestartCommand(): Command {
     .option("--timeout <seconds>", "Replacement readiness deadline (default: 600)")
     .option(
       "--wait-idle",
-      "Wait until every agent has settled before restarting (drains running turns)",
+      "Wait until every agent has settled before restarting (drains running turns). " +
+        "An agent that runs this in its own foreground turn waits for itself until timeout; " +
+        "schedule it in a detached session group instead",
     )
     .option(
       "--idle-timeout <duration>",
@@ -51,15 +57,49 @@ function formatDrainTimeout(error: RestartDrainTimeoutError): { code: string; me
 
 function drainProgressReporter() {
   let lastSignature = "";
-  return (runningAgents: string[]) => {
-    const signature = runningAgents.join(",");
+  return (status: RestartDrainingStatusPayload) => {
+    const agents =
+      status.agents ??
+      status.runningAgents.map((agentId) => ({
+        agentId,
+        title: null,
+        lifecycle: "running",
+        waitingForPermission: false,
+      }));
+    const pendingAdmissions = status.pendingAdmissions ?? 0;
+    const signature = JSON.stringify([
+      agents.map((agent) => [agent.agentId, agent.lifecycle, agent.waitingForPermission]),
+      pendingAdmissions,
+    ]);
     if (signature === lastSignature) return;
     lastSignature = signature;
-    const label =
-      runningAgents.length === 0
-        ? "drain complete"
-        : `${runningAgents.length} agent(s) still running: ${runningAgents.join(", ")}`;
-    process.stderr.write(`Waiting for idle before restart (${label})\n`);
+
+    if (agents.length === 0 && pendingAdmissions === 0) {
+      process.stderr.write("Waiting for idle before restart (drain complete)\n");
+      return;
+    }
+    const permissionCount = agents.filter((agent) => agent.waitingForPermission).length;
+    const lines = agents.map((agent) => {
+      const name = agent.title ? `${agent.title} (${agent.agentId})` : agent.agentId;
+      const permission = agent.waitingForPermission ? ", waiting for a human" : "";
+      return `  - ${name} [${agent.lifecycle}${permission}]`;
+    });
+    const details = [
+      `${agents.length} agent(s)`,
+      ...(pendingAdmissions > 0 ? [`${pendingAdmissions} submission(s) starting`] : []),
+      ...(permissionCount > 0 ? [`${permissionCount} waiting on a human`] : []),
+    ].join(", ");
+    process.stderr.write(`Waiting for idle before restart (${details}):\n${lines.join("\n")}\n`);
+  };
+}
+
+function formatDrainConflict(error: RestartDrainConflictError): { code: string; message: string } {
+  const running = error.runningAgents.length > 0 ? error.runningAgents.join(", ") : "(none)";
+  return {
+    code: "RESTART_DRAIN_IN_PROGRESS",
+    message:
+      "A restart drain is already in progress and owns the worker swap. " +
+      `Still running: ${running}. Wait for it to finish, or use --force to restart immediately.`,
   };
 }
 
@@ -185,11 +225,12 @@ export async function runRestartCommand(options: CommandOptions, _command: Comma
         waitIdle,
         idleTimeoutMs,
         force,
-        onDrainProgress: (status) => reportDrain(status.runningAgents),
+        onDrainProgress: reportDrain,
       });
       acknowledged = true;
     } catch (error) {
       if (error instanceof RestartDrainTimeoutError) throw formatDrainTimeout(error);
+      if (error instanceof RestartDrainConflictError) throw formatDrainConflict(error);
       if (!isReconnectFailure(error)) throw error;
     }
   } finally {

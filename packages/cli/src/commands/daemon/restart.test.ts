@@ -6,6 +6,7 @@ const { connectToDaemon } = vi.hoisted(() => ({ connectToDaemon: vi.fn() }));
 vi.mock("../../utils/client.js", () => ({ connectToDaemon }));
 
 import { RestartDrainTimeoutError } from "@getpaseo/client/internal/daemon-client";
+import { RestartDrainConflictError } from "@getpaseo/client/internal/daemon-client";
 import { runRestartCommand } from "./restart.js";
 
 const daemonTarget = { kind: "endpoint" as const, host: "127.0.0.1:12345" };
@@ -75,6 +76,21 @@ describe("runRestartCommand", () => {
     await expect(
       runRestartCommand({ daemonTarget, waitIdle: true, idleTimeout: "200ms" }, {} as Command),
     ).rejects.toMatchObject({ code: "RESTART_DRAIN_TIMEOUT" });
+  });
+
+  it("reports RESTART_DRAIN_IN_PROGRESS when another drain owns the swap", async () => {
+    connectToDaemon.mockResolvedValueOnce(
+      fakeClient({
+        pid: 100,
+        restartServer: async () => {
+          throw new RestartDrainConflictError(["agent-a"]);
+        },
+      }),
+    );
+
+    await expect(
+      runRestartCommand({ daemonTarget, waitIdle: true, idleTimeout: "1m" }, {} as Command),
+    ).rejects.toMatchObject({ code: "RESTART_DRAIN_IN_PROGRESS" });
   });
 
   it("rejects an invalid --idle-timeout before contacting the daemon", async () => {
