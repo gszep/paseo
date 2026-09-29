@@ -8,7 +8,8 @@ export function mentionError(error: unknown): string {
     "chi-github-login-required": "Sign in to GitHub on this host, then verify mention context.",
     "chi-reply-rejected":
       "The saved reply was rejected without committing. Correct it before sending a new operation.",
-    "chi-share-required": "Share this session to Chi before sending a human mention.",
+    "chi-share-required":
+      "This workspace is local. Only workspaces mapped to a destination deliver human mentions.",
     "chi-mentions-unsupported": "Update this host to use Chi mentions.",
     "chi-mention-plain-text-required":
       "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",
