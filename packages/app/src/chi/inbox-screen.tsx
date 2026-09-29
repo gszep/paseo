@@ -36,6 +36,7 @@ import { mentionError } from "./mention-errors";
 import { useInbox, useInboxTransport } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
 import { RepositoryFilter } from "./repository-filter";
+import { inboxDetailQueryOptions } from "./inbox-query";
 import {
   ALL_REPOSITORIES_OPTION_ID,
   buildInboxRows,
@@ -406,23 +407,14 @@ function HandoffDetail({
 }) {
   const cache = useQueryClient();
   const [autoOpen, setAutoOpen] = useState(openSession);
-  const query = useFetchQuery({
-    dataShape: "value",
-    queryKey: [...context.queryKey, "handoff", selected.repo, selected.id],
-    gcTime: 0,
-    staleTimeMs: 0,
-    retry: false,
-    refetchOnWindowFocus: "always",
-    queryFn: async () => {
-      const result = await context.execute({
-        action: "read",
-        id: selected.id,
-        repo: selected.repo,
-      });
-      if (result.kind !== "handoff") throw new Error("chi-invalid-response");
-      return result.handoff;
-    },
-  });
+  const query = useFetchQuery(
+    inboxDetailQueryOptions({
+      queryKey: context.queryKey,
+      repo: selected.repo,
+      id: selected.id,
+      run: context.execute,
+    }),
+  );
   const updated = useCallback(() => {
     setAutoOpen(false);
     void cache.invalidateQueries({ queryKey: context.queryKey });

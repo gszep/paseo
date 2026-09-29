@@ -297,12 +297,14 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
       timeout: 30000,
     });
     await readPage.bringToFront();
-    await expect(readPage.getByText(authorReply, { exact: true })).toBeVisible({ timeout: 30000 });
+    // The open detail refreshes on the shared 30s mention interval while visible.
+    // Wait two ticks so the exact boundary is never the test's race.
+    await expect(readPage.getByText(authorReply, { exact: true })).toBeVisible({ timeout: 45000 });
     expect(await readPage.evaluate(() => Reflect.get(window, "mentionLoadingFlashes"))).toEqual([]);
     await sender.hideSources();
     await readPage.bringToFront();
     await expect(readPage.getByText("Mention context unavailable", { exact: true })).toBeVisible({
-      timeout: 30000,
+      timeout: 45000,
     });
     await expect(readPage.getByText(/paseoClientMessageId/)).toHaveCount(0);
     await expect(readPage.getByText(question, { exact: true })).toHaveCount(0);
