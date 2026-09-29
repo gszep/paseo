@@ -45,11 +45,15 @@ is network-first, with its version-matched shell as an offline fallback. API,
 cross-origin, non-GET and query-bearing requests pass through without caching.
 Host traffic continues directly through the existing encrypted relay.
 
-Updates wait until old windows are closed; there is no forced reload or
-`skipWaiting`. Close **all** browser/PWA windows for this origin, then reopen to
-activate a waiting release. Activation deletes only older `paseo-shell-*` caches.
-Browser-owned host/timeline replicas remain separate from the worker. Opening an
-offline shell does not mean an agent can receive work while disconnected.
+Updates are silent. The page revalidates `/sw.js` on launch, on focus/visibility
+and hourly. A new worker caches its shell, calls `skipWaiting`, and takes over
+open windows with `clients.claim`. The page reloads into the activated release
+only at a safe moment: while it is hidden, or once the user has been idle with no
+editable control focused. It never reloads while typing. Drafts, saved operations
+and pending sends are origin-local and recover after the reload; there is no
+update prompt. Activation deletes only older `paseo-shell-*` caches. Browser-owned
+host/timeline replicas remain separate from the worker. Opening an offline shell
+does not mean an agent can receive work while disconnected.
 
 ## Pairing and links
 
@@ -111,7 +115,7 @@ installed app and check pairing there; do not assume Safari and a home-screen ap
 share storage on every OS version. Repeat separately for each device/browser.
 
 Verify the deployed origin with desktop and compact browser checks: manifest and
-icon dimensions, active/controller service worker, deferred upgrade and scoped
+icon dimensions, active/controller service worker, silent update and scoped
 cache cleanup, no CSP/console errors, relay pairing, restored pins/history and
 the desired daemon-backed screens. Real-device installation remains a separate
 check from a mobile viewport.

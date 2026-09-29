@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { serviceWorker, serviceWorkerRegistration } from "./service-worker.mjs";
+
+// The generated worker sources live in service-worker.mjs (no top-level await) so
+// tests can import the exact strings; re-export keeps one import site for callers.
+export { serviceWorker, serviceWorkerRegistration };
 
 // This postprocessor is opt-in: native, Electron and daemon-served builds retain their defaults.
 export function hostingConfig(env) {
@@ -32,47 +37,6 @@ export function hostingConfig(env) {
   return { base: base.origin, relay: relay.origin, name };
 }
 
-export function serviceWorker(version, assets, shell) {
-  return `/* Generated hosted app shell. No host data, API requests or relay traffic is cached. */
-const CACHE = ${JSON.stringify(`paseo-shell-${version}`)};
-const ASSETS = new Set(${JSON.stringify([...new Set([...assets, ...shell.filter((url) => url !== "/index.html")])])});
-self.addEventListener("install", event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(${JSON.stringify(shell)}.map(url => new Request(url, { cache: "reload" })))));
-  // Wait for every old app window to close. Never reload a composer or claim active clients.
-});
-self.addEventListener("activate", event => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith("paseo-shell-") && key !== CACHE).map(key => caches.delete(key)))));
-});
-self.addEventListener("fetch", event => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname === "/api" || url.search) return;
-  if (request.mode === "navigate") {
-    event.respondWith((async () => {
-      try {
-        const response = await fetch(request, { cache: "no-store" });
-        if (!response.ok) throw new Error("Navigation unavailable");
-        // Online HTML may refer to a newer release. Keep this worker's offline shell and assets
-        // together until that release's waiting worker activates after old clients close.
-        return response;
-      } catch {
-        return await caches.match("/index.html", { cacheName: CACHE }) || Response.error();
-      }
-    })());
-  } else if (ASSETS.has(url.pathname)) {
-    event.respondWith((async () => {
-      const cache = await caches.open(CACHE);
-      const cached = await cache.match(request);
-      if (cached) return cached;
-      const response = await fetch(request);
-      if (response.ok && response.type === "basic") await cache.put(request, response.clone());
-      return response;
-    })());
-  }
-});
-`;
-}
-
 async function prepare() {
   const config = hostingConfig(process.env);
   if (process.argv.includes("--validate")) return;
@@ -95,14 +59,12 @@ async function prepare() {
     .replace(/(name="apple-mobile-web-app-title" content=")[^"]*/, `$1${config.name}`)
     .replace("</head>", '<script src="/register-sw.js" defer></script></head>');
   await writeFile(path.join(dist, "index.html"), html);
-  await writeFile(
-    path.join(dist, "register-sw.js"),
-    `if ("serviceWorker" in navigator && window.isSecureContext) {\n  window.addEventListener("load", () => {\n    navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(error => console.error("App offline support unavailable", error));\n  });\n}\n`,
-  );
+  await writeFile(path.join(dist, "register-sw.js"), serviceWorkerRegistration());
   const hash = createHash("sha256")
     .update(html)
     .update(JSON.stringify(manifest))
-    .update(await readFile(fileURLToPath(import.meta.url)));
+    .update(await readFile(fileURLToPath(import.meta.url)))
+    .update(await readFile(fileURLToPath(new URL("./service-worker.mjs", import.meta.url))));
   for (const asset of assets.sort())
     hash.update(asset).update(await readFile(path.join(dist, asset.slice(1))));
   const version = hash.digest("hex").slice(0, 20);

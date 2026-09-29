@@ -69,4 +69,70 @@ describe("hosted export policy", () => {
     expect(handles("https://app.example.com/assets/abc123.js?token=private")).toBe(false);
     expect(handles("https://app.example.com/assets/abc123.js", "cors", "POST")).toBe(false);
   });
+
+  it("activates immediately, claims open windows, and cleans only older shell caches", async () => {
+    const worker = serviceWorker("test", [], ["/index.html"]);
+    const calls: { added: number; skipped: boolean; deleted: string[]; claimed: boolean } = {
+      added: 0,
+      skipped: false,
+      deleted: [],
+      claimed: false,
+    };
+    const handlers: Record<
+      string,
+      (event: { waitUntil(promise: Promise<unknown>): void }) => void
+    > = {};
+    await runInNewContext(
+      `(async () => {
+        ${worker}
+        await new Promise((resolve) => { handlers.install({ waitUntil: (promise) => resolve(promise) }); });
+        await new Promise((resolve) => { handlers.activate({ waitUntil: (promise) => resolve(promise) }); });
+        handlers.message({ data: { type: "SKIP_WAITING" } });
+      })()`,
+      {
+        URL,
+        Request: class {
+          constructor(
+            public url: string,
+            public init?: unknown,
+          ) {}
+        },
+        Response,
+        handlers,
+        caches: {
+          open: async () => ({
+            addAll: async () => {
+              calls.added++;
+            },
+          }),
+          keys: async () => ["paseo-shell-old", "paseo-shell-test", "unrelated"],
+          delete: async (key: string) => {
+            calls.deleted.push(key);
+          },
+        },
+        self: {
+          location: { origin: "https://app.example.com" },
+          addEventListener: (type: string, handler: unknown) => {
+            handlers[type] = handler as (event: {
+              waitUntil(promise: Promise<unknown>): void;
+            }) => void;
+          },
+          skipWaiting: () => {
+            calls.skipped = true;
+            return Promise.resolve();
+          },
+          clients: {
+            claim: async () => {
+              calls.claimed = true;
+            },
+          },
+        },
+        calls,
+      },
+    );
+    expect(calls.added).toBe(1);
+    expect(calls.deleted).toEqual(["paseo-shell-old"]);
+    expect(calls.claimed).toBe(true);
+    expect(handlers.message).toBeDefined();
+  });
 });
