@@ -116,7 +116,15 @@ function parseFaviconSet(value: unknown, label: string): BrandFaviconSet {
   if (typeof value !== "object" || value === null) throw new Error(`${label} must be an object`);
   const { none, running, attention } = value as Record<string, unknown>;
   for (const [key, url] of Object.entries({ none, running, attention })) {
-    if (typeof url !== "string" || !url.startsWith("/") || url.length > 512) {
+    if (
+      typeof url !== "string" ||
+      !url.startsWith("/") ||
+      url.length > 512 ||
+      url.includes("//") ||
+      url.includes("\\") ||
+      url.includes("?") ||
+      url.includes("#")
+    ) {
       throw new Error(`${label}.${key} must be an absolute app-relative URL`);
     }
   }

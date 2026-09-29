@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { BRAND, PASEO_BRAND, parseBrandConfig, resolveBrandConfig } from "./brand";
 
-const CHI_INPUT = {
-  name: "Chi",
+// A complete example brand, used to exercise parsing and defaults.
+const EXAMPLE_BRAND = {
+  name: "Example",
   mark: { viewBox: "0 0 1000 1000", paths: ["M0 0L1000 1000Z"] },
   workingIndicator: {
-    frames: ["干", "千", "午", "牛", "丰", "生", "丰", "牛", "午", "千"],
+    frames: ["a", "b", "c"],
     intervalMs: 90,
   },
-  titleMark: "千",
+  titleMark: "E",
   favicons: {
     light: {
       none: "/brand/favicon-light.png",
@@ -21,7 +22,7 @@ const CHI_INPUT = {
       attention: "/brand/favicon-dark-attention.png",
     },
   },
-  attribution: { label: "Powered by Paseo", url: "https://paseo.sh" },
+  attribution: { label: "Powered by Example", url: "https://example.com" },
 };
 
 afterEach(() => {
@@ -38,17 +39,17 @@ describe("brand config", () => {
   });
 
   test("parses a full brand and fills optional fields", () => {
-    const brand = parseBrandConfig(CHI_INPUT);
-    expect(brand.name).toBe("Chi");
-    expect(brand.titleMark).toBe("千");
-    expect(brand.workingIndicator).toEqual(CHI_INPUT.workingIndicator);
+    const brand = parseBrandConfig(EXAMPLE_BRAND);
+    expect(brand.name).toBe("Example");
+    expect(brand.titleMark).toBe("E");
+    expect(brand.workingIndicator).toEqual(EXAMPLE_BRAND.workingIndicator);
     expect(brand.favicons?.dark.running).toBe("/brand/favicon-dark-running.png");
-    expect(brand.attribution).toEqual({ label: "Powered by Paseo", url: "https://paseo.sh" });
+    expect(brand.attribution).toEqual({ label: "Powered by Example", url: "https://example.com" });
   });
 
   test("fills null working indicator, title mark, favicons and attribution", () => {
     const brand = parseBrandConfig({
-      ...CHI_INPUT,
+      ...EXAMPLE_BRAND,
       workingIndicator: null,
       titleMark: null,
       favicons: null,
@@ -61,18 +62,54 @@ describe("brand config", () => {
   });
 
   test("resolves an injected brand", () => {
-    (globalThis as { __PASEO_BRAND__?: unknown }).__PASEO_BRAND__ = CHI_INPUT;
-    expect(resolveBrandConfig().name).toBe("Chi");
+    (globalThis as { __PASEO_BRAND__?: unknown }).__PASEO_BRAND__ = EXAMPLE_BRAND;
+    expect(resolveBrandConfig().name).toBe("Example");
   });
 
   test.each([
-    [{ ...CHI_INPUT, name: "<script>" }],
-    [{ ...CHI_INPUT, mark: { viewBox: "", paths: [] } }],
-    [{ ...CHI_INPUT, workingIndicator: { frames: [], intervalMs: 90 } }],
-    [{ ...CHI_INPUT, workingIndicator: { frames: ["干"], intervalMs: 0 } }],
-    [{ ...CHI_INPUT, favicons: { light: {}, dark: {} } }],
-    [{ ...CHI_INPUT, attribution: { label: "", url: "https://paseo.sh" } }],
-    [{ ...CHI_INPUT, attribution: { label: "x", url: "http://paseo.sh" } }],
+    [{ ...EXAMPLE_BRAND, name: "<script>" }],
+    [{ ...EXAMPLE_BRAND, mark: { viewBox: "", paths: [] } }],
+    [{ ...EXAMPLE_BRAND, workingIndicator: { frames: [], intervalMs: 90 } }],
+    [{ ...EXAMPLE_BRAND, workingIndicator: { frames: ["a"], intervalMs: 0 } }],
+    [{ ...EXAMPLE_BRAND, favicons: { light: {}, dark: {} } }],
+    [
+      {
+        ...EXAMPLE_BRAND,
+        favicons: {
+          ...EXAMPLE_BRAND.favicons,
+          light: { ...EXAMPLE_BRAND.favicons.light, none: "/brand//evil.png" },
+        },
+      },
+    ],
+    [
+      {
+        ...EXAMPLE_BRAND,
+        favicons: {
+          ...EXAMPLE_BRAND.favicons,
+          light: { ...EXAMPLE_BRAND.favicons.light, none: "/brand/evil\\path.png" },
+        },
+      },
+    ],
+    [
+      {
+        ...EXAMPLE_BRAND,
+        favicons: {
+          ...EXAMPLE_BRAND.favicons,
+          light: { ...EXAMPLE_BRAND.favicons.light, none: "/brand/evil.png?x=1" },
+        },
+      },
+    ],
+    [
+      {
+        ...EXAMPLE_BRAND,
+        favicons: {
+          ...EXAMPLE_BRAND.favicons,
+          light: { ...EXAMPLE_BRAND.favicons.light, none: "/brand/evil.png#frag" },
+        },
+      },
+    ],
+    [{ ...EXAMPLE_BRAND, attribution: { label: "", url: "https://example.com" } }],
+    [{ ...EXAMPLE_BRAND, attribution: { label: "x", url: "http://example.com" } }],
   ])("rejects malformed input %#", (input) => {
     expect(() => parseBrandConfig(input)).toThrow();
   });

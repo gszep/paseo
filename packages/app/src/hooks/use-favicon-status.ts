@@ -6,6 +6,7 @@ import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
 import { deriveMacDockBadgeCountFromWorkspaceStatuses } from "@/utils/desktop-badge-state";
 import { isNative } from "@/constants/platform";
 import { BRAND } from "@/branding/brand";
+import { setFaviconHref } from "./favicon-links";
 
 type FaviconStatus = "none" | "running" | "attention";
 type ColorScheme = "dark" | "light";
@@ -53,27 +54,9 @@ function getFaviconUri(status: FaviconStatus, colorScheme: ColorScheme): string 
   return `/assets/images/favicon-${colorScheme}${suffix}.png`;
 }
 
-function getOrCreateFaviconLink(): HTMLLinkElement | null {
-  if (typeof document === "undefined") return null;
-
-  let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-  if (!link) {
-    link = document.createElement("link");
-    link.rel = "icon";
-    link.type = "image/png";
-    document.head.appendChild(link);
-  }
-  return link;
-}
-
 function updateFavicon(status: FaviconStatus, colorScheme: ColorScheme) {
-  const link = getOrCreateFaviconLink();
-  if (!link) return;
-
-  const newHref = getFaviconUri(status, colorScheme);
-  if (link.href !== newHref) {
-    link.href = newHref;
-  }
+  if (typeof document === "undefined") return;
+  setFaviconHref(document, getFaviconUri(status, colorScheme));
 }
 
 function getSystemColorScheme(): ColorScheme {

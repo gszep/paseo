@@ -7,9 +7,9 @@ import { BRAND } from "./brand";
 import { getRestingIndicatorFrame } from "./working-indicator";
 
 /**
- * The agent working indicator. Branded builds cycle a configured frame sequence
- * (Chi: the kanji sequence); the default Paseo brand keeps the built-in synced
- * loader. Motion is reduced to the resting frame under prefers-reduced-motion.
+ * The agent working indicator. Branded builds cycle a configured frame sequence;
+ * the default Paseo brand keeps the built-in synced loader. Motion is reduced to
+ * the resting frame under prefers-reduced-motion.
  */
 export function BrandWorkingIndicator({ size = 10, color }: { size?: number; color: string }) {
   const reduceMotion = useReducedMotion();
