@@ -2510,7 +2510,7 @@ export const ja: TranslationResources = {
         },
         restart: {
           title: "デーモンを再起動",
-          hint: "実行中のエージェントが終了してからデーモンを再起動します。アプリは自動的に再接続します",
+          hint: "実行中のエージェントが終了してからデーモンを再起動します。「今すぐ再起動」で即時切り替えできます。アプリは自動的に再接続します",
           confirm: "再起動",
           confirmTitle: "{{name}}を再起動",
           confirmMessage:

@@ -101,6 +101,9 @@ try {
   }
   const restarted = await command("restart_desktop_daemon");
   assert.equal(restarted.pid, captured.pid);
+  // The force path must be reachable through the bridge (swaps without draining).
+  const forced = await command("restart_desktop_daemon", { force: true });
+  assert.equal(forced.pid, captured.pid);
   await assert.rejects(
     command("stop_desktop_daemon", {
       reason: "manual_ipc",
