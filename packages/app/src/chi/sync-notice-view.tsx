@@ -10,6 +10,13 @@ const NOTICE_TITLE =
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {
   if (!code) return "Sync did not complete. Retry when this host is back online.";
+  if (
+    code === "capture-local-secret-rejected" ||
+    code === "evidence-http-422-server-secret-scan-rejected"
+  )
+    return "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.";
+  if (code === "capture-local-scanner-unavailable")
+    return "The secret scanner is unavailable on this host, so nothing was uploaded. Install gitleaks on the host to sync this session.";
   if (code.startsWith("chi-destination-unmapped"))
     return "This repository is not mapped to a configured destination.";
   if (code.startsWith("chi-destination-mismatch") || code.startsWith("chi-destination-changed"))
@@ -30,10 +37,12 @@ export function syncNoticeReason(code: string | null): string {
  */
 export function SyncNoticeView({
   error,
+  terminal = false,
   onDismiss,
   onRetry,
 }: {
   error: string;
+  terminal?: boolean;
   onDismiss: () => void;
   onRetry: () => void;
 }) {
@@ -43,9 +52,11 @@ export function SyncNoticeView({
         <Button size="sm" variant="ghost" onPress={onDismiss}>
           Dismiss
         </Button>
-        <Button size="sm" variant="outline" onPress={onRetry}>
-          Retry
-        </Button>
+        {terminal ? null : (
+          <Button size="sm" variant="outline" onPress={onRetry}>
+            Retry
+          </Button>
+        )}
       </Alert>
     </View>
   );

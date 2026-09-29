@@ -13,6 +13,8 @@ import {
   captureNative,
   retryCaptureNative,
   prepareNativeCapture,
+  scanNativeCapture,
+  type LocalScanInput,
 } from "@henkaku-center/chi-native/capture";
 import {
   ConversationClient,
@@ -121,6 +123,15 @@ function sameActor(a: string, b: string): boolean {
   // login as typed by either the mention path (lowercased) or the capture path.
   return a.toLowerCase() === b.toLowerCase();
 }
+/** Secret-scan rejections are terminal: never auto-retry, never "reconnect and retry". */
+const TERMINAL_SYNC_ERRORS = new Set<string>([
+  "capture-local-secret-rejected",
+  "capture-local-scanner-unavailable",
+  "evidence-http-422-server-secret-scan-rejected",
+]);
+function isTerminalSyncError(error: string | null | undefined): boolean {
+  return typeof error === "string" && TERMINAL_SYNC_ERRORS.has(error);
+}
 function assertRegistration(
   existing: ManagedAgent,
   input: ContinueSelection,
@@ -148,6 +159,8 @@ export interface ChiConnectionOptions {
   authority?: ChiAuthority;
   /** Live daemon `chi` config; re-read on every resolution so reloads apply. */
   getChiConfig?: () => MutableChiConfig | undefined;
+  /** Local pre-upload secret scan; defaults to the vendored chi-native scanner. */
+  localScan?: (input: LocalScanInput) => Promise<void>;
   /** Persisted agents not yet loaded into memory, for restart reconciliation. */
   listStoredAgents?: () => Promise<readonly StoredChiAgent[]>;
   getStoredAgent?: (agentId: string) => Promise<StoredChiAgent | null>;
@@ -343,6 +356,7 @@ export class ChiConnection {
   private readonly dirty = new Set<string>();
   private readonly continuing = new Set<string>();
   private readonly authority: ChiAuthority;
+  private readonly localScan: (input: LocalScanInput) => Promise<void>;
   private readonly authorityByEndpoint = new Map<string, ChiAuthority>();
   // Status polls re-resolve the same cwd repeatedly; capture still re-reads the
   // remote. Cleared whenever the chi config reloads.
@@ -352,6 +366,7 @@ export class ChiConnection {
     private readonly options: ChiConnectionOptions,
   ) {
     this.authority = options.authority ?? createDeployment();
+    this.localScan = options.localScan ?? ((input) => scanNativeCapture(input));
     this.authorityByEndpoint.set(this.authority.endpoint, this.authority);
     this.mentions = new ChiMentions(options.home, {
       endpoint: this.authority.endpoint,
@@ -863,6 +878,14 @@ export class ChiConnection {
           visibility: pinned.audience ?? (pinned.explicit ? "private" : "shared"),
           coverage: { kind: "export" as const, reason: null },
         };
+        // Local pre-upload scan: block before any bytes leave the host. The server
+        // scan remains the authority. Missing scanner fails closed.
+        await this.localScan({
+          native: input.native,
+          mapping: input.mapping,
+          coverage: input.coverage,
+          sessionId: input.sessionId,
+        });
         const captured = await (retryConflict
           ? retryCaptureNative(input, auth.chiUserId, authority.request)
           : captureNative(input, authority.request));
@@ -895,10 +918,15 @@ export class ChiConnection {
       });
     } catch (error) {
       const code = safeChiError(error);
-      // Busy is transient (the capture loop retries); never persist it as a durable
-      // sync error, which startup reconciliation would otherwise surface forever.
-      if (code !== "chi-session-busy")
+      // A terminal secret-scan rejection must not be retried automatically and
+      // must not be persisted as a durable capture-needed state.
+      if (isTerminalSyncError(code)) {
+        await this.patchAssociation(agentId, { error: code, capturePending: false });
+      } else if (code !== "chi-session-busy") {
+        // Busy is transient (the capture loop retries); never persist it as a durable
+        // sync error, which startup reconciliation would otherwise surface forever.
         await this.patchAssociation(agentId, { error: code, capturePending: true });
+      }
       throw new Error(code, { cause: error });
     }
   }
@@ -951,6 +979,8 @@ export class ChiConnection {
     const agent = this.manager.getAgent(agentId);
     if (!agent || agent.provider !== "opencode") return;
     const association = this.association(agent);
+    // A genuine secret-scan rejection is terminal until the user retries.
+    if (association && isTerminalSyncError(association.error)) return;
     // A genuinely local workspace (no mapping at all) stays quiet.
     if (!association && !this.chiConfig()) return;
     // Capture runs after manager turn reconciliation; the pending map coalesces
@@ -992,7 +1022,13 @@ export class ChiConnection {
   async reconcilePending(): Promise<void> {
     for (const candidate of await this.candidateLabels()) {
       const association = this.parseAssociation(candidate.labels[label]);
-      if (!association || association.paused || !association.capturePending) continue;
+      if (
+        !association ||
+        association.paused ||
+        !association.capturePending ||
+        isTerminalSyncError(association.error)
+      )
+        continue;
       void this.capture(candidate.id).catch(() => undefined);
     }
   }

@@ -767,4 +767,34 @@ test.describe("sync destinations (rendered)", () => {
       await Promise.allSettled([context.close(), sender.close()]);
     }
   });
+
+  test("a session containing a test secret is never uploaded and says why", async ({ browser }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    try {
+      await sender.seed(page);
+      await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      const before = (await sender.sources()).length;
+      // An obviously fake Google API key: gitleaks' default rules detect it locally.
+      await sendPrompt(page, `leaked AIzaSyA1234567890abcdefghijklmnopqrstuv ${runId}`);
+      await expect(page.getByTestId("chi-sync-notice")).toContainText(
+        "A secret was detected in this session's history. Nothing was uploaded.",
+        { timeout: 90000 },
+      );
+      // Terminal: no Retry, no upload, and no automatic retry on later turns.
+      await expect(page.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+      await page.waitForTimeout(3000);
+      expect((await sender.sources()).length).toBe(before);
+      await expect(page.getByTestId("chi-sync-notice")).toBeVisible();
+      await plainChat(page);
+    } finally {
+      await Promise.allSettled([context.close(), sender.close()]);
+    }
+  });
 });

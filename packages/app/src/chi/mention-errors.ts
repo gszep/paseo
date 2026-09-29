@@ -10,6 +10,12 @@ export function mentionError(error: unknown): string {
       "The saved reply was rejected without committing. Correct it before sending a new operation.",
     "chi-share-required":
       "This workspace is local. Only workspaces mapped to a destination deliver human mentions.",
+    "capture-local-secret-rejected":
+      "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.",
+    "capture-local-scanner-unavailable":
+      "The secret scanner is unavailable on this host, so nothing was uploaded. Install gitleaks on the host to sync this session.",
+    "evidence-http-422-server-secret-scan-rejected":
+      "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.",
     "chi-mentions-unsupported": "Update this host to use Chi mentions.",
     "chi-mention-plain-text-required":
       "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",

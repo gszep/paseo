@@ -51,3 +51,15 @@ export function deriveSyncDestinationState(input: {
 export function syncAudienceLabel(audience: ChiAudience): string {
   return audience === "shared" ? "Shared with repository readers" : "Private";
 }
+
+/**
+ * Secret-scan rejections are terminal: nothing was uploaded and retrying cannot
+ * succeed until the local history changes. The notice hides its Retry action.
+ */
+export function isTerminalSecretError(code: string | null | undefined): boolean {
+  return (
+    code === "capture-local-secret-rejected" ||
+    code === "capture-local-scanner-unavailable" ||
+    code === "evidence-http-422-server-secret-scan-rejected"
+  );
+}

@@ -139,7 +139,13 @@ async function fixture() {
       return structuredClone(agent);
     }),
   };
-  const restart = () => new ChiConnection(manager, { home, serverId: "server", authority });
+  const restart = () =>
+    new ChiConnection(manager, {
+      home,
+      serverId: "server",
+      authority,
+      localScan: async () => undefined,
+    });
   return {
     home,
     input,
@@ -650,6 +656,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "other",
       authority: f.authority,
+      localScan: async () => undefined,
     });
     await expect(otherOwner.continue(f.input, f.registration)).rejects.toThrow(
       "selection-mismatch",
@@ -985,6 +992,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
+      localScan: async () => undefined,
     });
     const b = ownerB.continue(f.input, {
       find: async () => structuredClone(bAgent),
@@ -1438,6 +1446,8 @@ describe("automatic sync destinations", () => {
     const effective = config === undefined ? destinationConfig(f.authority.endpoint) : config;
     const evidence: Array<{ visibility: string }> = [];
     let failEvidence = false;
+    let evidenceRejection: string | null = null;
+    let evidenceAttempts = 0;
     const sourceId = prepareNativeCapture({
       native: JSON.stringify(f.transfer),
       mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
@@ -1448,18 +1458,25 @@ describe("automatic sync destinations", () => {
     f.authority.request = (async (url, init) => {
       const path = new URL(String(url)).pathname;
       if (path === "/evidence" && init?.method === "POST") {
+        evidenceAttempts += 1;
         if (failEvidence) throw new Error("network down");
+        if (evidenceRejection)
+          return Response.json({ ok: false, reason: evidenceRejection }, { status: 422 });
         const body = JSON.parse(String(init.body)) as { visibility: string };
         evidence.push({ visibility: body.visibility });
         return Response.json({ sourceId, head: "b".repeat(64) });
       }
       return base(url, init);
     }) as typeof fetch;
-    const connect = (override = effective) =>
+    const connect = (
+      override = effective,
+      localScan: (input: unknown) => Promise<void> = async () => undefined,
+    ) =>
       new ChiConnection(f.manager, {
         home: f.home,
         serverId: "server",
         authority: f.authority,
+        localScan,
         getChiConfig: () => override ?? undefined,
       });
     const register = (labels?: Record<string, string>) =>
@@ -1470,8 +1487,12 @@ describe("automatic sync destinations", () => {
       sourceId,
       connect,
       register,
+      evidenceAttempts: () => evidenceAttempts,
       setFailEvidence: (value: boolean) => {
         failEvidence = value;
+      },
+      setEvidenceRejection: (reason: string | null) => {
+        evidenceRejection = reason;
       },
     };
   }
@@ -1798,5 +1819,61 @@ describe("automatic sync destinations", () => {
     const result = await f.connect().capture(agent.id);
     expect(result.sourceId).toBe(f.sourceId);
     expect(f.evidence).toHaveLength(1);
+  });
+
+  it("blocks a local secret finding before any upload and stops automatic retries", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const localScan = vi.fn(async () => {
+      throw new Error("capture-local-secret-rejected");
+    });
+    const connection = f.connect(undefined, localScan);
+    await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-secret-rejected");
+    expect(f.evidenceAttempts()).toBe(0);
+    expect(f.evidence).toHaveLength(0);
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+      error: "capture-local-secret-rejected",
+      capturePending: false,
+    });
+    const afterCapture = localScan.mock.calls.length;
+    connection.afterTurn(agent.id);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(localScan.mock.calls.length).toBe(afterCapture);
+    expect(f.evidenceAttempts()).toBe(0);
+  });
+
+  it("fails closed when the local scanner is unavailable", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const localScan = vi.fn(async () => {
+      throw new Error("capture-local-scanner-unavailable");
+    });
+    await expect(f.connect(undefined, localScan).capture(agent.id)).rejects.toThrow(
+      "capture-local-scanner-unavailable",
+    );
+    expect(f.evidenceAttempts()).toBe(0);
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+      error: "capture-local-scanner-unavailable",
+      capturePending: false,
+    });
+  });
+
+  it("treats a server secret-scan rejection as terminal and never auto-retries", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    f.setEvidenceRejection("server-secret-scan-rejected");
+    const connection = f.connect();
+    await expect(connection.capture(agent.id)).rejects.toThrow(
+      "evidence-http-422-server-secret-scan-rejected",
+    );
+    expect(f.evidence).toHaveLength(0);
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+      error: "evidence-http-422-server-secret-scan-rejected",
+      capturePending: false,
+    });
+    const attempts = f.evidenceAttempts();
+    connection.afterTurn(agent.id);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(f.evidenceAttempts()).toBe(attempts);
   });
 });

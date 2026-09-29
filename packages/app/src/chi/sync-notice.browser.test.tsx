@@ -74,6 +74,22 @@ describe("SyncNoticeView", () => {
     expect(onDismiss).toHaveBeenCalledOnce();
     expect(onRetry).toHaveBeenCalledOnce();
   });
+
+  it("hides Retry for a terminal secret rejection and shows the safe copy", () => {
+    const { container } = mount(
+      <SyncNoticeView
+        error="capture-local-secret-rejected"
+        terminal
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(button(container, "Retry")).toBeUndefined();
+    expect(container.textContent).toContain(
+      "A secret was detected in this session's history. Nothing was uploaded.",
+    );
+    expect(container.textContent).not.toContain("Reconnect");
+  });
 });
 
 describe("useSyncNoticeDismissal", () => {

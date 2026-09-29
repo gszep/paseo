@@ -1,3 +1,4 @@
+import { isTerminalSecretError } from "./sync-destination";
 import { SyncNoticeView, useSyncNoticeDismissal } from "./sync-notice-view";
 import { useSyncDestination } from "./use-sync-destination";
 
@@ -17,5 +18,12 @@ export function WorkspaceSyncNotice({
   const state = useSyncDestination(serverId, workspaceId);
   const { visible, dismiss } = useSyncNoticeDismissal(state.error);
   if (!state.error || !visible) return null;
-  return <SyncNoticeView error={state.error} onDismiss={dismiss} onRetry={state.retry} />;
+  return (
+    <SyncNoticeView
+      error={state.error}
+      terminal={isTerminalSecretError(state.error)}
+      onDismiss={dismiss}
+      onRetry={state.retry}
+    />
+  );
 }

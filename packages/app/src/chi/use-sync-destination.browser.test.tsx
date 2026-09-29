@@ -9,7 +9,11 @@ beforeEach(() => {
 
 // Imported from the pure module on purpose: the hook's runtime imports pull the
 // whole navigation graph into the browser dependency optimizer.
-import { deriveSyncDestinationState, syncDestinationQueryKey } from "./sync-destination";
+import {
+  deriveSyncDestinationState,
+  isTerminalSecretError,
+  syncDestinationQueryKey,
+} from "./sync-destination";
 
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
 function mount(node: React.ReactNode) {
@@ -110,5 +114,13 @@ describe("sync destination state", () => {
       "host",
       "workspace",
     ]);
+  });
+
+  it("classifies terminal secret-scan errors", () => {
+    expect(isTerminalSecretError("capture-local-secret-rejected")).toBe(true);
+    expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(true);
+    expect(isTerminalSecretError("evidence-http-422-server-secret-scan-rejected")).toBe(true);
+    expect(isTerminalSecretError("evidence-http-503")).toBe(false);
+    expect(isTerminalSecretError(null)).toBe(false);
   });
 });
