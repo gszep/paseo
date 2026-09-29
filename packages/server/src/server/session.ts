@@ -3128,24 +3128,25 @@ export class Session {
           });
         }
         return;
-      case "chi.native.share.request":
+      case "chi.sync.status.request":
         try {
           if (!this.agentManager.chi) throw new Error("chi-unavailable");
-          const result = await this.agentManager.chi.share(msg.agentId, msg.repo);
-          if (!result.sourceId || !result.head) throw new Error("chi-capture-incomplete");
+          if (msg.action === "retry" && !this.authorization.allowsPermission("workspace.write"))
+            throw new Error("chi-sync-retry-forbidden");
+          const workspace = await this.workspaceRegistry.get(msg.workspaceId);
+          if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
+          const result = await this.agentManager.chi.syncStatus({
+            workspaceId: msg.workspaceId,
+            cwd: workspace.cwd,
+            retry: msg.action === "retry",
+          });
           this.emit({
-            type: "chi.native.share.response",
-            payload: {
-              requestId: msg.requestId,
-              outcome: "ready",
-              sourceId: result.sourceId,
-              snapshotId: result.head,
-              actor: result.actor,
-            },
+            type: "chi.sync.status.response",
+            payload: { requestId: msg.requestId, outcome: "ready", ...result },
           });
         } catch (error) {
           this.emit({
-            type: "chi.native.share.response",
+            type: "chi.sync.status.response",
             payload: { requestId: msg.requestId, outcome: "failed", error: safeChiError(error) },
           });
         }

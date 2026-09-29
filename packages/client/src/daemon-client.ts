@@ -3124,14 +3124,18 @@ export class DaemonClient {
     });
   }
 
-  async shareChi(input: { agentId: string; repo?: string }) {
-    const requestId = this.createRequestId();
+  async chiSyncStatus(input: {
+    workspaceId: string;
+    action?: "status" | "retry";
+    requestId?: string;
+  }) {
+    const requestId = this.createRequestId(input.requestId);
     return this.sendRequest({
       requestId,
-      message: { type: "chi.native.share.request", requestId, ...input },
+      message: { type: "chi.sync.status.request", requestId, ...input },
       options: { skipQueue: true },
       select: (msg) =>
-        msg.type === "chi.native.share.response" && msg.payload.requestId === requestId
+        msg.type === "chi.sync.status.response" && msg.payload.requestId === requestId
           ? msg.payload
           : null,
     });

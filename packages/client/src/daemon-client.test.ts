@@ -7102,3 +7102,47 @@ test("reviewed plugin updates gate before requests and preserve exact proposal d
     ]);
   }
 });
+
+test("sync status sends the workspace request and resolves the ready payload", async () => {
+  const wire = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "sync-status",
+    transportFactory: () => wire.transport,
+    logger: createMockLogger(),
+  });
+  clients.push(client);
+  const connected = client.connect();
+  wire.triggerOpen({ features: { chiNative: true } });
+  await connected;
+  wire.sent.length = 0;
+  const pending = client.chiSyncStatus({ workspaceId: "workspace", action: "retry" });
+  const request = parseSentFrame(wire.sent.at(-1));
+  expect(request).toMatchObject({
+    type: "chi.sync.status.request",
+    workspaceId: "workspace",
+    action: "retry",
+  });
+  wire.triggerMessage(
+    wrapSessionMessage({
+      type: "chi.sync.status.response",
+      payload: {
+        requestId: request.requestId,
+        outcome: "ready",
+        destination: {
+          id: "henkaku",
+          name: "Henkaku",
+          endpoint: "https://chi-backend.invalid",
+          audience: "shared",
+        },
+        pending: true,
+        error: null,
+      },
+    }),
+  );
+  await expect(pending).resolves.toMatchObject({
+    outcome: "ready",
+    destination: { id: "henkaku", audience: "shared" },
+    pending: true,
+  });
+});
