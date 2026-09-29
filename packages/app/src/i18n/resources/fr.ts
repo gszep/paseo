@@ -2549,18 +2549,18 @@ export const fr: TranslationResources = {
         },
         restart: {
           title: "Redémarrer le démon",
-          hint: "Redémarre le processus démon. L'application se reconnectera automatiquement",
+          hint: "Redémarre le démon après la fin des agents en cours. L'application se reconnectera automatiquement",
           confirm: "Redémarrer",
           confirmTitle: "Redémarrer{{name}}",
           confirmMessage:
-            "Cela redémarrera le démon. Les agents qui s'y exécutent continueront à fonctionner; l'application se reconnectera automatiquement.",
+            "Cela drainera les agents en cours avant de redémarrer le démon : les tours actifs ne sont pas interrompus. Utilisez « Redémarrer maintenant » pour basculer immédiatement. L'application se reconnectera automatiquement.",
           restarting: "Redémarrage...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "En attente de la fin de {{count}} agent(s) avant le redémarrage...",
+          drainPermission: "En attente d'une réponse humaine pour {{count}} agent(s)...",
+          restartNow: "Redémarrer maintenant",
+          restartNowConfirmTitle: "Redémarrer maintenant ?",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "Redémarre immédiatement sans attendre les agents en cours. Les tours actifs seront interrompus.",
           unableToReconnectTitle: "Impossible de se reconnecter",
           unableToReconnectMessage:
             "{{name}}n'est pas revenu en ligne. Veuillez vérifier qu'il a redémarré.",

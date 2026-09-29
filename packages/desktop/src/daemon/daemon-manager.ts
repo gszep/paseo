@@ -353,17 +353,24 @@ export async function stopDesktopDaemon(
   return resolveDesktopDaemonStatus();
 }
 
+const DESKTOP_RESTART_IDLE_TIMEOUT = "2m";
+const DESKTOP_RESTART_SUBPROCESS_TIMEOUT_MS = 5 * 60 * 1000;
+
 async function restartDaemon(args?: Record<string, unknown>): Promise<DesktopDaemonStatus> {
   const force = args?.force === true;
-  await runExternalCliJsonCommand([
-    "daemon",
-    "restart",
-    ...(force ? [] : ["--wait-idle"]),
-    "--home",
-    getPaseoHome(),
-    "--json",
-    ...(force ? ["--force"] : []),
-  ]);
+  await runExternalCliJsonCommand(
+    [
+      "daemon",
+      "restart",
+      // Detached from the desktop call, so drive the drain with a bounded
+      // timeout; force swaps immediately without draining.
+      ...(force ? ["--force"] : ["--wait-idle", "--idle-timeout", DESKTOP_RESTART_IDLE_TIMEOUT]),
+      "--home",
+      getPaseoHome(),
+      "--json",
+    ],
+    { timeoutMs: DESKTOP_RESTART_SUBPROCESS_TIMEOUT_MS },
+  );
   return resolveDesktopDaemonStatus();
 }
 

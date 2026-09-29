@@ -96,3 +96,32 @@ test("RPC errors mentioning transport are not retried", async () => {
     }),
   ).rejects.toThrow("Connection policy denied by plugin");
 });
+
+test("restart threads waitIdle and drain progress to the restart request", async () => {
+  let pid = 10;
+  const calls: Array<{ reason: string; options?: Record<string, unknown> }> = [];
+  const progress: string[][] = [];
+  await restartDaemonFromSettings(
+    "daemon",
+    "settings",
+    {
+      getStatus: async () => ({ pid, version: "1.0.0", serverId: "daemon" }),
+      restartServer: async (reason, options) => {
+        calls.push({ reason, options: options as Record<string, unknown> | undefined });
+        (options?.onDrainProgress as ((status: unknown) => void) | undefined)?.({
+          phase: "draining",
+          runningAgents: ["agent-a"],
+        });
+        pid = 11;
+      },
+    },
+    {
+      waitIdle: true,
+      idleTimeoutMs: 1234,
+      onDrainProgress: (status) => progress.push(status.runningAgents),
+    },
+  );
+
+  expect(calls[0]?.options).toMatchObject({ waitIdle: true, idleTimeoutMs: 1234 });
+  expect(progress).toEqual([["agent-a"]]);
+});

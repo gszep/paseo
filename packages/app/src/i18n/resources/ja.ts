@@ -2510,18 +2510,18 @@ export const ja: TranslationResources = {
         },
         restart: {
           title: "デーモンを再起動",
-          hint: "デーモンプロセスを再起動します。アプリは自動的に再接続します",
+          hint: "実行中のエージェントが終了してからデーモンを再起動します。アプリは自動的に再接続します",
           confirm: "再起動",
           confirmTitle: "{{name}}を再起動",
           confirmMessage:
-            "これによりデーモンが再起動されます。実行中のエージェントは継続し、アプリは自動的に再接続します。",
+            "再起動前に実行中のエージェントを待機するため、進行中のターンは中断されません。すぐに切り替えるには「今すぐ再起動」を使用してください。アプリは自動的に再接続します。",
           restarting: "再起動中...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "再起動前に{{count}}件のエージェントの終了を待機中...",
+          drainPermission: "{{count}}件のエージェントへの人の回答を待機中...",
+          restartNow: "今すぐ再起動",
+          restartNowConfirmTitle: "今すぐ再起動しますか？",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "実行中のエージェントを待たずにすぐ再起動します。進行中のターンは中断されます。",
           unableToReconnectTitle: "再接続できません",
           unableToReconnectMessage:
             "{{name}}がオンラインに戻りませんでした。再起動されたことを確認してください。",

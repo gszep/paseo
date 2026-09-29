@@ -2497,18 +2497,18 @@ export const ko: TranslationResources = {
         },
         restart: {
           title: "데몬 재시작",
-          hint: "데몬 프로세스를 재시작합니다. 앱이 자동으로 다시 연결됩니다",
+          hint: "실행 중인 에이전트가 끝난 뒤 데몬을 재시작합니다. 앱이 자동으로 다시 연결됩니다",
           confirm: "재시작",
           confirmTitle: "{{name}} 재시작",
           confirmMessage:
-            "데몬을 재시작합니다. 데몬에서 실행 중인 에이전트는 계속 동작하며 앱이 자동으로 다시 연결됩니다.",
+            "재시작 전에 실행 중인 에이전트를 기다리므로 진행 중인 턴이 중단되지 않습니다. 즉시 전환하려면 '지금 재시작'을 사용하세요. 앱이 자동으로 다시 연결됩니다.",
           restarting: "재시작 중...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "재시작 전 {{count}}개 에이전트가 끝나기를 기다리는 중...",
+          drainPermission: "{{count}}개 에이전트에 대한 사람의 응답을 기다리는 중...",
+          restartNow: "지금 재시작",
+          restartNowConfirmTitle: "지금 재시작할까요?",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "실행 중인 에이전트를 기다리지 않고 즉시 재시작합니다. 진행 중인 턴은 중단됩니다.",
           unableToReconnectTitle: "다시 연결할 수 없습니다",
           unableToReconnectMessage:
             "{{name}}이(가) 다시 온라인 상태가 되지 않았습니다. 재시작되었는지 확인하세요.",

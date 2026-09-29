@@ -2542,18 +2542,18 @@ export const es: TranslationResources = {
         },
         restart: {
           title: "Reiniciar demonio",
-          hint: "Reinicia el proceso del demonio. La aplicación se volverá a conectar automáticamente",
+          hint: "Reinicia el demonio después de que terminen los agentes en ejecución. La aplicación se reconectará automáticamente",
           confirm: "Reiniciar",
           confirmTitle: "Reiniciar{{name}}",
           confirmMessage:
-            "Esto reiniciará el demonio. Los agentes que se ejecutan en él seguirán funcionando; la aplicación se volverá a conectar automáticamente.",
+            "Esto agotará los agentes en ejecución antes de reiniciar el demonio, así que las conversaciones activas no se interrumpen. Usa «Reiniciar ahora» para cambiar de inmediato. La aplicación se reconectará automáticamente.",
           restarting: "Reiniciando...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "Esperando a que terminen {{count}} agente(s) antes de reiniciar...",
+          drainPermission: "Esperando una respuesta humana en {{count}} agente(s)...",
+          restartNow: "Reiniciar ahora",
+          restartNowConfirmTitle: "¿Reiniciar ahora?",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "Reinicia de inmediato sin esperar a los agentes en ejecución. Las conversaciones activas se interrumpirán.",
           unableToReconnectTitle: "No se puede volver a conectar",
           unableToReconnectMessage:
             "{{name}}no volvió a conectarse. Por favor verifique que se haya reiniciado.",

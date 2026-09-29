@@ -223,8 +223,10 @@ export async function confirmAndStopDesktopDaemon(): Promise<DesktopDaemonStatus
   );
 }
 
-export async function restartDesktopDaemon(): Promise<DesktopDaemonStatus> {
-  return parseDesktopDaemonStatus(await invokeDesktopCommand("restart_desktop_daemon"));
+export async function restartDesktopDaemon(force = false): Promise<DesktopDaemonStatus> {
+  return parseDesktopDaemonStatus(
+    await invokeDesktopCommand("restart_desktop_daemon", force ? { force: true } : undefined),
+  );
 }
 
 export async function getDesktopDaemonLogs(): Promise<DesktopDaemonLogs> {

@@ -2532,18 +2532,18 @@ export const ru: TranslationResources = {
         },
         restart: {
           title: "Перезапустить демон",
-          hint: "Перезапускает процесс демона. Приложение автоматически переподключится",
+          hint: "Перезапускает демон после завершения работающих агентов. Приложение автоматически переподключится",
           confirm: "Перезапустить",
           confirmTitle: "Перезапустить {{name}}",
           confirmMessage:
-            "Это перезапустит демон. Агенты, работающие на нём, продолжат работу, а приложение автоматически переподключится.",
+            "Перед перезапуском демон дождётся завершения работающих агентов, поэтому активные ходы не прерываются. Нажмите «Перезапустить сейчас», чтобы переключиться немедленно. Приложение автоматически переподключится.",
           restarting: "Перезапуск...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "Ожидание завершения {{count}} агент(ов) перед перезапуском...",
+          drainPermission: "Ожидание ответа человека по {{count}} агент(ам)...",
+          restartNow: "Перезапустить сейчас",
+          restartNowConfirmTitle: "Перезапустить сейчас?",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "Перезапускает немедленно, не дожидаясь работающих агентов. Активные ходы будут прерваны.",
           unableToReconnectTitle: "Не удалось переподключиться",
           unableToReconnectMessage:
             "Хост {{name}} не вернулся в сеть. Убедитесь, что демон перезапустился.",

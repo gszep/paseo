@@ -2525,18 +2525,18 @@ export const ptBR: TranslationResources = {
         },
         restart: {
           title: "Reiniciar daemon",
-          hint: "Reinicia o processo do daemon. O app reconectará automaticamente",
+          hint: "Reinicia o daemon depois que os agentes em execução terminarem. O app reconectará automaticamente",
           confirm: "Reiniciar",
           confirmTitle: "Reiniciar {{name}}",
           confirmMessage:
-            "Isso vai reiniciar o daemon. Agentes em execução nele continuarão rodando; o app reconectará automaticamente.",
+            "Isso drena os agentes em execução antes de reiniciar o daemon, então turnos ativos não são interrompidos. Use «Reiniciar agora» para trocar imediatamente. O app reconectará automaticamente.",
           restarting: "Reiniciando...",
-          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
-          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
-          restartNow: "Restart now",
-          restartNowConfirmTitle: "Restart now?",
+          drainProgress: "Aguardando {{count}} agente(s) terminarem antes de reiniciar...",
+          drainPermission: "Aguardando resposta humana em {{count}} agente(s)...",
+          restartNow: "Reiniciar agora",
+          restartNowConfirmTitle: "Reiniciar agora?",
           restartNowConfirmMessage:
-            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
+            "Reinicia imediatamente sem esperar pelos agentes em execução. Turnos ativos serão interrompidos.",
           unableToReconnectTitle: "Não foi possível reconectar",
           unableToReconnectMessage:
             "{{name}} não voltou a ficar online. Verifique se ele reiniciou.",
