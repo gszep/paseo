@@ -204,7 +204,14 @@ connected host advertising `chiInbox`, then another connected capable host, only
 after verifying that host authenticates as the bound principal. A different account
 or deployment requires reconnecting the original account; transport fallback cannot
 switch recipients. The deployment inbox uses backend keyset pagination across
-repositories and History's date sections. The verified identity is displayed explicitly. Repository,
+repositories, presented as one History-style list: History's date sections, a
+client-side search and repository filter, lazy paging and agent-row columns. It
+shows every handoff the principal can read, received and authored; the verified
+identity is shown unobtrusively rather than as a header control row. Refresh is
+automatic on open, window focus/visibility, reconnect and the shared mention
+interval, and after the user's own actions; there is no manual refresh or
+Inbox/Project mode control. Search covers loaded pages only; a server-side query
+is a later step, not this one. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context
 browsing stay on the handoff's immutable snapshot. Structured access loss removes

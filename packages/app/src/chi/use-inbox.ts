@@ -9,7 +9,7 @@ import {
 } from "@/runtime/host-runtime";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useMentionScope } from "./use-mention-scope";
+import { useMentionScope, mentionRefreshIntervalMs } from "./use-mention-scope";
 import { mentionQueryKey } from "./mention-context";
 import { inboxAuthority } from "./inbox-identity";
 
@@ -79,8 +79,12 @@ export function useInbox(transport: ReturnType<typeof useInboxTransport>, inbox 
     retry: false,
     gcTime: 0,
     staleTimeMs: 0,
+    // Refresh without a manual button: on open (the screen's focus effect), on
+    // window focus/visibility, after reconnect, and while visible on the shared
+    // mention interval.
     refetchOnWindowFocus: "always",
-    refetchInterval: 30_000,
+    refetchOnReconnect: true,
+    refetchInterval: mentionRefreshIntervalMs,
     queryFn: async ({ pageParam }) => {
       const result = await scope.run(
         { action: "inbox", inbox, cursor: pageParam },

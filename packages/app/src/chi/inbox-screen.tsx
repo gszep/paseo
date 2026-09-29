@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Text, View, ScrollView, Pressable, FlatList } from "react-native";
-import { StyleSheet } from "react-native-unistyles";
+import {
+  Text,
+  View,
+  ScrollView,
+  Pressable,
+  FlatList,
+  type PressableStateCallbackType,
+} from "react-native";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { MessageSquare } from "lucide-react-native";
+import type { Theme } from "@/styles/theme";
 import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { router, useFocusEffect } from "expo-router";
@@ -16,16 +25,25 @@ import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
 import { FormTextInput } from "@/components/ui/form-field";
 import { MenuHeader } from "@/components/headers/menu-header";
-import {
-  deriveDateSectionKey,
-  formatDateSectionLabel,
-  type DateSectionKey,
-} from "@/components/date-sections";
+import { SearchField } from "@/components/ui/search-field";
+import { HighlightedText } from "@/components/ui/highlighted-text";
+import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
+import { formatDateSectionLabel } from "@/components/date-sections";
+import { formatTimeAgo } from "@/utils/time";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { openReplyForm } from "./reply-model";
 import { mentionError } from "./mention-errors";
 import { useInbox, useInboxTransport } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
+import { RepositoryFilter } from "./repository-filter";
+import {
+  ALL_REPOSITORIES_OPTION_ID,
+  buildInboxRows,
+  filterInboxHandoffs,
+  inboxRepositories,
+  repositoryLabel,
+  type InboxListRow,
+} from "./inbox-model";
 
 interface InboxContext {
   identity: ChiMentionContext;
@@ -33,16 +51,18 @@ interface InboxContext {
   execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
   isCurrent(): boolean;
 }
-type ListRow = { key: string; section: DateSectionKey } | { key: string; handoff: ChiHandoff };
-function rowKey(row: ListRow) {
+function rowKey(row: InboxListRow) {
   return row.key;
 }
-function EmptyInbox() {
-  return <Text style={styles.hint}>No mentions yet</Text>;
+function EmptyInbox({ filtered }: { filtered: boolean }) {
+  return <Text style={styles.hint}>{filtered ? "No mentions match" : "No mentions yet"}</Text>;
 }
 function LoadingMore() {
   return <Text style={styles.hint}>Loading more mentions…</Text>;
 }
+
+const ThemedMessageSquare = withUnistyles(MessageSquare);
+const mutedIconMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 function ChoiceButton({
   value,
   onSelect,
@@ -113,44 +133,38 @@ function Inbox({
   const cache = useQueryClient();
   const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
-  const [inbox, setInbox] = useState(true);
+  const [searchInput, setSearchInput] = useState("");
+  const [repository, setRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
   const [openSession, setOpenSession] = useState(true);
-  const query = useInbox(transport, inbox);
-  const rows = useMemo(() => {
-    const result: ListRow[] = [];
-    const ids = new Set<string>();
-    let section: DateSectionKey | undefined;
-    for (const page of query.data?.pages ?? [])
-      for (const handoff of page.handoffs) {
-        const key = `${handoff.repo}/${handoff.id}`;
-        if (ids.has(key)) continue;
-        ids.add(key);
-        const next = deriveDateSectionKey(new Date(handoff.createdAt));
-        if (next !== section) {
-          result.push({ key: next, section: next });
-          section = next;
-        }
-        result.push({ key, handoff });
-      }
-    return result;
-  }, [query.data]);
-  const { fetchNextPage, hasNextPage, isFetching } = query;
+  // A unified list: the backend returns every handoff this principal can read
+  // (received and authored), which is what the flat History-style view shows.
+  const query = useInbox(transport, false);
+  const loaded = useMemo(
+    () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
+    [query.data],
+  );
+  const repositories = useMemo(() => inboxRepositories(loaded), [loaded]);
+  const filtered = useMemo(
+    () => filterInboxHandoffs(loaded, { search: searchInput, repository }),
+    [loaded, searchInput, repository],
+  );
+  const rows = useMemo(() => buildInboxRows(filtered), [filtered]);
+  const { fetchNextPage, hasNextPage, isFetching, refetch } = query;
   const refresh = useCallback(
     () => void cache.invalidateQueries({ queryKey: context.queryKey }),
     [cache, context.queryKey],
   );
+  // Open/route focus refresh. Window focus and reconnect are handled by the
+  // query's own refetch options; this covers returning from a detail view.
+  useFocusEffect(
+    useCallback(() => {
+      void refetch();
+    }, [refetch]),
+  );
   const more = useCallback(() => {
     if (hasNextPage && !isFetching) void fetchNextPage();
   }, [hasNextPage, isFetching, fetchNextPage]);
-  const switchInbox = useCallback(() => {
-    setInbox(true);
-    setSelected(null);
-  }, []);
-  const switchProject = useCallback(() => {
-    setInbox(false);
-    setSelected(null);
-  }, []);
   const back = useCallback(() => setSelected(null), []);
   const choose = useCallback((handoff: ChiHandoff) => {
     setOpenSession(true);
@@ -161,36 +175,50 @@ function Inbox({
     setSelected(handoff);
   }, []);
   const renderRow = useCallback(
-    ({ item }: { item: ListRow }) =>
+    ({ item }: { item: InboxListRow }) =>
       "section" in item ? (
         <Text accessibilityRole="header" style={styles.section}>
           {formatDateSectionLabel(t, item.section)}
         </Text>
       ) : (
-        <HandoffRow
+        <InboxRow
           handoff={item.handoff}
+          search={searchInput}
           unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
           selected={selected?.id === item.handoff.id}
           onSelect={choose}
           onDiscuss={discuss}
         />
       ),
-    [t, selected?.id, choose, discuss, context.identity.actor],
+    [t, searchInput, selected?.id, choose, discuss, context.identity.actor],
   );
+  const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
+  const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
+  const emptyComponent = useMemo(() => <EmptyInbox filtered={isFiltered} />, [isFiltered]);
   const refreshing = query.isFetching && !query.isFetchingNextPage;
   return (
     <View style={styles.screen}>
-      <View style={styles.toolbar}>
-        <Text style={styles.hint}>Signed in as @{context.identity.actor.slice(7)}</Text>
-        <Button size="sm" variant="ghost" onPress={refresh}>
-          Refresh
-        </Button>
-        <Button size="sm" variant={inbox ? "secondary" : "ghost"} onPress={switchInbox}>
-          Inbox
-        </Button>
-        <Button size="sm" variant={inbox ? "ghost" : "secondary"} onPress={switchProject}>
-          Project
-        </Button>
+      <View style={styles.filterRail}>
+        <View style={styles.filterRow}>
+          <SearchField
+            value={searchInput}
+            onChangeText={setSearchInput}
+            placeholder="Search mentions"
+            clearAccessibilityLabel="Clear mention search"
+            testID="inbox-search-input"
+            clearTestID="inbox-search-clear"
+          />
+          <RepositoryFilter
+            repositories={repositories}
+            selected={repository}
+            onSelect={setRepository}
+            triggerTestID="inbox-repo-filter-trigger"
+            optionTestID={repositoryOptionTestID}
+          />
+        </View>
+        <Text style={styles.identity} testID="inbox-identity">
+          Signed in as @{context.identity.actor.slice(7)}
+        </Text>
       </View>
       {query.isError ? (
         <Alert
@@ -208,21 +236,25 @@ function Inbox({
             <FlatList
               testID="chi-flat-inbox"
               style={compact ? styles.screen : styles.list}
-              contentContainerStyle={styles.content}
+              contentContainerStyle={styles.listContent}
               data={rows}
               keyExtractor={rowKey}
               renderItem={renderRow}
               onEndReached={more}
               onEndReachedThreshold={0.5}
-              ListEmptyComponent={EmptyInbox}
+              keyboardShouldPersistTaps="handled"
+              ListEmptyComponent={emptyComponent}
               ListFooterComponent={query.isFetchingNextPage ? LoadingMore : null}
+              extraData={isFiltered}
             />
           ) : null}
           {selected ? (
             <View style={styles.screen}>
-              <Button variant="ghost" onPress={back}>
-                Back to mentions
-              </Button>
+              <View style={styles.detailHeader}>
+                <Button variant="ghost" onPress={back}>
+                  Back to mentions
+                </Button>
+              </View>
               <HandoffDetail
                 key={`${selected.repo}/${selected.id}/${openSession}`}
                 context={context}
@@ -237,55 +269,128 @@ function Inbox({
   );
 }
 
-function HandoffRow({
+/** One Mentions row, laid out on the History agent-row rails. */
+function InboxRow({
   handoff,
+  search,
   unread,
   selected,
   onSelect,
   onDiscuss,
 }: {
   handoff: ChiHandoff;
+  search: string;
   unread: boolean;
   selected: boolean;
   onSelect(h: ChiHandoff): void;
   onDiscuss(h: ChiHandoff): void;
 }) {
+  const compact = useIsCompactFormFactor();
+  const handle = `@${handoff.author.slice(7)}`;
+  const repo = repositoryLabel(handoff.repo);
+  const replies = handoff.replies?.length ?? 0;
+  const timeAgo = formatTimeAgo(new Date(handoff.createdAt));
+  const ranges = useMemo(
+    () => ({
+      handle: findHighlightRanges(search, handle),
+      repo: findHighlightRanges(search, repo),
+      text: findHighlightRanges(search, handoff.text),
+    }),
+    [search, handle, repo, handoff.text],
+  );
+
   const choose = useCallback(() => onSelect(handoff), [handoff, onSelect]);
-  const discuss = useCallback(() => onDiscuss(handoff), [handoff, onDiscuss]);
+  const discuss = useCallback(
+    (event: { stopPropagation?: () => void }) => {
+      event.stopPropagation?.();
+      onDiscuss(handoff);
+    },
+    [handoff, onDiscuss],
+  );
+  const pressableStyle = useCallback(
+    ({ pressed, hovered = false }: PressableStateCallbackType & { hovered?: boolean }) => [
+      styles.rowPress,
+      selected && styles.rowSelected,
+      Boolean(hovered) && styles.rowHovered,
+      pressed && styles.rowPressed,
+    ],
+    [selected],
+  );
+
   return (
-    <View>
+    <View style={styles.rowFrame} testID={`mention-row-${handoff.id}`}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Open mention ${handoff.text}`}
         onPress={choose}
-        style={[styles.row, selected && styles.selected]}
+        style={pressableStyle}
       >
-        <View style={styles.rowHeading}>
-          <Text style={styles.text}>@{handoff.author.slice(7)}</Text>
-          {unread ? (
-            <View
-              testID={`mention-unread-${handoff.id}`}
-              accessibilityLabel="Unread mention"
-              style={styles.unread}
+        <View style={styles.rowContent}>
+          <View style={styles.rowTitleRow}>
+            <HighlightedText
+              text={handle}
+              ranges={ranges.handle}
+              style={styles.rowHandle}
+              numberOfLines={1}
             />
-          ) : null}
+            {unread ? (
+              <View
+                testID={`mention-unread-${handoff.id}`}
+                accessibilityLabel="Unread mention"
+                style={styles.unread}
+              />
+            ) : null}
+            <Text style={styles.rowState}>{handoff.state}</Text>
+          </View>
+          {compact ? (
+            <View style={styles.rowMetaRow}>
+              <HighlightedText
+                text={repo}
+                ranges={ranges.repo}
+                style={styles.rowMetaText}
+                numberOfLines={1}
+              />
+              <Text style={styles.rowMetaSeparator}>·</Text>
+              <Text style={styles.rowMetaText}>{replies} replies</Text>
+              <Text style={styles.rowMetaSeparator}>·</Text>
+              <Text style={styles.rowMetaText}>{timeAgo}</Text>
+            </View>
+          ) : (
+            <HighlightedText
+              text={handoff.text}
+              ranges={ranges.text}
+              style={styles.rowSnippet}
+              numberOfLines={1}
+            />
+          )}
         </View>
-        <Text style={styles.text} numberOfLines={3}>
-          {handoff.text}
-        </Text>
-        <Text style={styles.hint}>
-          {handoff.repo.replace(/^github:/, "")} · {handoff.state} · {handoff.replies?.length ?? 0}{" "}
-          replies
-        </Text>
+        {!compact ? (
+          <View style={styles.rowColumns}>
+            <HighlightedText
+              text={repo}
+              ranges={ranges.repo}
+              style={styles.columnMeta}
+              numberOfLines={1}
+            />
+            <Text style={styles.columnMetaReplies} numberOfLines={1}>
+              {replies} replies
+            </Text>
+            <Text style={styles.columnMetaFixed} numberOfLines={1}>
+              {timeAgo}
+            </Text>
+          </View>
+        ) : null}
       </Pressable>
-      <Button
-        variant="ghost"
-        size="sm"
-        accessibilityLabel={`Discuss mention ${handoff.text}`}
+      <Pressable
         onPress={discuss}
+        accessibilityRole="button"
+        accessibilityLabel={`Discuss mention ${handoff.text}`}
+        hitSlop={8}
+        style={styles.rowDiscuss}
+        testID={`mention-replies-${handoff.id}`}
       >
-        Replies
-      </Button>
+        <ThemedMessageSquare size={14} uniProps={mutedIconMapping} />
+      </Pressable>
     </View>
   );
 }
@@ -719,12 +824,31 @@ const styles = StyleSheet.create((theme) => ({
   screen: { flex: 1, minHeight: 0, backgroundColor: theme.colors.surface0 },
   split: { flex: 1, flexDirection: "row", minHeight: 0 },
   list: { width: 360, flexGrow: 0, flexShrink: 0, backgroundColor: theme.colors.surfaceSidebar },
-  toolbar: {
+  filterRail: {
+    paddingHorizontal: {
+      xs: theme.spacing[3],
+      md: theme.spacing[6],
+    },
+    paddingTop: theme.spacing[4],
+    gap: theme.spacing[2],
+  },
+  filterRow: {
     flexDirection: "row",
-    flexWrap: "wrap",
     alignItems: "center",
     gap: theme.spacing[2],
-    padding: theme.spacing[3],
+  },
+  identity: {
+    color: theme.colors.foregroundExtraMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  listContent: {
+    paddingHorizontal: {
+      xs: theme.spacing[3],
+      md: theme.spacing[6],
+    },
+    paddingTop: theme.spacing[4],
+    paddingBottom: theme.spacing[6],
+    gap: theme.spacing[1],
   },
   content: {
     padding: theme.spacing[4],
@@ -739,8 +863,6 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.base,
   },
   row: { padding: theme.spacing[3], gap: theme.spacing[2], borderRadius: theme.borderRadius.lg },
-  rowHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  selected: { backgroundColor: theme.colors.surfaceSidebarHover },
   exact: { backgroundColor: theme.colors.surface1 },
   unread: { width: 7, height: 7, borderRadius: 4, backgroundColor: theme.colors.accent },
   section: {
@@ -751,4 +873,96 @@ const styles = StyleSheet.create((theme) => ({
   },
   text: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
   hint: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
+  rowFrame: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: theme.borderRadius.lg,
+    marginBottom: {
+      xs: theme.spacing[1],
+      md: 0,
+    },
+  },
+  rowPress: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: theme.spacing[2],
+    paddingLeft: theme.spacing[3],
+    paddingRight: theme.spacing[2],
+    borderRadius: theme.borderRadius.lg,
+  },
+  rowSelected: { backgroundColor: theme.colors.surface2 },
+  rowHovered: { backgroundColor: theme.colors.surface1 },
+  rowPressed: { backgroundColor: theme.colors.surface2 },
+  rowContent: { flex: 1, minWidth: 0, overflow: "hidden", gap: 2 },
+  rowTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    overflow: "hidden",
+  },
+  rowHandle: {
+    flexShrink: 1,
+    minWidth: 0,
+    fontSize: theme.fontSize.base,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foreground,
+  },
+  rowState: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted },
+  rowSnippet: { fontSize: theme.fontSize.base, color: theme.colors.foregroundMuted },
+  rowMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: theme.spacing[1],
+  },
+  rowMetaText: {
+    maxWidth: "100%",
+    fontSize: theme.fontSize.base,
+    color: theme.colors.foregroundMuted,
+  },
+  rowMetaSeparator: {
+    fontSize: theme.fontSize.base,
+    color: theme.colors.foregroundMuted,
+    opacity: 0.7,
+  },
+  rowColumns: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 0,
+    gap: theme.spacing[3],
+    marginLeft: theme.spacing[2],
+  },
+  columnMeta: {
+    fontSize: theme.fontSize.base,
+    color: theme.colors.foregroundMuted,
+    flexShrink: 0,
+    width: 132,
+  },
+  columnMetaReplies: {
+    fontSize: theme.fontSize.base,
+    color: theme.colors.foregroundMuted,
+    flexShrink: 0,
+    width: 96,
+    textAlign: "right" as const,
+  },
+  columnMetaFixed: {
+    fontSize: theme.fontSize.base,
+    color: theme.colors.foregroundMuted,
+    flexShrink: 0,
+    width: 72,
+    textAlign: "right" as const,
+  },
+  rowDiscuss: {
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
+    marginRight: theme.spacing[1],
+  },
+  detailHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: theme.spacing[3],
+  },
 }));

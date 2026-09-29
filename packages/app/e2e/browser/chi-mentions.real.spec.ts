@@ -199,6 +199,22 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
     await expect(readPage.getByRole("button", { name: "Choose host", exact: true })).toHaveCount(0);
     await expect(readPage.getByRole("heading", { name: "Today", exact: true })).toBeVisible();
     await expect(readPage.getByLabel("Unread mention", { exact: true })).toHaveCount(1);
+    // History-style rail: no manual refresh, no Inbox/Project mode buttons.
+    await expect(readPage.getByRole("button", { name: "Refresh", exact: true })).toHaveCount(0);
+    await expect(readPage.getByRole("button", { name: "Inbox", exact: true })).toHaveCount(0);
+    await expect(readPage.getByRole("button", { name: "Project", exact: true })).toHaveCount(0);
+    await expect(readPage.getByTestId("inbox-search-input")).toBeVisible();
+    await expect(readPage.getByTestId("inbox-repo-filter-trigger")).toBeVisible();
+    const mentionSearch = readPage.getByTestId("inbox-search-input");
+    await mentionSearch.fill("no-such-mention-run-xyz");
+    await expect(readPage.getByText("No mentions match", { exact: true })).toBeVisible();
+    await expect(
+      readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }),
+    ).toHaveCount(0);
+    await readPage.getByTestId("inbox-search-clear").click();
+    await expect(
+      readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }),
+    ).toBeVisible();
     await readPage.setViewportSize({ width: 1440, height: 1080 });
     await expect(readPage.getByLabel("1 unread mentions", { exact: true })).toBeVisible();
     await readPage.screenshot({
@@ -259,7 +275,6 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
     await expect(sendPage.getByText("Signed in as @sava-the-owl", { exact: true })).toBeVisible({
       timeout: 30000,
     });
-    await sendPage.getByRole("button", { name: "Project", exact: true }).click();
     await sendPage.getByRole("button", { name: `Open mention ${question}`, exact: true }).click();
     await expect(sendPage.locator('[data-testid^="referenced-entry-msg_synthetic_"]')).toBeVisible({
       timeout: 30000,
@@ -270,7 +285,6 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
       fullPage: true,
     });
     await sendPage.getByTestId("sidebar-mentions").click();
-    await sendPage.getByRole("button", { name: "Project", exact: true }).click();
     await sendPage
       .getByRole("button", { name: `Discuss mention ${question}`, exact: true })
       .click();
@@ -282,11 +296,11 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
     await expect(sendPage.getByText("acknowledged · revision 5", { exact: true })).toBeVisible({
       timeout: 30000,
     });
-    await readPage.getByRole("button", { name: "Refresh", exact: true }).click();
+    await readPage.bringToFront();
     await expect(readPage.getByText(authorReply, { exact: true })).toBeVisible({ timeout: 30000 });
     expect(await readPage.evaluate(() => Reflect.get(window, "mentionLoadingFlashes"))).toEqual([]);
     await sender.hideSources();
-    await readPage.getByRole("button", { name: "Refresh", exact: true }).click();
+    await readPage.bringToFront();
     await expect(readPage.getByText("Mention context unavailable", { exact: true })).toBeVisible({
       timeout: 30000,
     });
