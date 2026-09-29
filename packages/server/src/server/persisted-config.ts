@@ -13,6 +13,7 @@ import { AgentProfileSchema, AgentSkillSelectionSchema } from "@getpaseo/protoco
 import { PluginIdSchema, PluginSourceSchema } from "@getpaseo/protocol/plugin-config";
 import { TerminalProfileSchema } from "@getpaseo/protocol/terminal-profile";
 import { PaseoServicePortAllocationSchema } from "@getpaseo/protocol/paseo-config-schema";
+import { ChiDestinationConfigSchema, ChiMappingConfigSchema } from "@getpaseo/protocol/messages";
 
 export const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
 export const LogFormatSchema = z.enum(["pretty", "json"]);
@@ -308,6 +309,13 @@ export const PersistedConfigSchema = z
     providers: ProvidersSchema.optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    chi: z
+      .object({
+        destinations: z.record(z.string(), ChiDestinationConfigSchema).optional(),
+        mappings: z.array(ChiMappingConfigSchema).optional(),
+      })
+      .strict()
+      .optional(),
     worktrees: WorktreesConfigSchema.optional(),
     agents: z
       .object({

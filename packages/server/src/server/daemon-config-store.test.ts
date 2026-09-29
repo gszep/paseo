@@ -8,6 +8,14 @@ import { loadPersistedConfig } from "./persisted-config.js";
 import type { PersistedConfig } from "./persisted-config.js";
 import type { MutableDaemonConfig } from "@getpaseo/protocol/messages";
 
+function chiFromPersisted(persisted: PersistedConfig): MutableDaemonConfig["chi"] {
+  if (persisted.chi === undefined) return undefined;
+  return {
+    destinations: persisted.chi.destinations ?? {},
+    mappings: persisted.chi.mappings ?? [],
+  };
+}
+
 function reloadableConfig(
   persisted: PersistedConfig,
   options: { relayEnabledFallback?: boolean } = {},
@@ -38,6 +46,7 @@ function reloadableConfig(
     app: { baseUrl: "https://app.paseo.sh" },
     pluginsEnabled: persisted.pluginsEnabled ?? false,
     plugins: persisted.plugins ?? {},
+    chi: chiFromPersisted(persisted),
   };
 }
 
@@ -1007,6 +1016,38 @@ describe("DaemonConfigStore reload", () => {
     });
     expect(store.get().pluginsEnabled).toBe(false);
     expect(changes).toEqual([true, false]);
+  });
+
+  test("applies chi destinations and mappings without restart", () => {
+    const initial: PersistedConfig = {
+      version: 1,
+      chi: {
+        destinations: { henkaku: { name: "Henkaku", endpoint: "https://chi-backend.invalid" } },
+        mappings: [{ repo: "github:a/b", destination: "henkaku", audience: "shared" }],
+      },
+    };
+    const { paseoHome, store, persisted } = createReloadableStore({ initialPersisted: initial });
+    const changes: unknown[] = [];
+    store.onFieldChange("chi.destinations", (value) => changes.push(value));
+
+    writeConfig(paseoHome, {
+      ...persisted,
+      chi: {
+        destinations: {
+          henkaku: { name: "Henkaku", endpoint: "https://chi-backend.invalid" },
+          self: { name: "Self", endpoint: "https://self.invalid" },
+        },
+        mappings: persisted.chi?.mappings ?? [],
+      },
+    });
+
+    expect(store.reload()).toEqual({
+      appliedPaths: ["chi.destinations"],
+      restartRequiredPaths: [],
+      overrideControlledPaths: [],
+    });
+    expect(store.get().chi?.destinations?.self).toBeDefined();
+    expect(changes).toHaveLength(1);
   });
 
   test("classifies every leaf when a parent subtree is added", () => {
