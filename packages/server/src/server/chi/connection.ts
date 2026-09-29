@@ -46,9 +46,17 @@ import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
 import { classifyMentionFailure } from "./mention-failure.js";
+import {
+  parseChiDestinations,
+  resolveChiDestination,
+  resolveChiDestinationForRepo,
+  type ChiDestinationsConfig,
+  type ResolvedChiDestination,
+} from "./destinations.js";
 
 const label = "chi.native";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -60,6 +68,17 @@ const associationSchema = z.object({
   error: z.string().nullable(),
   conversationId: z.string().optional(),
   blocked: z.boolean().optional(),
+  // Pinned at association creation. Optional for migration of pre-P1 labels.
+  destination: z.string().optional(),
+  endpoint: z.string().optional(),
+  audience: z.enum(["private", "shared"]).optional(),
+  // Set when a configured destination no longer matches; uploads pause until resolved.
+  paused: z.boolean().optional(),
+  // Durable sync-needed marker: a capture is outstanding across restarts.
+  capturePending: z.boolean().optional(),
+  // True for associations created by the explicit canonical-transfer path on an
+  // unmapped repository; they keep legacy default-deployment capture.
+  explicit: z.boolean().optional(),
   adopt: z.object({ id: z.string(), sourceId: hash, expectedHead: hash }).optional(),
   reserve: z
     .object({
@@ -122,6 +141,31 @@ export interface ChiConnectionOptions {
   home: string;
   serverId: string;
   authority?: ChiAuthority;
+  /** Live daemon `chi` config; re-read on every resolution so reloads apply. */
+  getChiConfig?: () => MutableChiConfig | undefined;
+  /** Persisted agents not yet loaded into memory, for restart reconciliation. */
+  listStoredAgents?: () => Promise<readonly StoredChiAgent[]>;
+  getStoredAgent?: (agentId: string) => Promise<StoredChiAgent | null>;
+}
+/** Minimal persisted-agent shape needed to reconcile a sync without a live session. */
+export interface StoredChiAgent {
+  id: string;
+  cwd: string;
+  provider: string;
+  workspaceId?: string | null;
+  persistence?: { nativeHandle?: string | null; sessionId?: string | null } | null;
+  labels?: Record<string, string>;
+  archivedAt?: string | null;
+}
+interface CaptureTarget {
+  id: string;
+  cwd: string;
+  provider: string;
+  persistence: { nativeHandle?: string | null; sessionId?: string | null };
+  lifecycle: string;
+  finalizedForegroundTurnIds: Set<string>;
+  labels: Record<string, string>;
+  live: boolean;
 }
 export interface ChiAuthority {
   endpoint: string;
@@ -129,12 +173,12 @@ export interface ChiAuthority {
   login(): Promise<AuthState & { credentialGeneration?: string }>;
   invalidate(): void;
 }
-function createDeployment(): ChiAuthority {
+function createDeployment(endpoint = DEFAULT_BACKEND_URL): ChiAuthority {
   return {
-    endpoint: DEFAULT_BACKEND_URL,
+    endpoint,
     request: fetch,
     ...createSessionLogin(readGitHubCliToken, (githubToken) =>
-      exchangeGitHubToken({ githubToken, backendUrl: DEFAULT_BACKEND_URL }),
+      exchangeGitHubToken({ githubToken, backendUrl: endpoint }),
     ),
   };
 }
@@ -181,11 +225,8 @@ export class ChiConnection {
   private exclusive<T>(key: string, action: () => Promise<T>): Promise<T> {
     return this.manager.withChiAdmission(key, action);
   }
-  private client(repo: string, token: string) {
-    return new ConversationClient(
-      { repo, token, endpoint: this.authority.endpoint },
-      this.authority.request,
-    );
+  private client(repo: string, token: string, endpoint = this.authority.endpoint) {
+    return new ConversationClient({ repo, token, endpoint }, this.authorityFor(endpoint).request);
   }
   async assertCurrent(agent: { cwd: string; labels: Record<string, string> }): Promise<void> {
     const encoded = agent.labels[label];
@@ -193,9 +234,10 @@ export class ChiConnection {
     const association = associationSchema.parse(JSON.parse(encoded));
     if (association.blocked) throw new Error("chi-conversation-pending");
     if (!association.conversationId) return;
-    const auth = await this.authorize(association.repo, agent.cwd);
+    const endpoint = this.endpointFor(association.repo, association.endpoint);
+    const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
     if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
-    const { conversation } = await this.client(association.repo, auth.sessionToken).get({
+    const { conversation } = await this.client(association.repo, auth.sessionToken, endpoint).get({
       id: association.conversationId,
     });
     if (conversation.current.sourceId !== association.sourceId)
@@ -219,9 +261,10 @@ export class ChiConnection {
       if (this.manager.isChiAgentBusy(agentId)) throw new Error("chi-session-busy");
       let association = this.association(agent);
       if (!association) association = await this.share(agentId);
-      const auth = await this.authorize(association.repo, agent.cwd);
+      const endpoint = this.endpointFor(association.repo, association.endpoint);
+      const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
       if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
-      const client = this.client(association.repo, auth.sessionToken);
+      const client = this.client(association.repo, auth.sessionToken, endpoint);
       if (association.reserve?.transferId === transferId)
         return client.reserve(association.reserve);
       if (association.blocked && association.reserve) throw new Error("chi-conversation-pending");
@@ -295,11 +338,13 @@ export class ChiConnection {
   private readonly dirty = new Set<string>();
   private readonly continuing = new Set<string>();
   private readonly authority: ChiAuthority;
+  private readonly authorityByEndpoint = new Map<string, ChiAuthority>();
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
   ) {
     this.authority = options.authority ?? createDeployment();
+    this.authorityByEndpoint.set(this.authority.endpoint, this.authority);
     this.mentions = new ChiMentions(options.home, {
       endpoint: this.authority.endpoint,
       request: async (url, init) => {
@@ -310,6 +355,40 @@ export class ChiConnection {
         return response;
       },
     });
+  }
+
+  private chiConfig(): ChiDestinationsConfig | null {
+    return parseChiDestinations(this.options.getChiConfig?.());
+  }
+
+  /** One authority per endpoint; an injected fixture authority overrides them all. */
+  private authorityFor(endpoint: string): ChiAuthority {
+    if (this.options.authority) return this.options.authority;
+    const existing = this.authorityByEndpoint.get(endpoint);
+    if (existing) return existing;
+    const created = createDeployment(endpoint);
+    this.authorityByEndpoint.set(endpoint, created);
+    return created;
+  }
+
+  private async resolveForCwd(cwd: string): Promise<ResolvedChiDestination | null> {
+    const config = this.chiConfig();
+    if (!config) return null;
+    try {
+      const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+        cwd,
+        timeout: 5000,
+      });
+      return resolveChiDestination(config, remote.stdout);
+    } catch {
+      return null;
+    }
+  }
+
+  private endpointFor(repo: string, pinned?: string): string {
+    if (pinned) return pinned;
+    const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
+    return resolved?.endpoint ?? this.authority.endpoint;
   }
 
   private loseMentionAuthority() {
@@ -352,10 +431,15 @@ export class ChiConnection {
     const agent = this.manager.getAgent(agentId);
     if (!agent || agent.provider !== "opencode" || !messageId)
       throw new Error("chi-native-agent-required");
-    const association = this.association(agent);
-    if (!association) throw new Error("chi-share-required");
     const identity = await this.mentionIdentity(agent.cwd);
     this.requireMentionContext(identity, expectedContext);
+    let association = this.association(agent);
+    if (!association) {
+      const resolved = resolveChiDestinationForRepo(this.chiConfig(), identity.repo);
+      // Mentions remain a deliberate action on a local workspace only.
+      if (!resolved) throw new Error("chi-share-required");
+      association = await this.autoAssociate(agentId, resolved, identity.actor);
+    }
     if (identity.actor !== association.actor.toLowerCase() || identity.repo !== association.repo)
       throw new Error("chi-identity-mismatch");
     if (!admission) throw new Error("chi-mention-admission-required");
@@ -523,7 +607,7 @@ export class ChiConnection {
     return associationSchema.parse(JSON.parse(value));
   }
 
-  private async authorize(repo: string, cwd: string) {
+  private async authorize(repo: string, cwd: string, authority: ChiAuthority = this.authority) {
     try {
       const remote = await execCommand("git", ["remote", "get-url", "origin"], {
         cwd,
@@ -532,10 +616,10 @@ export class ChiConnection {
       const parsed = parseGitHubRemote(remote.stdout);
       if (!parsed || `github:${parsed.owner}/${parsed.repo}`.toLowerCase() !== repo.toLowerCase())
         throw new Error("chi-repository-mismatch");
-      const session = await this.authority.login();
-      const endpoint = endpointUrl(this.authority.endpoint);
+      const session = await authority.login();
+      const endpoint = endpointUrl(authority.endpoint);
       const get = async (path: string) => {
-        const response = await this.authority.request(append(endpoint, path), {
+        const response = await authority.request(append(endpoint, path), {
           redirect: "error",
           signal: AbortSignal.timeout(30000),
           headers: { authorization: `Bearer ${session.sessionToken}` },
@@ -569,7 +653,9 @@ export class ChiConnection {
     const parsed = parseGitHubRemote(remote.stdout);
     if (!parsed) throw new Error("chi-repository-mismatch");
     const repo = selectedRepo ?? `github:${parsed.owner}/${parsed.repo}`;
-    const auth = await this.authorize(repo, agent.cwd);
+    const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
+    const endpoint = resolved?.endpoint ?? DEFAULT_BACKEND_URL;
+    const auth = await this.authorize(repo, agent.cwd, this.authorityFor(endpoint));
     const encoded = await this.manager.updateAgentLabel(agentId, label, (current) => {
       if (current) {
         const previous = associationSchema.parse(JSON.parse(current));
@@ -577,16 +663,90 @@ export class ChiConnection {
         if (previous.actor !== auth.chiUserId) throw new Error("chi-identity-mismatch");
         return current;
       }
+      // Explicit canonical-transfer association. A mapped repository pins the
+      // configured destination; an unmapped one keeps the legacy default
+      // deployment and is never auto-created.
       return JSON.stringify({
         repo,
         actor: auth.chiUserId,
         sourceId: null,
         head: null,
         error: null,
+        ...(resolved
+          ? {
+              destination: resolved.destinationId,
+              endpoint: resolved.endpoint,
+              audience: resolved.audience,
+            }
+          : { explicit: true, endpoint }),
       });
     });
     const previous = associationSchema.parse(JSON.parse(encoded));
     return this.capture(agentId, /^evidence-http-409(?:-|$)/.test(previous.error ?? ""));
+  }
+
+  /** Create the auto-association label without requiring the network. */
+  private async autoAssociate(
+    agentId: string,
+    resolved: ResolvedChiDestination,
+    actor = "",
+  ): Promise<Association> {
+    const encoded = await this.manager.updateAgentLabel(agentId, label, (current) => {
+      if (current) return current;
+      return JSON.stringify({
+        repo: resolved.repo,
+        actor,
+        sourceId: null,
+        head: null,
+        error: null,
+        destination: resolved.destinationId,
+        endpoint: resolved.endpoint,
+        audience: resolved.audience,
+        capturePending: true,
+      });
+    });
+    return associationSchema.parse(JSON.parse(encoded));
+  }
+
+  /** A live agent when loaded, otherwise the persisted record needed to export it. */
+  private async captureTarget(agentId: string): Promise<CaptureTarget | null> {
+    const live = this.manager.getAgent(agentId);
+    if (live)
+      return {
+        id: live.id,
+        cwd: live.cwd,
+        provider: live.provider,
+        persistence: live.persistence ?? {},
+        lifecycle: live.lifecycle,
+        finalizedForegroundTurnIds: live.finalizedForegroundTurnIds,
+        labels: live.labels,
+        live: true,
+      };
+    const stored = await this.options.getStoredAgent?.(agentId);
+    if (!stored || stored.provider !== "opencode" || !stored.persistence) return null;
+    return {
+      id: stored.id,
+      cwd: stored.cwd,
+      provider: stored.provider,
+      persistence: stored.persistence,
+      lifecycle: "idle",
+      finalizedForegroundTurnIds: new Set<string>(),
+      labels: stored.labels ?? {},
+      live: false,
+    };
+  }
+
+  private async ensureAssociation(target: CaptureTarget): Promise<Association> {
+    const encoded = target.labels[label];
+    if (encoded) return associationSchema.parse(JSON.parse(encoded));
+    const resolved = await this.resolveForTarget(target);
+    if (!resolved) throw new Error("chi-share-required");
+    return this.autoAssociate(target.id, resolved);
+  }
+
+  private async resolveForTarget(target: CaptureTarget): Promise<ResolvedChiDestination | null> {
+    if (target.provider !== "opencode") return null;
+    return this.resolveForCwd(target.cwd);
   }
 
   capture(agentId: string, retryConflict = false): Promise<Association> {
@@ -597,7 +757,11 @@ export class ChiConnection {
       for (;;) {
         this.dirty.delete(agentId);
         try {
-          const result = await this.captureOnce(agentId, retryConflict);
+          const target = await this.captureTarget(agentId);
+          if (!target) throw new Error("chi-native-agent-required");
+          await this.ensureAssociation(target);
+          const fresh = (await this.captureTarget(agentId)) ?? target;
+          const result = await this.captureOnce(fresh, retryConflict);
           if (!this.dirty.has(agentId)) return result;
         } catch (error) {
           if (safeChiError(error) !== "chi-session-busy" || !this.dirty.has(agentId)) throw error;
@@ -615,86 +779,268 @@ export class ChiConnection {
     return operation;
   }
 
-  private async captureOnce(agentId: string, retryConflict: boolean): Promise<Association> {
-    const agent = this.manager.getAgent(agentId);
-    if (!agent || agent.provider !== "opencode" || !agent.persistence)
-      throw new Error("chi-native-agent-required");
-    const association = this.association(agent);
+  private async captureOnce(target: CaptureTarget, retryConflict: boolean): Promise<Association> {
+    const agentId = target.id;
+    let association = target.labels[label]
+      ? associationSchema.parse(JSON.parse(target.labels[label]!))
+      : null;
     if (!association) throw new Error("chi-share-required");
+    association = await this.reconcileAssociation(agentId, association);
+    if (association.paused) throw new Error(association.error ?? "chi-destination-paused");
     try {
       if (association.conversationId && !association.sourceId)
         throw new Error("chi-conversation-publication-pending");
-      if (agent.lifecycle === "running" || agent.lifecycle === "initializing")
+      if (target.lifecycle === "running" || target.lifecycle === "initializing")
         throw new Error("chi-session-busy");
-      const settledTurns = [...agent.finalizedForegroundTurnIds];
-      const auth = await this.authorize(association.repo, agent.cwd);
-      if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
-      const sessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
+      const settledTurns = [...target.finalizedForegroundTurnIds];
+      const endpoint = this.endpointFor(association.repo, association.endpoint);
+      const authority = this.authorityFor(endpoint);
+      const auth = await this.authorize(association.repo, target.cwd, authority);
+      if (!association.actor) {
+        association = await this.patchAssociation(agentId, { actor: auth.chiUserId });
+      } else if (auth.chiUserId !== association.actor) {
+        throw new Error("chi-identity-mismatch");
+      }
+      const pinned: Association = association;
+      await this.patchAssociation(agentId, { capturePending: true });
+      const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
+      if (!sessionId) throw new Error("chi-native-agent-required");
       return await this.manager.withNativeRuntime(sessionId, async (runtime) => {
         const native = JSON.stringify(await runtime.export(sessionId));
-        const current = this.manager.getAgent(agentId);
-        if (
-          !current ||
-          current.lifecycle === "running" ||
-          current.lifecycle === "initializing" ||
-          current.finalizedForegroundTurnIds.size !== settledTurns.length ||
-          settledTurns.some((id) => !current.finalizedForegroundTurnIds.has(id))
-        )
-          throw new Error("chi-session-busy");
+        if (target.live) {
+          const current = this.manager.getAgent(agentId);
+          if (
+            !current ||
+            current.lifecycle === "running" ||
+            current.lifecycle === "initializing" ||
+            current.finalizedForegroundTurnIds.size !== settledTurns.length ||
+            settledTurns.some((id) => !current.finalizedForegroundTurnIds.has(id))
+          )
+            throw new Error("chi-session-busy");
+        }
         const input = {
-          endpoint: this.authority.endpoint,
+          endpoint,
           token: auth.sessionToken,
-          repo: association.repo,
+          repo: pinned.repo,
           sessionId,
           native,
           mapping: {
             instanceId: `${this.options.serverId}:opencode`,
-            workspace: { hostId: this.options.serverId, path: agent.cwd },
+            workspace: { hostId: this.options.serverId, path: target.cwd },
           },
-          expectedHead: association.head,
-          visibility: "shared" as const,
+          expectedHead: pinned.head,
+          visibility: pinned.audience ?? ("private" as const),
           coverage: { kind: "export" as const, reason: null },
         };
         const captured = await (retryConflict
-          ? retryCaptureNative(input, auth.chiUserId, this.authority.request)
-          : captureNative(input, this.authority.request));
+          ? retryCaptureNative(input, auth.chiUserId, authority.request)
+          : captureNative(input, authority.request));
         const parsed = prepareNativeCapture(input);
         const updated = await this.patchAssociation(agentId, {
           sourceId: captured.sourceId,
           head: captured.head,
           error: null,
+          capturePending: false,
         });
-        await this.mentions.captured({
-          agentId,
-          identity: {
-            repo: association.repo,
-            actor: auth.chiUserId.toLowerCase(),
-            token: auth.sessionToken,
-          },
-          sourceId: captured.sourceId,
-          snapshot: captured.head,
-          messages: parsed.entries.map((entry) => ({
-            id: entry.nativeId,
-            payload: parsed.payloads[entry.revision]!,
-          })),
-        });
+        // Mentions stay on the primary deployment; a peer destination's mentions
+        // are out of P1 scope and are never cross-posted.
+        if (endpoint === this.authority.endpoint) {
+          await this.mentions.captured({
+            agentId,
+            identity: {
+              repo: pinned.repo,
+              actor: auth.chiUserId.toLowerCase(),
+              token: auth.sessionToken,
+            },
+            sourceId: captured.sourceId,
+            snapshot: captured.head,
+            messages: parsed.entries.map((entry) => ({
+              id: entry.nativeId,
+              payload: parsed.payloads[entry.revision]!,
+            })),
+          });
+        }
         return updated;
       });
     } catch (error) {
       const code = safeChiError(error);
-      await this.patchAssociation(agentId, { error: code });
+      await this.patchAssociation(agentId, { error: code, capturePending: true });
       throw new Error(code, { cause: error });
     }
   }
 
+  /**
+   * Bind a pre-P1 association to its configured destination, or pause it when the
+   * repository no longer maps or the pinned endpoint changed. Pausing never moves
+   * data and never blocks prompts.
+   */
+  private async reconcileAssociation(
+    agentId: string,
+    association: Association,
+  ): Promise<Association> {
+    const config = this.chiConfig();
+    if (!config) return association;
+    if (association.destination) {
+      const configured = config.destinations[association.destination];
+      if (!configured || configured.endpoint !== association.endpoint)
+        return this.pauseAssociation(agentId, "chi-destination-changed");
+      return association;
+    }
+    if (association.explicit) {
+      return this.patchAssociation(agentId, {
+        endpoint: association.endpoint ?? DEFAULT_BACKEND_URL,
+        paused: false,
+      });
+    }
+    const resolved = resolveChiDestinationForRepo(config, association.repo);
+    if (!resolved || resolved.endpoint !== DEFAULT_BACKEND_URL)
+      return this.pauseAssociation(
+        agentId,
+        resolved ? "chi-destination-mismatch" : "chi-destination-unmapped",
+      );
+    return this.patchAssociation(agentId, {
+      destination: resolved.destinationId,
+      endpoint: resolved.endpoint,
+      audience: association.audience ?? resolved.audience,
+      paused: false,
+    });
+  }
+
+  private pauseAssociation(agentId: string, code: string): Promise<Association> {
+    return this.patchAssociation(agentId, { paused: true, capturePending: false, error: code });
+  }
+
   afterTurn(agentId: string): void {
     const agent = this.manager.getAgent(agentId);
-    if (!agent?.labels[label]) return;
+    if (!agent || agent.provider !== "opencode") return;
+    const association = this.association(agent);
+    // A genuinely local workspace (no mapping at all) stays quiet.
+    if (!association && !this.chiConfig()) return;
     // Capture runs after manager turn reconciliation; the pending map coalesces
     // duplicate lifecycle notifications without polling or a second process.
     queueMicrotask(() => {
       void this.capture(agentId).catch(() => undefined);
     });
+  }
+
+  private async candidateLabels(): Promise<Array<{ id: string; labels: Record<string, string> }>> {
+    const candidates = new Map<string, Record<string, string>>();
+    for (const agent of this.manager.listAgents()) candidates.set(agent.id, agent.labels);
+    for (const record of (await this.options.listStoredAgents?.()) ?? []) {
+      if (record.archivedAt || candidates.has(record.id)) continue;
+      candidates.set(record.id, record.labels ?? {});
+    }
+    return Array.from(candidates, ([id, labels]) => ({ id, labels }));
+  }
+
+  private parseAssociation(encoded: string | undefined): Association | null {
+    if (!encoded) return null;
+    try {
+      return associationSchema.parse(JSON.parse(encoded));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Re-resolve every association after a live `chi` config reload. */
+  async onDestinationsChanged(): Promise<void> {
+    for (const candidate of await this.candidateLabels()) {
+      if (!candidate.labels[label]) continue;
+      void this.capture(candidate.id).catch(() => undefined);
+    }
+  }
+
+  /** Retry captures that are outstanding across a restart or reconnect. */
+  async reconcilePending(): Promise<void> {
+    for (const candidate of await this.candidateLabels()) {
+      const association = this.parseAssociation(candidate.labels[label]);
+      if (!association || association.paused || !association.capturePending) continue;
+      void this.capture(candidate.id).catch(() => undefined);
+    }
+  }
+
+  private async workspaceIdentities(
+    workspaceId: string,
+  ): Promise<Array<{ id: string; association: Association | null }>> {
+    const identities = this.manager
+      .listAgents()
+      .filter((agent) => agent.workspaceId === workspaceId && agent.provider === "opencode")
+      .map((agent) => ({ id: agent.id, association: this.association(agent) }));
+    const seen = new Set(identities.map((identity) => identity.id));
+    for (const record of (await this.options.listStoredAgents?.()) ?? []) {
+      if (
+        record.archivedAt ||
+        record.provider !== "opencode" ||
+        record.workspaceId !== workspaceId ||
+        seen.has(record.id)
+      )
+        continue;
+      seen.add(record.id);
+      identities.push({
+        id: record.id,
+        association: this.parseAssociation(record.labels?.[label]),
+      });
+    }
+    return identities;
+  }
+
+  private destinationFromIdentities(
+    identities: Array<{ association: Association | null }>,
+    config: ChiDestinationsConfig | null,
+  ): ResolvedChiDestination | null {
+    for (const { association } of identities) {
+      if (!association?.destination) continue;
+      const configured = config?.destinations[association.destination];
+      if (!configured) continue;
+      return {
+        repo: association.repo,
+        destinationId: association.destination,
+        name: configured.name,
+        endpoint: association.endpoint ?? configured.endpoint,
+        audience: association.audience ?? "private",
+      };
+    }
+    return null;
+  }
+
+  private aggregateSync(identities: Array<{ association: Association | null }>): {
+    pending: boolean;
+    error: string | null;
+  } {
+    let pending = false;
+    let error: string | null = null;
+    for (const { association } of identities) {
+      if (!association) continue;
+      if (association.capturePending) pending = true;
+      if (association.error) error = association.error;
+    }
+    return { pending, error };
+  }
+
+  async syncStatus(input: {
+    workspaceId: string;
+    cwd: string;
+    retry?: boolean;
+  }): Promise<{ destination: ChiSyncDestination | null; pending: boolean; error: string | null }> {
+    const identities = await this.workspaceIdentities(input.workspaceId);
+    if (input.retry)
+      for (const identity of identities) void this.capture(identity.id).catch(() => undefined);
+    const resolved =
+      this.destinationFromIdentities(identities, this.chiConfig()) ??
+      (await this.resolveForCwd(input.cwd));
+    const { pending, error } = this.aggregateSync(identities);
+    return {
+      destination: resolved
+        ? {
+            id: resolved.destinationId,
+            name: resolved.name,
+            endpoint: resolved.endpoint,
+            audience: resolved.audience,
+          }
+        : null,
+      pending,
+      error,
+    };
   }
 
   private async claimJournal(

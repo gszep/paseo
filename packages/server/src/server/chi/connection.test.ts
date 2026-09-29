@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
+import { prepareNativeCapture } from "@henkaku-center/chi-native/capture";
+import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority } from "./connection.js";
 import { classifyMentionFailure } from "./mention-failure.js";
@@ -1085,7 +1087,10 @@ describe("canonical Chi coordination", () => {
     const before = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
     releaseCapture.resolve();
     await share;
-    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toEqual(before);
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toEqual({
+      ...before,
+      capturePending: false,
+    });
     expect(before).toMatchObject({
       blocked: true,
       conversationId: id,
@@ -1413,5 +1418,180 @@ describe("canonical Chi coordination", () => {
     await expect(f.restart().withPromptAdmission(agent.id, async () => "turn")).rejects.toThrow(
       "pending",
     );
+  });
+});
+
+describe("automatic sync destinations", () => {
+  const destinationConfig = (
+    endpoint = DEFAULT_BACKEND_URL,
+    audience: "private" | "shared" = "shared",
+    mappings: Array<{ repo: string; destination: string; audience?: "private" | "shared" }> = [
+      { repo: "github:fixture/repo", destination: "henkaku", audience },
+    ],
+  ) => ({
+    destinations: { henkaku: { name: "Henkaku", endpoint } },
+    mappings,
+  });
+
+  async function syncFixture(config = destinationConfig()) {
+    const f = await fixture();
+    const evidence: Array<{ visibility: string }> = [];
+    let failEvidence = false;
+    const sourceId = prepareNativeCapture({
+      native: JSON.stringify(f.transfer),
+      mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+      coverage: { kind: "export", reason: null },
+      sessionId: "ses_fork",
+    }).sourceId;
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/evidence" && init?.method === "POST") {
+        if (failEvidence) throw new Error("network down");
+        const body = JSON.parse(String(init.body)) as { visibility: string };
+        evidence.push({ visibility: body.visibility });
+        return Response.json({ sourceId, head: "b".repeat(64) });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const connect = (override = config) =>
+      new ChiConnection(f.manager, {
+        home: f.home,
+        serverId: "server",
+        authority: f.authority,
+        getChiConfig: () => override,
+      });
+    const register = (labels?: Record<string, string>) =>
+      f.registration.register("ses_fork", labels ?? {});
+    return {
+      ...f,
+      evidence,
+      sourceId,
+      connect,
+      register,
+      setFailEvidence: (value: boolean) => {
+        failEvidence = value;
+      },
+    };
+  }
+
+  it("auto-associates a mapped workspace and captures under the mapping audience", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const result = await f.connect().capture(agent.id);
+    expect(result.sourceId).toBe(f.sourceId);
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association).toMatchObject({
+      repo: "github:fixture/repo",
+      destination: "henkaku",
+      audience: "shared",
+      actor: "github:owner",
+      capturePending: false,
+    });
+    expect(f.evidence.at(-1)?.visibility).toBe("shared");
+  });
+
+  it("captures after a settled turn without a manual share", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    f.connect().afterTurn(agent.id);
+    await vi.waitFor(() => expect(f.evidence).toHaveLength(1));
+  });
+
+  it("pins the audience at creation and never widens it", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    await f.connect().capture(agent.id);
+    const privateConfig = destinationConfig(DEFAULT_BACKEND_URL, "private");
+    await f.connect(privateConfig).capture(agent.id);
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).audience).toBe("shared");
+    expect(f.evidence.at(-1)?.visibility).toBe("shared");
+  });
+
+  it("leaves an unmapped workspace local with no association and no upload", async () => {
+    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const agent = await f.register();
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-share-required");
+    expect(f.manager.getAgent(agent.id)!.labels["chi.native"]).toBeUndefined();
+    expect(f.evidence).toHaveLength(0);
+  });
+
+  it("records an offline capture, admits prompts, and reconciles on restart without a new turn", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    f.setFailEvidence(true);
+    await expect(f.connect().capture(agent.id)).rejects.toThrow();
+    let association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.capturePending).toBe(true);
+    expect(association.error).toBeTruthy();
+    await expect(f.connect().withPromptAdmission(agent.id, async () => "admitted")).resolves.toBe(
+      "admitted",
+    );
+    f.setFailEvidence(false);
+    await f.connect().reconcilePending();
+    await vi.waitFor(() => expect(f.evidence).toHaveLength(1));
+    association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.capturePending).toBe(false);
+    expect(association.sourceId).toBe(f.sourceId);
+  });
+
+  it("binds a legacy association to the configured default destination", async () => {
+    const f = await syncFixture();
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    const result = await f.connect().capture(agent.id);
+    expect(result).toMatchObject({
+      destination: "henkaku",
+      endpoint: DEFAULT_BACKEND_URL,
+      audience: "shared",
+    });
+    expect(f.evidence).toHaveLength(1);
+  });
+
+  it("pauses upload without moving data when a legacy association's endpoint no longer matches", async () => {
+    const f = await syncFixture(destinationConfig("https://other.invalid", "shared"));
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-mismatch");
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association).toMatchObject({ paused: true, error: "chi-destination-mismatch" });
+    expect(f.evidence).toHaveLength(0);
+  });
+
+  it("reports workspace sync status and retries on demand", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const before = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
+    expect(before.destination).toMatchObject({ id: "henkaku", name: "Henkaku" });
+    expect(before.pending).toBe(false);
+    const retried = await f.connect().syncStatus({
+      workspaceId: "workspace",
+      cwd: f.home,
+      retry: true,
+    });
+    await vi.waitFor(() => expect(f.evidence).toHaveLength(1));
+    expect(retried.destination).toMatchObject({ id: "henkaku" });
+    expect(agent.id).toBeTruthy();
+  });
+
+  it("reports a local destination for an unmapped workspace", async () => {
+    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    await f.register();
+    const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
+    expect(status.destination).toBeNull();
   });
 });
