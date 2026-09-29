@@ -721,6 +721,25 @@ describe("Chi owner recovery", () => {
         .mock.calls.every(([, init]) => !init?.method || init.method === "GET"),
     ).toBe(true);
   });
+
+  it("scans continuation content before publish and writes no publication on a finding", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      localScan: async () => {
+        throw new Error("capture-local-secret-rejected");
+      },
+    });
+    await expect(connection.continue(f.input, f.registration)).rejects.toThrow(
+      "capture-local-secret-rejected",
+    );
+    const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
+    await expect(readFile(publicationPath, "utf8")).rejects.toThrow();
+    expect(f.requests.some((entry) => entry.path.endsWith("/publish"))).toBe(false);
+  });
 });
 
 async function canonicalFixture() {
@@ -1842,20 +1861,27 @@ describe("automatic sync destinations", () => {
     expect(f.evidenceAttempts()).toBe(0);
   });
 
-  it("fails closed when the local scanner is unavailable", async () => {
+  it("fails closed when the local scanner is unavailable and retries on the next turn", async () => {
     const f = await syncFixture();
     const agent = await f.register();
     const localScan = vi.fn(async () => {
       throw new Error("capture-local-scanner-unavailable");
     });
-    await expect(f.connect(undefined, localScan).capture(agent.id)).rejects.toThrow(
-      "capture-local-scanner-unavailable",
-    );
+    const connection = f.connect(undefined, localScan);
+    await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-scanner-unavailable");
     expect(f.evidenceAttempts()).toBe(0);
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
       error: "capture-local-scanner-unavailable",
-      capturePending: false,
+      capturePending: true,
     });
+    // Retryable once gitleaks is installed: a settled turn retries (bounded).
+    const afterCapture = localScan.mock.calls.length;
+    connection.afterTurn(agent.id);
+    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterCapture));
+    const afterTurn = localScan.mock.calls.length;
+    await connection.reconcilePending();
+    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterTurn));
+    expect(f.evidenceAttempts()).toBe(0);
   });
 
   it("treats a server secret-scan rejection as terminal and never auto-retries", async () => {

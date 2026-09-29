@@ -53,13 +53,13 @@ export function syncAudienceLabel(audience: ChiAudience): string {
 }
 
 /**
- * Secret-scan rejections are terminal: nothing was uploaded and retrying cannot
- * succeed until the local history changes. The notice hides its Retry action.
+ * Secret rejections are terminal: nothing was uploaded and retrying cannot
+ * succeed until the local history changes, so the notice hides Retry. A missing
+ * local scanner stays retryable (install it and retry), so it is not terminal.
  */
 export function isTerminalSecretError(code: string | null | undefined): boolean {
   return (
     code === "capture-local-secret-rejected" ||
-    code === "capture-local-scanner-unavailable" ||
     code === "evidence-http-422-server-secret-scan-rejected"
   );
 }

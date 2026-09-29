@@ -90,6 +90,18 @@ describe("SyncNoticeView", () => {
     );
     expect(container.textContent).not.toContain("Reconnect");
   });
+
+  it("keeps Retry for a missing local scanner and shows the host-dependency copy", () => {
+    const { container } = mount(
+      <SyncNoticeView
+        error="capture-local-scanner-unavailable"
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).toContain("The secret scanner is unavailable on this host");
+  });
 });
 
 describe("useSyncNoticeDismissal", () => {

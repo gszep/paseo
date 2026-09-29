@@ -118,8 +118,9 @@ describe("sync destination state", () => {
 
   it("classifies terminal secret-scan errors", () => {
     expect(isTerminalSecretError("capture-local-secret-rejected")).toBe(true);
-    expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(true);
     expect(isTerminalSecretError("evidence-http-422-server-secret-scan-rejected")).toBe(true);
+    // A missing scanner is retryable once gitleaks is installed.
+    expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(false);
     expect(isTerminalSecretError("evidence-http-503")).toBe(false);
     expect(isTerminalSecretError(null)).toBe(false);
   });

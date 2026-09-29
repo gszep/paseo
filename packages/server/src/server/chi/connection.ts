@@ -123,10 +123,10 @@ function sameActor(a: string, b: string): boolean {
   // login as typed by either the mention path (lowercased) or the capture path.
   return a.toLowerCase() === b.toLowerCase();
 }
-/** Secret-scan rejections are terminal: never auto-retry, never "reconnect and retry". */
+/** Secret rejections are terminal: never auto-retry, never "reconnect and retry".
+ * A missing local scanner is retryable (install it and the next turn/reconnect retries). */
 const TERMINAL_SYNC_ERRORS = new Set<string>([
   "capture-local-secret-rejected",
-  "capture-local-scanner-unavailable",
   "evidence-http-422-server-secret-scan-rejected",
 ]);
 function isTerminalSyncError(error: string | null | undefined): boolean {
@@ -1220,11 +1220,16 @@ export class ChiConnection {
       const current = await client.get({ id, transferId });
       if (current.transfer?.phase !== "claimed" || current.transfer.claim?.id !== claimId)
         throw new Error("chi-conversation-recovery-required");
+      const native = JSON.stringify(await runtime.export(sessionId));
+      const coverage = { kind: "export" as const, reason: null };
+      // Continuation content leaves the host too; scan it before the capture is
+      // persisted or published. Same scanner, same terminal handling.
+      await this.localScan({ native, mapping: destination, coverage, sessionId });
       const capture = prepareNativeCapture({
         sessionId,
-        native: JSON.stringify(await runtime.export(sessionId)),
+        native,
         mapping: destination,
-        coverage: { kind: "export", reason: null },
+        coverage,
       }).capture;
       const publication: PublishRequest = {
         id,

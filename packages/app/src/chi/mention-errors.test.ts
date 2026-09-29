@@ -21,7 +21,8 @@ test("maps a missing local scanner to the host-dependency copy", () => {
   const message = mentionError(new Error("capture-local-scanner-unavailable"));
   expect(message).toBe(SCANNER_COPY);
   expect(message).not.toContain("Reconnect");
-  expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(true);
+  // Retryable: installing gitleaks and retrying can succeed.
+  expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(false);
 });
 
 test("a transient failure still suggests a retry, not the secret copy", () => {
