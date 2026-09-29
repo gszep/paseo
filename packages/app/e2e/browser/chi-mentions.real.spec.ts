@@ -682,7 +682,9 @@ test.describe("sync destinations (rendered)", () => {
       ).toBeVisible({
         timeout: 45000,
       });
-      await expect(readPage.getByLabel("Unread mention", { exact: true })).toHaveCount(1);
+      await expect(readPage.getByLabel("Unread mention", { exact: true })).toHaveCount(1, {
+        timeout: 30000,
+      });
       await readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }).click();
       await expect(readPage.getByText(/Exact entry: msg_synthetic_/)).toBeVisible({
         timeout: 30000,

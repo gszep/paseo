@@ -344,6 +344,9 @@ export class ChiConnection {
   private readonly continuing = new Set<string>();
   private readonly authority: ChiAuthority;
   private readonly authorityByEndpoint = new Map<string, ChiAuthority>();
+  // Status polls re-resolve the same cwd repeatedly; capture still re-reads the
+  // remote. Cleared whenever the chi config reloads.
+  private readonly originCache = new Map<string, string>();
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
@@ -376,18 +379,27 @@ export class ChiConnection {
     return created;
   }
 
-  private async resolveForCwd(cwd: string): Promise<ResolvedChiDestination | null> {
+  private async resolveForCwd(
+    cwd: string,
+    options: { cache?: boolean } = {},
+  ): Promise<ResolvedChiDestination | null> {
     const config = this.chiConfig();
     if (!config) return null;
-    try {
-      const remote = await execCommand("git", ["remote", "get-url", "origin"], {
-        cwd,
-        timeout: 5000,
-      });
-      return resolveChiDestination(config, remote.stdout);
-    } catch {
-      return null;
+    const cached = options.cache ? this.originCache.get(cwd) : undefined;
+    let origin: string | null | undefined = cached;
+    if (origin === undefined) {
+      try {
+        const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+          cwd,
+          timeout: 5000,
+        });
+        origin = remote.stdout;
+      } catch {
+        origin = null;
+      }
+      if (options.cache && origin) this.originCache.set(cwd, origin);
     }
+    return origin ? resolveChiDestination(config, origin) : null;
   }
 
   private endpointFor(pinned?: string): string {
@@ -969,6 +981,7 @@ export class ChiConnection {
 
   /** Re-resolve every association after a live `chi` config reload. */
   async onDestinationsChanged(): Promise<void> {
+    this.originCache.clear();
     for (const candidate of await this.candidateLabels()) {
       if (!candidate.labels[label]) continue;
       void this.capture(candidate.id).catch(() => undefined);
@@ -1070,7 +1083,7 @@ export class ChiConnection {
     if (input.retry)
       for (const identity of identities) void this.capture(identity.id).catch(() => undefined);
     const fromAssociations = this.destinationFromIdentities(identities, this.chiConfig());
-    const resolved = fromAssociations ?? (await this.resolveForCwd(input.cwd));
+    const resolved = fromAssociations ?? (await this.resolveForCwd(input.cwd, { cache: true }));
     const { pending, error } = this.aggregateSync(identities);
     const actor = fromAssociations?.actor ?? null;
     return {

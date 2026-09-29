@@ -713,6 +713,8 @@ export class Session {
   private readonly projectIcons: ProjectIconReader;
   private readonly worktreesRoot: string | undefined;
   private readonly rewindInitiators = new Map<string, object | undefined>();
+  // Reconcile Chi sync once per client session (a real reconnect), not on every fetch.
+  private chiReconciled = false;
 
   private agentManager: AgentManager;
   private readonly agentStorage: AgentStorage;
@@ -6284,9 +6286,12 @@ export class Session {
       const payload = request.sync
         ? await this.readAgentDirectorySync(request)
         : await this.listFetchAgentsEntries(request);
-      // A client fetch is the earliest reliable reconnect signal for this host;
-      // retry any capture that was outstanding while the backend was unreachable.
-      void this.agentManager.chi?.reconcilePending();
+      // Reconcile Chi sync on the first fetch of a client session (a real
+      // reconnect), never on every fetch — repeated reconciles add churn.
+      if (!this.chiReconciled) {
+        this.chiReconciled = true;
+        void this.agentManager.chi?.reconcilePending();
+      }
       const snapshotUpdatedAtByAgentId = new Map<string, number>();
       for (const entry of payload.entries) {
         const parsedUpdatedAt = Date.parse(entry.agent.updatedAt);

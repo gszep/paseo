@@ -3,7 +3,7 @@ import { QueryClient } from "@tanstack/react-query";
 import { createMentionScope, mentionQueryKey, type ScopedMentionResult } from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
-import { createInboxAuthority } from "./inbox-authority";
+import { createInboxAuthority, inboxHostsSettled } from "./inbox-authority";
 
 test("inbox transport stays bound to Alice across disconnect, credential rotation and reload", async () => {
   const values = new Map<string, string>();
@@ -41,6 +41,24 @@ test("inbox transport stays bound to Alice across disconnect, credential rotatio
   await expect(
     createInboxAuthority(storage).resolve(["bob", "backup"], undefined, verify),
   ).rejects.toThrow("Multiple Chi accounts");
+});
+
+test("inbox hosts are settled only after every host reports a terminal connection", () => {
+  const statuses = new Map<string, "connecting" | "online" | "offline" | "error">([
+    ["a", "online"],
+    ["b", "connecting"],
+  ]);
+  const statusOf = (id: string) => statuses.get(id);
+  // A still-connecting peer means the inbox is not settled; no false reconnect error.
+  expect(inboxHostsSettled(["a", "b"], statusOf)).toBe(false);
+  statuses.set("b", "offline");
+  expect(inboxHostsSettled(["a", "b"], statusOf)).toBe(true);
+  // An unreported host (no status yet since load) is also not settled.
+  expect(inboxHostsSettled(["a", "c"], statusOf)).toBe(false);
+  statuses.set("c", "error");
+  expect(inboxHostsSettled(["a", "b", "c"], statusOf)).toBe(true);
+  // No hosts at all is a settled "no host" state, not a permanent loading state.
+  expect(inboxHostsSettled([], statusOf)).toBe(true);
 });
 
 const identity: ChiMentionContext = {

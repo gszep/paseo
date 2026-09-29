@@ -65,7 +65,11 @@ export function useSyncDestination(
       .catch(() => undefined);
   }, [client, workspaceId, refetch]);
   useEffect(() => {
-    if (connected) void refetch();
+    if (!connected) return;
+    // Coalesce a burst of label writes (one capture patches several fields) and
+    // the reconnect transition into a single status refetch.
+    const handle = setTimeout(() => void refetch(), 300);
+    return () => clearTimeout(handle);
   }, [connected, labelSignature, refetch]);
   return deriveSyncDestinationState({
     response: query.isSuccess ? query.data : null,
