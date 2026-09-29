@@ -3581,10 +3581,13 @@ export class DaemonClient {
     const graceMs = this.config.hostRestartResendGraceMs ?? HOST_RESTART_RESEND_GRACE_MS;
     const fallbackWindowMs =
       this.config.hostRestartResendTimeoutMs ?? HOST_RESTART_RESEND_TIMEOUT_MS;
+    // Anchor the fallback once: an old daemon that never sends a drain deadline
+    // must still give up after one bounded window, not extend it per retry.
+    const fallbackDeadlineAt = Date.now() + fallbackWindowMs;
     let lastError = firstError;
 
     for (;;) {
-      const deadlineAt = lastError.drainDeadlineAt ?? Date.now() + fallbackWindowMs;
+      const deadlineAt = lastError.drainDeadlineAt ?? fallbackDeadlineAt;
       const remainingMs = deadlineAt + graceMs - Date.now();
       if (remainingMs <= 0) {
         break;

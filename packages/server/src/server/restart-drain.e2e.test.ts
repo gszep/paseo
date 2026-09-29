@@ -291,3 +291,48 @@ test("a prompt rejected during a drain is auto-accepted once the drain times out
     await daemon.close();
   }
 });
+
+test("--wait-idle superseded by --wait-idle --force emits exactly one restart intent", async () => {
+  const { agentClients, gates } = holdMatching(/hold/i);
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartAutoResend: false,
+  });
+  try {
+    await startHeldTurn(daemon, client, "hold this turn");
+
+    let drainingA = false;
+    const drainA = client.restartServer("drain_a", undefined, {
+      waitIdle: true,
+      idleTimeoutMs: 5_000,
+      onDrainProgress: () => {
+        drainingA = true;
+      },
+    });
+    await vi.waitFor(() => expect(drainingA).toBe(true));
+
+    // B force-supersedes A and starts its own drain; A must not abort it while
+    // cleaning up.
+    const drainB = client.restartServer("drain_b_force", undefined, {
+      waitIdle: true,
+      idleTimeoutMs: 5_000,
+      force: true,
+    });
+
+    const ackA = await drainA;
+    expect(ackA.status).toBe("restart_requested");
+
+    // Release the held turn so B's drain completes and B emits the intent.
+    gates[0]!.resolve();
+    const ackB = await drainB;
+    expect(ackB.status).toBe("restart_requested");
+
+    expect(daemon.daemon.agentManager.getRestartIntentCount()).toBe(1);
+    expect(daemon.daemon.agentManager.hasEmittedRestartIntent()).toBe(true);
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await client.close();
+    await daemon.close();
+  }
+});

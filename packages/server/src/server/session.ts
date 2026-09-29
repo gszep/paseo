@@ -3324,7 +3324,8 @@ export class Session {
     force: boolean;
   }): Promise<"proceed" | "timed_out" | "canceled" | "superseded"> {
     const { requestId, idleTimeoutMs, force } = params;
-    if (!this.agentManager.beginDraining(idleTimeoutMs)) {
+    const owner = this.agentManager.beginDraining(idleTimeoutMs);
+    if (!owner) {
       this.emitRestartDrainingStatus(
         requestId,
         "already_draining",
@@ -3378,7 +3379,7 @@ export class Session {
       }
 
       const remaining = outcome.agents.map((agent) => agent.agentId);
-      this.agentManager.endDraining();
+      this.agentManager.endDraining(owner);
       if (force) {
         this.sessionLogger.warn(
           { requestId, remaining },
@@ -3398,7 +3399,9 @@ export class Session {
       return "timed_out";
     } catch (error) {
       const requesterGone = this.delivery.requestSignal.aborted;
-      this.agentManager.endDraining();
+      // Only end the drain if this request still owns it; a force restart may
+      // have superseded it and started a newer drain.
+      this.agentManager.endDraining(owner);
       this.sessionLogger.warn({ requestId, err: error, requesterGone }, "Restart drain aborted");
       // A force restart aborted the drain; the caller should still observe the
       // replacement. If the requester itself disconnected, stay silent.

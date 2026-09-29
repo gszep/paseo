@@ -759,8 +759,10 @@ export class AgentManager {
   private acceptingAgentRegistrations = true;
   private draining = false;
   private drainController: AbortController | null = null;
+  private drainOwnerToken: symbol | null = null;
   private drainDeadlineAt: number | null = null;
   private restartIntentEmitted = false;
+  private restartIntentCount = 0;
   private readonly admissionTickets = new Set<symbol>();
 
   constructor(options: AgentManagerOptions) {
@@ -864,15 +866,17 @@ export class AgentManager {
 
   /**
    * Enter drain mode: stop admitting new prompt/turn work so in-flight runs can
-   * settle, then let a restart swap the worker. Returns false when a drain is
-   * already active so callers never start a second one.
+   * settle, then let a restart swap the worker. Returns a token identifying this
+   * drain when it starts one, or null when a drain is already active. Only the
+   * owning token (or a global, tokenless call) may end that drain.
    */
-  beginDraining(idleTimeoutMs?: number): boolean {
+  beginDraining(idleTimeoutMs?: number): symbol | null {
     if (this.draining) {
-      return false;
+      return null;
     }
     this.draining = true;
     this.drainController = new AbortController();
+    this.drainOwnerToken = Symbol("drain-owner");
     this.drainDeadlineAt = typeof idleTimeoutMs === "number" ? Date.now() + idleTimeoutMs : null;
     this.logger.info(
       {
@@ -881,16 +885,25 @@ export class AgentManager {
       },
       "Agent manager entered draining state",
     );
-    return true;
+    return this.drainOwnerToken;
   }
 
-  /** Leave drain mode. Safe to call when not draining (cancelled/failed restart). */
-  endDraining(): void {
+  /**
+   * Leave drain mode. Safe to call when not draining. A caller that owns a
+   * drain passes its token so it can never end a newer drain started after it
+   * was superseded; a tokenless call (an explicit force/plain restart) ends
+   * whichever drain is active.
+   */
+  endDraining(owner?: symbol): void {
     if (!this.draining) {
+      return;
+    }
+    if (owner !== undefined && this.drainOwnerToken !== owner) {
       return;
     }
     this.draining = false;
     this.drainDeadlineAt = null;
+    this.drainOwnerToken = null;
     this.drainController?.abort();
     this.drainController = null;
     this.logger.info("Agent manager left draining state");
@@ -915,6 +928,12 @@ export class AgentManager {
 
   markRestartIntentEmitted(): void {
     this.restartIntentEmitted = true;
+    this.restartIntentCount += 1;
+  }
+
+  /** Number of restart intents emitted in this process (test/observability). */
+  getRestartIntentCount(): number {
+    return this.restartIntentCount;
   }
 
   /**

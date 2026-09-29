@@ -31,12 +31,12 @@ test("draining freezes prompt admission until draining is cleared", async () => 
     expect(manager.isDraining()).toBe(false);
     expect(manager.assertAcceptingPrompts()).toBeUndefined();
 
-    expect(manager.beginDraining()).toBe(true);
+    expect(manager.beginDraining()).toBeTruthy();
     expect(manager.isDraining()).toBe(true);
     expect(() => manager.assertAcceptingPrompts()).toThrow(HostRestartingError);
 
     // A second begin is a no-op: a caller must never start a second drain.
-    expect(manager.beginDraining()).toBe(false);
+    expect(manager.beginDraining()).toBeNull();
     manager.endDraining();
     manager.endDraining();
     expect(manager.isDraining()).toBe(false);
@@ -84,7 +84,7 @@ test("waitForAllIdle counts an in-progress prompt admission as drain work", asyn
   try {
     // A prompt passed the drain check and took a ticket just before the drain.
     const ticket = manager.beginAdmission();
-    expect(manager.beginDraining()).toBe(true);
+    expect(manager.beginDraining()).toBeTruthy();
 
     // The drain rejects new prompts but admits the ticket holder, so the
     // pre-drain prompt runs instead of failing mid-receipt.
@@ -202,6 +202,30 @@ test("endDraining aborts an active drain wait so a force restart owns the intent
     manager.endDraining();
     await expect(wait).rejects.toThrow("drain_canceled");
     gate.resolve();
+  } finally {
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("a superseded drain cannot end the newer drain that replaced it", async () => {
+  const { manager, agent } = await setup();
+  try {
+    const ownerA = manager.beginDraining(60_000);
+    expect(ownerA).not.toBeNull();
+
+    // Force supersedes A globally, then B starts and owns the drain.
+    manager.endDraining();
+    const ownerB = manager.beginDraining(60_000);
+    expect(ownerB).not.toBeNull();
+    expect(manager.isDraining()).toBe(true);
+
+    // A's cleanup must be a no-op while B owns the drain.
+    manager.endDraining(ownerA!);
+    expect(manager.isDraining()).toBe(true);
+    expect(manager.getDrainDeadlineAt()).not.toBeNull();
+
+    manager.endDraining(ownerB!);
+    expect(manager.isDraining()).toBe(false);
   } finally {
     await manager.closeAgent(agent.id);
   }

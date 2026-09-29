@@ -4107,7 +4107,9 @@ test("sendAgentMessage auto-resends after the replacement worker reconnects, sam
     clientId: "clsk_unit_test",
     logger: createMockLogger(),
     reconnect: { enabled: true, baseDelayMs: 1, maxDelayMs: 5 },
-    hostRestartRetryIntervalMs: 1,
+    // Far longer than the test: a retry this fast can only come from the
+    // reconnect event, proving immediate-on-reconnect.
+    hostRestartRetryIntervalMs: 60_000,
     transportFactory: () => mock.transport,
   });
   clients.push(client);
@@ -4193,6 +4195,46 @@ test("sendAgentMessage gives up and throws the retryable error after the drain d
     failure: { outcome: "not_committed" },
   });
   expect(sendRequestsIn(mock.sent)).toHaveLength(1);
+});
+
+test("sendAgentMessage gives up after one fallback window when the daemon sends no deadline", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    hostRestartResendTimeoutMs: 80,
+    hostRestartResendGraceMs: 0,
+    hostRestartRetryIntervalMs: 10,
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connectPromise;
+
+  const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
+  const replied = new Set<unknown>();
+  const state = { rejected: false };
+  void sent.catch(() => {
+    state.rejected = true;
+  });
+
+  // Answer every attempt with host_restarting and no drain deadline. The
+  // fallback window is anchored once, so this terminates instead of looping.
+  const deadline = Date.now() + 3_000;
+  while (!state.rejected && Date.now() < deadline) {
+    for (const request of sendRequestsIn(mock.sent)) {
+      if (replied.has(request.requestId)) continue;
+      replied.add(request.requestId);
+      respondHostRestarting(mock, request);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  await expect(sent).rejects.toMatchObject({ message: "host_restarting" });
+  expect(sendRequestsIn(mock.sent).length).toBeLessThan(30);
 });
 
 test("sendAgentMessage never retries an unrelated rejection", async () => {
