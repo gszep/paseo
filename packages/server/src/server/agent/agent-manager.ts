@@ -759,6 +759,7 @@ export class AgentManager {
   private acceptingAgentRegistrations = true;
   private draining = false;
   private drainController: AbortController | null = null;
+  private drainDeadlineAt: number | null = null;
   private restartIntentEmitted = false;
   private readonly admissionTickets = new Set<symbol>();
 
@@ -866,15 +867,17 @@ export class AgentManager {
    * settle, then let a restart swap the worker. Returns false when a drain is
    * already active so callers never start a second one.
    */
-  beginDraining(): boolean {
+  beginDraining(idleTimeoutMs?: number): boolean {
     if (this.draining) {
       return false;
     }
     this.draining = true;
     this.drainController = new AbortController();
+    this.drainDeadlineAt = typeof idleTimeoutMs === "number" ? Date.now() + idleTimeoutMs : null;
     this.logger.info(
       {
         inFlight: this.listInFlightAgents().map((agent) => agent.agentId),
+        drainDeadlineAt: this.drainDeadlineAt,
       },
       "Agent manager entered draining state",
     );
@@ -887,9 +890,15 @@ export class AgentManager {
       return;
     }
     this.draining = false;
+    this.drainDeadlineAt = null;
     this.drainController?.abort();
     this.drainController = null;
     this.logger.info("Agent manager left draining state");
+  }
+
+  /** Epoch ms the active drain expects to swap, or null when not draining. */
+  getDrainDeadlineAt(): number | null {
+    return this.drainDeadlineAt;
   }
 
   isDraining(): boolean {
@@ -906,6 +915,31 @@ export class AgentManager {
 
   markRestartIntentEmitted(): void {
     this.restartIntentEmitted = true;
+  }
+
+  /**
+   * Allow a forced restart to emit again after a prior intent never produced a
+   * swap (for example, a stuck-but-draining worker).
+   */
+  resetRestartIntentEmitted(): void {
+    this.restartIntentEmitted = false;
+  }
+
+  /**
+   * Admit a prompt at a non-session entry point. Rejects synchronously when the
+   * daemon is already draining; otherwise takes a ticket so a drain that starts
+   * during the async admission waits for it instead of racing a pending
+   * receipt. Callers must not await between the check and `beginAdmission`;
+   * this helper guarantees that.
+   */
+  async runPromptAdmission<T>(run: (ticket: symbol) => Promise<T>): Promise<T> {
+    this.assertAcceptingPrompts();
+    const ticket = this.beginAdmission();
+    try {
+      return await run(ticket);
+    } finally {
+      this.endAdmission(ticket);
+    }
   }
 
   /**

@@ -1902,14 +1902,17 @@ function createToolCatalog(
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
-      await sendPromptToAgent({
-        agentManager,
-        agentStorage,
-        agentId,
-        prompt,
-        sessionMode,
-        logger: childLogger,
-      });
+      await agentManager.runPromptAdmission((admissionTicket) =>
+        sendPromptToAgent({
+          agentManager,
+          agentStorage,
+          agentId,
+          prompt,
+          sessionMode,
+          admissionTicket,
+          logger: childLogger,
+        }),
+      );
 
       if (shouldNotifyOnFinish && callerAgentId) {
         setupFinishNotification({

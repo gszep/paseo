@@ -3204,24 +3204,32 @@ export class Session {
     const force = options?.force === true;
 
     // The worker is already being replaced. Acknowledge but never emit a second
-    // restart intent.
-    if (this.agentManager.hasEmittedRestartIntent()) {
+    // restart intent — unless this is an explicit force, which must be able to
+    // recover a worker stuck in a drain whose swap never happened.
+    if (this.agentManager.hasEmittedRestartIntent() && !force) {
       this.emitRestartRequestedStatus(requestId, reason);
       return;
+    }
+    if (force) {
+      this.agentManager.resetRestartIntentEmitted();
     }
 
     if (waitIdle) {
       if (this.agentManager.isDraining()) {
-        this.emitRestartDrainingStatus(
-          requestId,
-          "already_draining",
-          this.agentManager.describeDrainProgress(),
-          {
-            idleTimeoutMs: options?.idleTimeoutMs ?? DEFAULT_RESTART_IDLE_TIMEOUT_MS,
-            forced: force,
-          },
-        );
-        return;
+        if (!force) {
+          this.emitRestartDrainingStatus(
+            requestId,
+            "already_draining",
+            this.agentManager.describeDrainProgress(),
+            {
+              idleTimeoutMs: options?.idleTimeoutMs ?? DEFAULT_RESTART_IDLE_TIMEOUT_MS,
+              forced: force,
+            },
+          );
+          return;
+        }
+        // Force supersedes the existing drain and starts its own.
+        this.agentManager.endDraining();
       }
       const drain = await this.drainForRestart({
         requestId,
@@ -3247,7 +3255,7 @@ export class Session {
 
     // Re-check after awaiting the drain: a concurrent force restart may have
     // already emitted the intent while this one drained.
-    if (this.agentManager.hasEmittedRestartIntent()) {
+    if (this.agentManager.hasEmittedRestartIntent() && !force) {
       this.emitRestartRequestedStatus(requestId, reason);
       return;
     }
@@ -3316,7 +3324,7 @@ export class Session {
     force: boolean;
   }): Promise<"proceed" | "timed_out" | "canceled" | "superseded"> {
     const { requestId, idleTimeoutMs, force } = params;
-    if (!this.agentManager.beginDraining()) {
+    if (!this.agentManager.beginDraining(idleTimeoutMs)) {
       this.emitRestartDrainingStatus(
         requestId,
         "already_draining",
@@ -4143,18 +4151,21 @@ export class Session {
     const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
-      await sendPromptToAgent({
-        agentManager: this.agentManager,
-        agentStorage: this.agentStorage,
-        agentId,
-        prompt,
-        messageId,
-        runOptions,
-        // A typed or spoken message from the human answers any permission the
-        // agent is blocked on.
-        clearPendingPermissions: true,
-        logger: this.sessionLogger,
-      });
+      await this.agentManager.runPromptAdmission((admissionTicket) =>
+        sendPromptToAgent({
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          agentId,
+          prompt,
+          messageId,
+          runOptions,
+          admissionTicket,
+          // A typed or spoken message from the human answers any permission the
+          // agent is blocked on.
+          clearPendingPermissions: true,
+          logger: this.sessionLogger,
+        }),
+      );
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -8426,6 +8437,9 @@ export class Session {
             error: "host_restarting",
             errorCode: "host_restarting",
             admission: "not_admitted",
+            ...(this.agentManager.getDrainDeadlineAt() !== null
+              ? { drainDeadlineAt: this.agentManager.getDrainDeadlineAt()! }
+              : {}),
           },
         });
         return;

@@ -60,7 +60,9 @@ test("restart --wait-idle waits for a running turn, rejects new prompts retryabl
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
   const client = new DaemonClient({
     url: `ws://127.0.0.1:${daemon.port}/ws`,
-    hostRestartResendTimeoutMs: 100,
+    // Raw rejection: auto-resend is exercised by the client unit tests and the
+    // short-drain e2e below.
+    hostRestartAutoResend: false,
   });
   try {
     const agent = await startHeldTurn(daemon, client, "hold this turn");
@@ -233,6 +235,56 @@ test("a forced restart supersedes an active drain and still acknowledges the dra
     // The superseded drain acknowledges instead of hanging until its RPC timeout.
     const acked = await drained;
     expect(acked.status).toBe("restart_requested");
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await client.close();
+    await daemon.close();
+  }
+});
+
+test("a prompt rejected during a drain is auto-accepted once the drain times out", async () => {
+  const { agentClients, gates } = holdMatching(/hold/i);
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartRetryIntervalMs: 50,
+    hostRestartResendGraceMs: 500,
+    hostRestartResendTimeoutMs: 200,
+  });
+  try {
+    const heldAgent = await startHeldTurn(daemon, client, "hold this turn");
+    // A separate idle agent receives the prompt, so admission is the only thing
+    // standing between the rejected send and its acceptance.
+    const idleAgent = await client.createAgent({
+      provider: "codex",
+      cwd: tmpCwd(),
+      title: "Idle agent",
+      modeId: "full-access",
+      model: "gpt-5.4-mini",
+    });
+    expect(idleAgent.status).toBe("idle");
+
+    const drain = client.restartServer("short_drain", undefined, {
+      waitIdle: true,
+      idleTimeoutMs: 300,
+    });
+    // Attach the rejection handler immediately so a timeout rejection is never
+    // reported as an unhandled rejection while the send retries.
+    const drainOutcome = drain.then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    // The send is rejected with host_restarting, then auto-retried; when the
+    // drain times out admission resumes and the retry is accepted.
+    await expect(
+      client.sendAgentMessage(idleAgent.id, "during a short drain", {
+        messageId: "auto-accept-id",
+      }),
+    ).resolves.toBeUndefined();
+
+    await expect(drainOutcome).resolves.toBeInstanceOf(RestartDrainTimeoutError);
+    expect(heldAgent.status).toBe("running");
   } finally {
     for (const gate of gates) gate.resolve();
     await client.close();

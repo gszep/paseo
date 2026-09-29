@@ -498,15 +498,18 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       permissionRequest,
     });
 
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
-      agentId: callerAgentId,
-      prompt: formatSystemNotificationPrompt(body),
-      activeTurnBehavior: "steer",
-      unarchive: false,
-      logger,
-    });
+    await agentManager.runPromptAdmission((admissionTicket) =>
+      sendPromptToAgent({
+        agentManager,
+        agentStorage,
+        agentId: callerAgentId,
+        prompt: formatSystemNotificationPrompt(body),
+        activeTurnBehavior: "steer",
+        unarchive: false,
+        admissionTicket,
+        logger,
+      }),
+    );
   }
 
   function notifySafely(reason: FinishNotificationReason, options: NotifySafelyOptions = {}): void {
