@@ -11,6 +11,7 @@ import { createTestPaseoDaemon } from "./paseo-daemon.js";
 import { createTestAgentClient } from "./fake-agent-client.js";
 import { z } from "zod";
 import { mentionFixtureTitle, purgeMentionFixtureSources } from "./chi-mention-fixture-sources.js";
+import type { MutableChiConfig } from "@getpaseo/protocol/messages";
 
 const repo = "github:gszep/chi-synthetic-two-actor-20260925";
 interface NativeMessage {
@@ -21,11 +22,17 @@ interface NativeMessage {
   time: { created: number };
 }
 
+/** Whether a failed evidence POST is being simulated (the fixture's offline path). */
+function isFailingEvidencePost(path: string, init?: RequestInit): boolean {
+  return path.endsWith("/evidence") && init?.method === "POST";
+}
+
 /** Live Chi identities and storage; a synthetic provider owns the native IDs and makes no model calls. */
 export async function startMentionActor(
   actor: "sava-the-owl" | "mochi-the-kitty",
   origin: string,
   runId: string,
+  fixtureOptions: { chi?: MutableChiConfig } = {},
 ) {
   if (process.env.CI) throw new Error("Live Chi acceptance refuses CI");
   const credentials = process.env.CHI_MENTION_TEST_ACTORS_DIR;
@@ -103,7 +110,8 @@ export async function startMentionActor(
     },
   };
   let loseCreateReply = false,
-    loseReplyReply = false;
+    loseReplyReply = false,
+    failEvidence = false;
   const createdSources = new Set<string>();
   const createAttempts: string[] = [];
   const replyAttempts: string[] = [];
@@ -120,6 +128,8 @@ export async function startMentionActor(
     invalidate: () => undefined,
     request: (async (url, init) => {
       const path = new URL(String(url)).pathname;
+      if (failEvidence && isFailingEvidencePost(path, init))
+        throw new Error("Synthetic evidence failure");
       const response = await fetch(url, init);
       if (path.endsWith("/evidence") && init?.method === "POST" && response.ok) {
         const body = await response.clone().json();
@@ -168,18 +178,28 @@ export async function startMentionActor(
     },
   });
   process.env.PASEO_SUPERVISED = "0";
-  const host = await createTestPaseoDaemon({
-    chiAuthority: authority,
-    agentClients: { opencode: agentClient },
-    corsAllowedOrigins: [origin],
-    mcpEnabled: false,
-  });
-  const client = new DaemonClient({
-    url: `ws://127.0.0.1:${host.port}/ws`,
-    appVersion: "0.9.0-beta.2",
-  });
-  await client.connect();
-  await client.fetchAgents();
+  const paseoHomeRoot = await mkdtemp(join(tmpdir(), "paseo-mention-home-"));
+  const createHost = () =>
+    createTestPaseoDaemon({
+      chiAuthority: authority,
+      agentClients: { opencode: agentClient },
+      corsAllowedOrigins: [origin],
+      mcpEnabled: false,
+      chi: fixtureOptions.chi,
+      paseoHomeRoot,
+      cleanup: false,
+    });
+  let host = await createHost();
+  const connectClient = async () => {
+    const next = new DaemonClient({
+      url: `ws://127.0.0.1:${host.port}/ws`,
+      appVersion: "0.9.0-beta.2",
+    });
+    await next.connect();
+    await next.fetchAgents();
+    return next;
+  };
+  let client = await connectClient();
   const serverId = client.getLastServerInfoMessage()?.serverId;
   if (!serverId) throw new Error("Missing isolated host identity");
   const project = await client.addProject(cwd);
@@ -233,7 +253,9 @@ export async function startMentionActor(
     workspaceId: workspace.id,
     agentId: agent.id,
     serverId,
-    port: host.port,
+    get port() {
+      return host.port;
+    },
     createAttempts,
     replyAttempts,
     loseNextCreateReply() {
@@ -241,6 +263,17 @@ export async function startMentionActor(
     },
     loseNextReplyReply() {
       loseReplyReply = true;
+    },
+    setFailEvidence(value: boolean) {
+      failEvidence = value;
+    },
+    /** Recreate the daemon on the same persisted home, then reconnect the fixture client. */
+    async restart() {
+      await client.close().catch(() => undefined);
+      await host.close().catch(() => undefined);
+      host = await createHost();
+      client = await connectClient();
+      return { port: host.port };
     },
     async hideSources() {
       for (const sourceId of createdSources)
@@ -250,12 +283,13 @@ export async function startMentionActor(
       try {
         for (const sourceId of createdSources) await removeSource(sourceId);
       } finally {
-        await client.removeProject(project.project!.projectId);
-        await client.removeProject(localProject.project!.projectId);
-        await client.close();
+        await client.removeProject(project.project!.projectId).catch(() => undefined);
+        await client.removeProject(localProject.project!.projectId).catch(() => undefined);
+        await client.close().catch(() => undefined);
         await host.close();
         await rm(cwd, { recursive: true, force: true });
         await rm(localCwd, { recursive: true, force: true });
+        await rm(paseoHomeRoot, { recursive: true, force: true });
       }
     },
   };
@@ -264,7 +298,28 @@ export async function startMentionActor(
 const actor = z.enum(["sava-the-owl", "mochi-the-kitty"]).parse(process.argv[2]);
 const origin = z.string().url().parse(process.argv[3]);
 const runId = z.string().uuid().parse(process.argv[4]);
-const instance = await startMentionActor(actor, origin, runId);
+const chiConfigJson = process.argv[5];
+const chiConfig = chiConfigJson
+  ? z
+      .object({
+        destinations: z.record(
+          z.string(),
+          z.object({ name: z.string(), endpoint: z.string() }).strict(),
+        ),
+        mappings: z.array(
+          z
+            .object({
+              repo: z.string(),
+              destination: z.string(),
+              audience: z.enum(["private", "shared"]).optional(),
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .parse(JSON.parse(chiConfigJson))
+  : undefined;
+const instance = await startMentionActor(actor, origin, runId, { chi: chiConfig });
 process.send?.({
   type: "ready",
   serverId: instance.serverId,
@@ -278,19 +333,32 @@ process.on("message", async (value) => {
   const request = z
     .object({
       id: z.string(),
-      action: z.enum(["lose-create", "lose-reply", "hide", "attempts", "close"]),
+      action: z.enum([
+        "lose-create",
+        "lose-reply",
+        "hide",
+        "attempts",
+        "close",
+        "fail-evidence",
+        "allow-evidence",
+        "restart",
+      ]),
     })
     .parse(value);
   try {
     if (request.action === "lose-create") instance.loseNextCreateReply();
     if (request.action === "lose-reply") instance.loseNextReplyReply();
+    if (request.action === "fail-evidence") instance.setFailEvidence(true);
+    if (request.action === "allow-evidence") instance.setFailEvidence(false);
     if (request.action === "hide") await instance.hideSources();
+    if (request.action === "restart") await instance.restart();
     if (request.action === "close") await instance.close();
     process.send?.({
       id: request.id,
       ok: true,
       createAttempts: instance.createAttempts,
       replyAttempts: instance.replyAttempts,
+      port: instance.port,
     });
     if (request.action === "close") process.disconnect();
   } catch (error) {

@@ -51,6 +51,7 @@ interface TestPaseoDaemonOptions {
   autoArchiveAfterMerge?: boolean;
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
+  chi?: PaseoDaemonConfig["chi"];
 }
 
 export interface TestPaseoDaemon {
@@ -205,6 +206,7 @@ async function prepareTestDaemonConfig(
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
+    chi: options.chi,
   };
   return { config, paseoHomeRoot, paseoHome, staticDir };
 }
