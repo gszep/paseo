@@ -1750,4 +1750,53 @@ describe("automatic sync destinations", () => {
     const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
     expect(association.error ?? null).toBeNull();
   });
+
+  it("reports the default destination for a legacy non-paused association", async () => {
+    const f = await syncFixture(null);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
+    expect(status.destination).toMatchObject({
+      id: "default",
+      endpoint: DEFAULT_BACKEND_URL,
+      audience: "shared",
+      actor: "github:owner",
+    });
+    expect(status.mentionsAvailable).toBe(false);
+    expect(agent.id).toBeTruthy();
+  });
+
+  it("accepts a mention-first association's lowercased actor against a mixed-case login", async () => {
+    const f = await syncFixture();
+    const login = f.authority.login;
+    f.authority.login = async () => ({ ...(await login()), chiUserId: "github:Owner" });
+    const baseRequest = f.authority.request;
+    f.authority.request = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (new URL(String(url)).pathname === "/auth/session")
+        return Response.json({ ok: true, chiUserId: "github:Owner" });
+      return baseRequest(url, init);
+    }) as typeof fetch;
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+        destination: "henkaku",
+        endpoint: f.authority.endpoint,
+        audience: "shared",
+      }),
+    });
+    const result = await f.connect().capture(agent.id);
+    expect(result.sourceId).toBe(f.sourceId);
+    expect(f.evidence).toHaveLength(1);
+  });
 });

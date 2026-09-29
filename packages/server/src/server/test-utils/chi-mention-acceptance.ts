@@ -27,6 +27,25 @@ function isFailingEvidencePost(path: string, init?: RequestInit): boolean {
   return path.endsWith("/evidence") && init?.method === "POST";
 }
 
+/** Track the fixture's created sources and the audience each was stored with. */
+async function recordEvidenceSource(
+  response: Response,
+  init: RequestInit | undefined,
+  createdSources: Set<string>,
+  sourceVisibility: Map<string, string>,
+): Promise<void> {
+  if (!response.ok) return;
+  const body = await response.clone().json();
+  if (typeof body.sourceId !== "string") return;
+  createdSources.add(body.sourceId);
+  try {
+    const visibility = JSON.parse(String(init?.body))?.visibility;
+    if (typeof visibility === "string") sourceVisibility.set(body.sourceId, visibility);
+  } catch {
+    // The request body is fixture-owned; a parse failure just skips the record.
+  }
+}
+
 /** Live Chi identities and storage; a synthetic provider owns the native IDs and makes no model calls. */
 export async function startMentionActor(
   actor: "sava-the-owl" | "mochi-the-kitty",
@@ -113,6 +132,7 @@ export async function startMentionActor(
     loseReplyReply = false,
     failEvidence = false;
   const createdSources = new Set<string>();
+  const sourceVisibility = new Map<string, string>();
   const createAttempts: string[] = [];
   const replyAttempts: string[] = [];
   const authority = {
@@ -131,10 +151,8 @@ export async function startMentionActor(
       if (failEvidence && isFailingEvidencePost(path, init))
         throw new Error("Synthetic evidence failure");
       const response = await fetch(url, init);
-      if (path.endsWith("/evidence") && init?.method === "POST" && response.ok) {
-        const body = await response.clone().json();
-        if (typeof body.sourceId === "string") createdSources.add(body.sourceId);
-      }
+      if (path.endsWith("/evidence") && init?.method === "POST")
+        await recordEvidenceSource(response, init, createdSources, sourceVisibility);
       if (path.endsWith("/handoffs") && init?.method === "POST") {
         createAttempts.push(String(init.body));
         if (loseCreateReply && response.ok) {
@@ -284,6 +302,12 @@ export async function startMentionActor(
     sources() {
       return [...createdSources];
     },
+    sourceVisibilities() {
+      return Object.fromEntries(sourceVisibility);
+    },
+    sourceVisibility(sourceId: string) {
+      return sourceVisibility.get(sourceId) ?? null;
+    },
     /** Recreate the daemon on the same persisted home, then reconnect the fixture client. */
     async restart() {
       await client.close().catch(() => undefined);
@@ -380,6 +404,7 @@ process.on("message", async (value) => {
       replyAttempts: instance.replyAttempts,
       port: instance.port,
       sources: instance.sources(),
+      sourceVisibilities: instance.sourceVisibilities(),
     });
     if (request.action === "close") process.disconnect();
   } catch (error) {

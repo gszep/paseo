@@ -542,11 +542,17 @@ test.describe("sync destinations (rendered)", () => {
       await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
       await sendPrompt(page, `offline capture ${runId}`);
       await expectNotice(page);
-      await expect(page.getByTestId("chi-sync-notice")).toContainText("Sync needs to succeed");
+      await expect(page.getByTestId("chi-sync-notice")).toContainText(
+        "For others to see this session and for its mentions to appear, sync needs to succeed.",
+      );
       await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
 
       // A further prompt in the same session still starts and settles normally.
-      await sendPrompt(page, `second prompt while offline ${runId}`);
+      const secondPrompt = `second prompt while offline ${runId}`;
+      await sendPrompt(page, secondPrompt);
+      await expect(
+        page.getByTestId("conversation-chat-feed").getByText(secondPrompt, { exact: false }),
+      ).toBeVisible({ timeout: 60000 });
       await expect(page.getByTestId("chi-sync-notice")).toHaveCount(1);
       await plainChat(page);
       await sender.allowEvidence();
@@ -708,14 +714,34 @@ test.describe("sync destinations (rendered)", () => {
       await sender.seed(page);
       await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
       await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
-      // No mapping means no configured destination, yet the legacy label keeps uploading.
-      await expect(page.getByTestId("workspace-header-destination")).toContainText("local", {
+      // No mapping means no configured destination, but the legacy label still
+      // uploads to the default deployment. The chip must report that, not local.
+      await expect(page.getByTestId("workspace-header-destination")).toContainText("Chi", {
         timeout: 60000,
       });
+      await page.getByTestId("workspace-header-destination").click();
+      await expect(page.getByTestId("sync-destination-audience")).toContainText(
+        "Shared with repository readers",
+      );
+      await page.keyboard.press("Escape");
+      // Continue and mention delivery stay available on the default deployment.
+      await openActions(page);
+      await expect(
+        page.getByRole("menuitem", { name: "Continue on another host", exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText("Mentions are not available for this destination.")).toHaveCount(
+        0,
+      );
+      await page.keyboard.press("Escape");
+
       const before = (await sender.sources()).length;
       const countSources = async () => (await sender.sources()).length;
       await sendPrompt(page, `legacy shared capture ${runId}`);
       await expect.poll(countSources, { timeout: 120000 }).toBeGreaterThan(before);
+      const uploaded = await sender.sources();
+      const newest = uploaded.at(-1);
+      expect(newest).toBeTruthy();
+      expect(await sender.sourceVisibility(newest!)).toBe("shared");
       await plainChat(page);
       await expect(page.getByTestId("chi-sync-notice")).toHaveCount(0);
     } finally {

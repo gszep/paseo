@@ -116,6 +116,11 @@ interface ClaimJournal {
   };
   claim: ClaimRequest;
 }
+function sameActor(a: string, b: string): boolean {
+  // A GitHub login is case-insensitive to the backend; the label may hold the
+  // login as typed by either the mention path (lowercased) or the capture path.
+  return a.toLowerCase() === b.toLowerCase();
+}
 function assertRegistration(
   existing: ManagedAgent,
   input: ContinueSelection,
@@ -236,7 +241,7 @@ export class ChiConnection {
     if (!association.conversationId) return;
     const endpoint = this.endpointFor(association.endpoint);
     const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
-    if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
+    if (!sameActor(auth.chiUserId, association.actor)) throw new Error("chi-identity-mismatch");
     const { conversation } = await this.client(association.repo, auth.sessionToken, endpoint).get({
       id: association.conversationId,
     });
@@ -263,7 +268,7 @@ export class ChiConnection {
       if (!association) association = await this.share(agentId);
       const endpoint = this.endpointFor(association.endpoint);
       const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
-      if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
+      if (!sameActor(auth.chiUserId, association.actor)) throw new Error("chi-identity-mismatch");
       const client = this.client(association.repo, auth.sessionToken, endpoint);
       if (association.reserve?.transferId === transferId)
         return client.reserve(association.reserve);
@@ -307,7 +312,7 @@ export class ChiConnection {
       const association = agent && this.association(agent);
       if (!agent || !association?.conversationId) throw new Error("chi-conversation-required");
       const auth = await this.authorize(association.repo, agent.cwd);
-      if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
+      if (!sameActor(auth.chiUserId, association.actor)) throw new Error("chi-identity-mismatch");
       const client = this.client(association.repo, auth.sessionToken);
       let result = await client.get({
         id: association.conversationId,
@@ -674,7 +679,7 @@ export class ChiConnection {
       if (current) {
         const previous = associationSchema.parse(JSON.parse(current));
         if (previous.repo.toLowerCase() !== repo) throw new Error("chi-association-conflict");
-        if (previous.actor !== auth.chiUserId) throw new Error("chi-identity-mismatch");
+        if (!sameActor(previous.actor, auth.chiUserId)) throw new Error("chi-identity-mismatch");
         return current;
       }
       // Explicit canonical-transfer association. A mapped repository pins the
@@ -812,7 +817,7 @@ export class ChiConnection {
       const auth = await this.authorize(association.repo, target.cwd, authority);
       if (!association.actor) {
         association = await this.patchAssociation(agentId, { actor: auth.chiUserId });
-      } else if (auth.chiUserId !== association.actor) {
+      } else if (!sameActor(auth.chiUserId, association.actor)) {
         throw new Error("chi-identity-mismatch");
       }
       const pinned: Association = association;
@@ -1022,17 +1027,18 @@ export class ChiConnection {
         actor: association.actor || null,
       };
     }
-    // An explicit canonical transfer on an unmapped repository still uploads to
-    // the default deployment; report it so the chip never says "local" while
-    // bytes leave the host.
+    // A destination-less association still uploads to the default deployment
+    // (legacy behaviour, or an explicit canonical transfer); report it so the
+    // chip never says "local" while bytes leave the host. A paused one is
+    // deliberately not uploading.
     for (const { association } of identities) {
-      if (!association?.explicit) continue;
+      if (!association || association.destination || association.paused) continue;
       return {
         repo: association.repo,
         destinationId: "default",
         name: "Chi",
         endpoint: association.endpoint ?? DEFAULT_BACKEND_URL,
-        audience: association.audience ?? "private",
+        audience: association.audience ?? (association.explicit ? "private" : "shared"),
         matchedRule: null,
         actor: association.actor || null,
       };

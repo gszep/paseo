@@ -13,6 +13,7 @@ import { mentionError } from "./mention-errors";
 import { useMentionScope } from "./use-mention-scope";
 import { mentionSubmissions } from "./mention-submission-storage";
 import { useSyncDestination } from "./use-sync-destination";
+import { MentionsUnavailableHint } from "./mentions-unavailable";
 import { sameMentionContext, mentionQueryKey, type MentionScope } from "./mention-context";
 import {
   mentionSelection,
@@ -49,9 +50,7 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   return (
     <View style={styles.rail}>
       <SelectedRecipients serverId={serverId} agentId={agentId} />
-      {destination && !mentionsAvailable ? (
-        <Text style={styles.text}>Mentions are not available for this destination.</Text>
-      ) : null}
+      <MentionsUnavailableHint destination={destination} mentionsAvailable={mentionsAvailable} />
       {active && client && state.context ? (
         <ProtectedDelivery
           key={state.generation}

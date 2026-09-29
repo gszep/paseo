@@ -22,6 +22,7 @@ const responseSchema = z.discriminatedUnion("ok", [
     replyAttempts: z.array(z.string()),
     port: z.number(),
     sources: z.array(z.string()).optional(),
+    sourceVisibilities: z.record(z.string(), z.string()).optional(),
   }),
   z.object({ ok: z.literal(false), id: z.string(), error: z.string() }),
 ]);
@@ -113,6 +114,9 @@ export async function startMentionActor(
     seedLegacyAssociation: () => request("seed-legacy"),
     async sources() {
       return (await request("sources")).sources ?? [];
+    },
+    async sourceVisibility(sourceId: string) {
+      return (await request("sources")).sourceVisibilities?.[sourceId] ?? null;
     },
     /** Recreate the daemon on the same persisted home; returns the new port. */
     async restart() {
