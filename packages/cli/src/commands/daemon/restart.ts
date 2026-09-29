@@ -32,7 +32,8 @@ export function daemonRestartCommand(): Command {
       "--wait-idle",
       "Wait until every agent has settled before restarting (drains running turns). " +
         "An agent that runs this in its own foreground turn waits for itself until timeout; " +
-        "schedule it in a detached session group instead",
+        "schedule it in a detached session group instead. Prompt auto-resend after a restart " +
+        "is a client-library behaviour; this one-shot CLI does not reconnect",
     )
     .option(
       "--idle-timeout <duration>",

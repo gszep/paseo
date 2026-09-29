@@ -1056,6 +1056,18 @@ function isHostRestartingFailure(error: unknown): error is HostRestartingOperati
   return error instanceof HostRestartingOperationError;
 }
 
+/**
+ * While a prompt is in host-restart retry mode, a transport failure means the
+ * worker swap is still settling — retryable, unlike the same error outside this
+ * mode. A terminal server error is never a transport failure.
+ */
+function isHostRestartTransportFailure(error: unknown): boolean {
+  if (error instanceof DaemonConnectionError) {
+    return true;
+  }
+  return error instanceof Error && error.message.startsWith("Transport not connected");
+}
+
 function randomHostRestartRetryIntervalMs(): number {
   const span = HOST_RESTART_RETRY_INTERVAL_MAX_MS - HOST_RESTART_RETRY_INTERVAL_MIN_MS;
   return HOST_RESTART_RETRY_INTERVAL_MIN_MS + Math.floor(Math.random() * (span + 1));
@@ -1082,6 +1094,8 @@ const HOST_RESTART_RESEND_TIMEOUT_MS = 2 * 60 * 1000;
 const HOST_RESTART_RESEND_GRACE_MS = 15_000;
 const HOST_RESTART_RETRY_INTERVAL_MIN_MS = 5_000;
 const HOST_RESTART_RETRY_INTERVAL_MAX_MS = 15_000;
+/** How often to re-check the connection while waiting out a worker swap. */
+const HOST_RESTART_CONNECTION_POLL_MS = 100;
 const DEFAULT_DICTATION_FINISH_ACCEPT_TIMEOUT_MS = DEFAULT_SESSION_RPC_TIMEOUT_MS;
 const DEFAULT_DICTATION_FINISH_FALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_DICTATION_FINISH_TIMEOUT_GRACE_MS = 5000;
@@ -3566,9 +3580,14 @@ export class DaemonClient {
 
   /**
    * Retry a provably not-admitted `host_restarting` prompt until it is accepted,
-   * a non-host_restarting error occurs, or the drain deadline (+ grace) passes.
-   * Every rejected attempt writes nothing, so repeats are safe; the stable
-   * messageId keeps it exactly-once across the worker swap.
+   * a terminal server error occurs, or the drain deadline (+ grace) passes.
+   *
+   * Once in this mode, transport-level failures (the worker swap settling) and
+   * further host_restarting rejections are retryable; attempts never fire while
+   * the transport is known disconnected. Every rejected attempt writes nothing,
+   * so repeats are safe; the stable messageId keeps it exactly-once across the
+   * worker swap (a completed receipt is an accepted no-op, an ambiguous pending
+   * one stays terminal as `outcome_unknown`).
    */
   private async retryHostRestartingPrompt(
     agentId: string,
@@ -3585,6 +3604,7 @@ export class DaemonClient {
     // must still give up after one bounded window, not extend it per retry.
     const fallbackDeadlineAt = Date.now() + fallbackWindowMs;
     let lastError = firstError;
+    let sinceGeneration = generationBeforeSend;
 
     for (;;) {
       const deadlineAt = lastError.drainDeadlineAt ?? fallbackDeadlineAt;
@@ -3592,15 +3612,31 @@ export class DaemonClient {
       if (remainingMs <= 0) {
         break;
       }
-      const intervalMs =
-        this.config.hostRestartRetryIntervalMs ?? randomHostRestartRetryIntervalMs();
-      await this.waitForRetryOpportunity(Math.min(intervalMs, remainingMs), generationBeforeSend);
+
+      const opportunity = await this.waitForHostRestartRetryOpportunity(
+        remainingMs,
+        sinceGeneration,
+      );
+      if (!opportunity.ready) {
+        break;
+      }
+      sinceGeneration = opportunity.generation;
+
       try {
         await this.sendAgentMessageOnce(agentId, text, options, messageId);
         return;
       } catch (error) {
-        if (!isHostRestartingFailure(error)) throw error;
-        lastError = error;
+        if (isHostRestartingFailure(error)) {
+          lastError = error;
+          continue;
+        }
+        if (isHostRestartTransportFailure(error)) {
+          // The replacement worker is still settling. Require a new connection
+          // generation (or the retry interval) before the next attempt.
+          sinceGeneration = this.connectionGeneration;
+          continue;
+        }
+        throw error;
       }
     }
 
@@ -3608,37 +3644,39 @@ export class DaemonClient {
   }
 
   /**
-   * Wait for the retry interval or an earlier reconnect. `sinceGeneration`
-   * predates the first attempt, so a reconnect that already completed resolves
-   * this immediately.
+   * Resolve when the transport is connected and either a new connection
+   * generation appeared (immediate retry after the worker swap) or the retry
+   * interval elapsed (the drain timed out and admission resumed on the same
+   * worker). Never reports ready while disconnected.
    */
-  private async waitForRetryOpportunity(
+  private async waitForHostRestartRetryOpportunity(
     timeoutMs: number,
     sinceGeneration: number,
-  ): Promise<boolean> {
-    if (this.connectionState.status === "disposed") {
-      return false;
-    }
-    const subscription: { unsubscribe: (() => void) | null } = { unsubscribe: null };
-    const reconnected = new Promise<boolean>((resolve) => {
-      subscription.unsubscribe = this.subscribeConnectionStatus((status) => {
-        const grew = status.status === "connected" && this.connectionGeneration > sinceGeneration;
-        if (!grew && status.status !== "disposed") {
-          return;
-        }
-        subscription.unsubscribe?.();
-        resolve(grew);
+  ): Promise<{ ready: boolean; generation: number }> {
+    const intervalMs = this.config.hostRestartRetryIntervalMs ?? randomHostRestartRetryIntervalMs();
+    const startedAt = Date.now();
+
+    for (;;) {
+      const status = this.connectionState.status;
+      if (status === "disposed") {
+        return { ready: false, generation: this.connectionGeneration };
+      }
+      const generation = this.connectionGeneration;
+      const elapsedMs = Date.now() - startedAt;
+      if (status === "connected" && (generation > sinceGeneration || elapsedMs >= intervalMs)) {
+        return { ready: true, generation };
+      }
+      const remainingMs = timeoutMs - elapsedMs;
+      if (remainingMs <= 0) {
+        return { ready: false, generation };
+      }
+      const waitMs =
+        status === "connected"
+          ? Math.min(Math.max(1, intervalMs - elapsedMs), remainingMs)
+          : Math.min(HOST_RESTART_CONNECTION_POLL_MS, remainingMs);
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.max(1, waitMs));
       });
-    });
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const timedOut = new Promise<boolean>((resolve) => {
-      timer = setTimeout(() => resolve(false), timeoutMs);
-    });
-    try {
-      return await Promise.race([reconnected, timedOut]);
-    } finally {
-      subscription.unsubscribe?.();
-      if (timer) clearTimeout(timer);
     }
   }
 

@@ -4237,6 +4237,75 @@ test("sendAgentMessage gives up after one fallback window when the daemon sends 
   expect(sendRequestsIn(mock.sent).length).toBeLessThan(30);
 });
 
+test("sendAgentMessage waits out the reconnect after the worker swap and delivers exactly once", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: true, baseDelayMs: 200, maxDelayMs: 200 },
+    // Retry would fire far sooner than the reconnect; only the reconnect may
+    // trigger the next attempt.
+    hostRestartRetryIntervalMs: 10,
+    hostRestartResendGraceMs: 5_000,
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connectPromise;
+
+  const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
+  const first = sendRequestsIn(mock.sent)[0]!;
+  respondHostRestarting(mock, first, Date.now() + 60_000);
+
+  // The draining worker's connection drops; the reconnect backoff is longer than
+  // the retry interval, so no attempt may fire while disconnected.
+  mock.triggerClose();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  expect(sendRequestsIn(mock.sent)).toHaveLength(1);
+
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  mock.triggerOpen({ preserveSent: true });
+
+  const requests = await waitForRequestCount(mock, 2);
+  expect(requests).toHaveLength(2);
+  expect(requests[0]!.messageId).toBe("stable-message-id");
+  expect(requests[1]!.messageId).toBe("stable-message-id");
+  expect(requests[1]!.requestId).not.toBe(requests[0]!.requestId);
+
+  respondAccepted(mock, requests[1]!);
+  await expect(sent).resolves.toBeUndefined();
+});
+
+test("sendAgentMessage gives up when the transport never reconnects before the deadline", async () => {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    hostRestartRetryIntervalMs: 10,
+    hostRestartResendGraceMs: 0,
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen({ features: {} });
+  await connectPromise;
+
+  const sent = client.sendAgentMessage("agent", "hello", { messageId: "stable-message-id" });
+  const first = sendRequestsIn(mock.sent)[0]!;
+  respondHostRestarting(mock, first, Date.now() + 120);
+  mock.triggerClose();
+
+  await expect(sent).rejects.toMatchObject({
+    message: "host_restarting",
+    failure: { outcome: "not_committed" },
+  });
+  expect(sendRequestsIn(mock.sent)).toHaveLength(1);
+});
+
 test("sendAgentMessage never retries an unrelated rejection", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
