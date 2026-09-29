@@ -347,6 +347,11 @@ export interface DaemonClientConfig {
     baseDelayMs?: number;
     maxDelayMs?: number;
   };
+  /**
+   * How long an automatic resend of a `host_restarting`-rejected prompt waits
+   * for the replacement worker before surfacing the retryable error.
+   */
+  hostRestartResendTimeoutMs?: number;
   runtimeMetricsIntervalMs?: number;
   runtimeMetricsWindowMs?: number;
   trace?: DaemonClientTrace;
@@ -670,7 +675,7 @@ export interface AgentForkContextOptions {
 
 type AgentRefreshedStatusPayload = z.infer<typeof AgentRefreshedStatusPayloadSchema>;
 type RestartRequestedStatusPayload = z.infer<typeof RestartRequestedStatusPayloadSchema>;
-type RestartDrainingStatusPayload = z.infer<typeof RestartDrainingStatusPayloadSchema>;
+export type RestartDrainingStatusPayload = z.infer<typeof RestartDrainingStatusPayloadSchema>;
 type ShutdownRequestedStatusPayload = z.infer<typeof ShutdownRequestedStatusPayloadSchema>;
 export interface RestartServerOptions {
   requestId?: string;
@@ -963,6 +968,22 @@ export class RestartDrainTimeoutError extends Error {
   }
 }
 
+/**
+ * Another wait-idle drain already owns the restart, so this request did not
+ * start one.
+ */
+export class RestartDrainConflictError extends Error {
+  readonly code = "DAEMON_DRAIN_IN_PROGRESS";
+  constructor(readonly runningAgents: string[]) {
+    super(
+      `A restart drain is already in progress; still running: ${
+        runningAgents.length > 0 ? runningAgents.join(", ") : "(none)"
+      }`,
+    );
+    this.name = "RestartDrainConflictError";
+  }
+}
+
 class DaemonRpcError extends Error {
   readonly requestId: string;
   readonly requestType?: string;
@@ -1008,6 +1029,19 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
   return error instanceof Error ? error : new Error(String(error));
 }
 
+/**
+ * A prompt rejected because the host is draining for a restart, and provably
+ * not admitted. Only this exact failure is safe to auto-resend; generic
+ * disconnects and outcome-unknown errors are never retried here.
+ */
+function isHostRestartingFailure(error: unknown): boolean {
+  return (
+    error instanceof ChiOperationError &&
+    error.message === "host_restarting" &&
+    error.failure?.outcome === "not_committed"
+  );
+}
+
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
@@ -1020,6 +1054,12 @@ const LIVENESS_FAILURE_RECONNECT_THRESHOLD = 2;
 
 /** Default timeout for waiting for connection before sending queued messages */
 const DEFAULT_SEND_QUEUE_TIMEOUT_MS = DEFAULT_SESSION_RPC_TIMEOUT_MS;
+/**
+ * How long an auto-resend waits for the replacement worker after a
+ * `host_restarting` rejection. Long enough for a worker swap, short enough that
+ * a drain which never completes still surfaces the retryable error.
+ */
+const HOST_RESTART_RESEND_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_DICTATION_FINISH_ACCEPT_TIMEOUT_MS = DEFAULT_SESSION_RPC_TIMEOUT_MS;
 const DEFAULT_DICTATION_FINISH_FALLBACK_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_DICTATION_FINISH_TIMEOUT_GRACE_MS = 5000;
@@ -1194,6 +1234,12 @@ export class DaemonClient {
   private connectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingGenericTransportErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  /**
+   * Increments on every transition into a live connection. Host-restart prompt
+   * resends wait for a value greater than the one observed at rejection, which
+   * proves the replacement worker's session is up rather than the draining one.
+   */
+  private connectionGeneration = 0;
   private shouldReconnect = true;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -3471,8 +3517,30 @@ export class DaemonClient {
         // A downgraded host may already have admitted an earlier attempt.
         outcome: "unknown",
       });
-    const requestId = this.createRequestId();
+    // One stable messageId across the automatic resend: the server's receipt
+    // fingerprint guarantees exactly-once even if the first attempt was
+    // ambiguously received.
     const messageId = options?.messageId ?? crypto.randomUUID();
+    try {
+      await this.sendAgentMessageOnce(agentId, text, options, messageId);
+      return;
+    } catch (error) {
+      if (!isHostRestartingFailure(error)) throw error;
+      // A draining daemon rejected this prompt before admitting it. Wait for the
+      // replacement worker's connection, then resend the identical request once.
+      const reconnected = await this.waitForReplacementWorkerConnection();
+      if (!reconnected) throw error;
+      await this.sendAgentMessageOnce(agentId, text, options, messageId);
+    }
+  }
+
+  private async sendAgentMessageOnce(
+    agentId: string,
+    text: string,
+    options: SendMessageOptions | undefined,
+    messageId: string,
+  ): Promise<void> {
+    const requestId = this.createRequestId();
     const message = SessionInboundMessageSchema.parse({
       type: "send_agent_message_request",
       requestId,
@@ -3505,6 +3573,47 @@ export class DaemonClient {
         accessLost: false,
         outcome: payload.admission === "not_admitted" ? "not_committed" : "unknown",
       });
+    }
+  }
+
+  /**
+   * Wait until the client has completed a new connection after the draining
+   * worker's connection. Returns false (rather than throwing) when it already
+   * reconnected, is disposed, or the bound elapses, so the caller can surface
+   * the original retryable error.
+   */
+  private async waitForReplacementWorkerConnection(
+    timeoutMs = this.config.hostRestartResendTimeoutMs ?? HOST_RESTART_RESEND_TIMEOUT_MS,
+  ): Promise<boolean> {
+    if (this.connectionState.status === "disposed") {
+      return false;
+    }
+    const startingGeneration = this.connectionGeneration;
+    if (
+      this.connectionState.status === "connected" &&
+      this.connectionGeneration > startingGeneration
+    ) {
+      return true;
+    }
+    const subscription: { unsubscribe: (() => void) | null } = { unsubscribe: null };
+    const connected = new Promise<boolean>((resolve) => {
+      subscription.unsubscribe = this.subscribeConnectionStatus((status) => {
+        const reconnected =
+          status.status === "connected" && this.connectionGeneration > startingGeneration;
+        if (!reconnected && status.status !== "disposed") {
+          return;
+        }
+        subscription.unsubscribe?.();
+        resolve(reconnected);
+      });
+    });
+    const timedOut = new Promise<boolean>((resolve) => {
+      setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([connected, timedOut]);
+    } finally {
+      subscription.unsubscribe?.();
     }
   }
 
@@ -3756,16 +3865,18 @@ export class DaemonClient {
             return null;
           }
           const draining = RestartDrainingStatusPayloadSchema.safeParse(msg.payload);
-          if (
-            draining.success &&
-            draining.data.requestId === resolvedRequestId &&
-            draining.data.phase === "timed_out"
-          ) {
-            // Rejects the waiter; the daemon did not restart.
-            throw new RestartDrainTimeoutError(
-              draining.data.runningAgents,
-              draining.data.idleTimeoutMs ?? 0,
-            );
+          if (draining.success && draining.data.requestId === resolvedRequestId) {
+            if (draining.data.phase === "already_draining") {
+              // Another drain owns the restart; this request did not start one.
+              throw new RestartDrainConflictError(draining.data.runningAgents);
+            }
+            if (draining.data.phase === "timed_out") {
+              // Rejects the waiter; the daemon did not restart.
+              throw new RestartDrainTimeoutError(
+                draining.data.runningAgents,
+                draining.data.idleTimeoutMs ?? 0,
+              );
+            }
           }
           const restarted = RestartRequestedStatusPayloadSchema.safeParse(msg.payload);
           if (!restarted.success) {
@@ -6447,6 +6558,9 @@ export class DaemonClient {
   ): void {
     const previous = this.connectionState;
     this.connectionState = next;
+    if (next.status === "connected" && previous.status !== "connected") {
+      this.connectionGeneration += 1;
+    }
     const reasonFromNext =
       next.status === "disconnected" && typeof next.reason === "string" ? next.reason : null;
     const reason = metadata?.reason ?? reasonFromNext;

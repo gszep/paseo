@@ -3903,13 +3903,24 @@ export const RestartRequestedStatusPayloadSchema = z.object({
 /**
  * Progress while a `--wait-idle` restart drains running agents.
  * `phase: "timed_out"` means the drain deadline elapsed and, without `force`,
- * the restart was abandoned.
+ * the restart was abandoned. `phase: "already_draining"` means another drain
+ * already owns the restart, so this request did not start one.
  */
+export const RestartDrainingAgentSchema = z.object({
+  agentId: z.string(),
+  title: z.string().nullable().optional(),
+  lifecycle: z.string(),
+  /** True while the agent is blocked on a human permission/question answer. */
+  waitingForPermission: z.boolean(),
+});
+
 export const RestartDrainingStatusPayloadSchema = z.object({
   status: z.literal("restart_draining"),
   requestId: z.string(),
-  phase: z.enum(["draining", "timed_out"]),
+  phase: z.enum(["draining", "timed_out", "already_draining"]),
   runningAgents: z.array(z.string()),
+  agents: z.array(RestartDrainingAgentSchema).optional(),
+  pendingAdmissions: z.number().int().nonnegative().optional(),
   idleTimeoutMs: z.number().int().nonnegative().optional(),
   forced: z.boolean().optional(),
 });
