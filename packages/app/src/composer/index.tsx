@@ -1,5 +1,6 @@
 import type { ComposerTextSource } from "./text-source";
 import { mentionError } from "@/chi/mention-errors";
+import { friendlyComposerSendError } from "@/composer/send-error";
 import { assertMentionPrompt } from "./actions";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { useStore } from "zustand";
@@ -1701,7 +1702,7 @@ function ComposerContentImpl({
           setSelectedAttachments(composerWorkspaceAttachment.userAttachmentsOnly(nextAttachments));
         },
         setSendError: (message) =>
-          setSendError(message?.startsWith("chi-") ? mentionError(message) : message),
+          setSendError(message ? friendlyComposerSendError(message) : message),
         setIsProcessing,
         onSubmitError: (error) => {
           console.error("[AgentInput] Failed to send message:", error);
@@ -2033,11 +2034,7 @@ function ComposerContentImpl({
         failedToSendMessage: t("composer.errors.failedToSend"),
       });
       if (result.status === "failed") {
-        setSendError(
-          result.errorMessage.startsWith("chi-")
-            ? mentionError(result.errorMessage)
-            : result.errorMessage,
-        );
+        setSendError(friendlyComposerSendError(result.errorMessage));
       }
     },
     [agentId, serverId, client, queueWriter, supportsForgeSearch, cwd, t],

@@ -18,7 +18,7 @@ export function mentionError(error: unknown): string {
       "A saved send is unconfirmed. Use Retry saved send to confirm that exact request before starting another send.",
     "chi-host-disconnected": "Reconnect this host, then verify mention context.",
     host_restarting:
-      "This host is restarting. The send was not admitted; retry the same operation once it reconnects.",
+      "This host is restarting and could not accept the send automatically. Retry the same operation once it reconnects.",
     "chi-session-busy": "Waiting for the current turn to settle. Retry after it finishes.",
     "chi-mention-persisted-entry-required":
       "The exact user message is not in a settled capture yet. Retry after the turn finishes.",

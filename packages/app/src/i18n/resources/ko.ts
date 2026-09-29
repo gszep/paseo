@@ -2503,6 +2503,12 @@ export const ko: TranslationResources = {
           confirmMessage:
             "데몬을 재시작합니다. 데몬에서 실행 중인 에이전트는 계속 동작하며 앱이 자동으로 다시 연결됩니다.",
           restarting: "재시작 중...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "다시 연결할 수 없습니다",
           unableToReconnectMessage:
             "{{name}}이(가) 다시 온라인 상태가 되지 않았습니다. 재시작되었는지 확인하세요.",

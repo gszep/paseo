@@ -2491,6 +2491,12 @@ export const ar: TranslationResources = {
           confirmMessage:
             "سيؤدي هذا إلى إعادة تشغيل البرنامج الخفي. سيستمر العملاء الذين يعملون عليه؛ سيتم إعادة الاتصال بالتطبيق تلقائيًا.",
           restarting: "جارٍ إعادة التشغيل...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "غير قادر على إعادة الاتصال",
           unableToReconnectMessage: "لم يعد{{name}}متصلاً بالإنترنت. يرجى التحقق من إعادة تشغيله.",
           unavailableTitle: "Host غير متوفر",

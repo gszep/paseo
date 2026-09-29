@@ -66,7 +66,11 @@ import { ICON_SIZE } from "@/styles/theme";
 import type { Theme } from "@/styles/theme";
 import { getProviderIcon } from "@/components/provider-icons";
 import { BrowserToolsOptInCard } from "./browser-tools-card";
-import { restartDaemonFromSettings, updateDaemonFromSettings } from "./daemon-lifecycle";
+import {
+  restartDaemonFromSettings,
+  updateDaemonFromSettings,
+  type DaemonDrainStatus,
+} from "./daemon-lifecycle";
 
 const ThemedRestart = withUnistyles(RotateCw);
 const ThemedUpdate = withUnistyles(ArrowUpToLine);
@@ -555,12 +559,15 @@ function ConnectionRow({
   );
 }
 
+const RESTART_DRAIN_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
 function RestartDaemonCard({ host }: { host: HostProfile }) {
   const { t } = useTranslation();
   const daemonClient = useHostRuntimeClient(host.serverId);
   const isConnected = useHostRuntimeIsConnected(host.serverId);
   const runtime = getHostRuntimeStore();
   const [isRestarting, setIsRestarting] = useState(false);
+  const [drainStatus, setDrainStatus] = useState<DaemonDrainStatus | null>(null);
   const isMountedRef = useRef(true);
 
   useEffect(() => {
@@ -584,7 +591,10 @@ function RestartDaemonCard({ host }: { host: HostProfile }) {
           error instanceof Error ? error.message : String(error),
         );
       } finally {
-        if (isMountedRef.current) setIsRestarting(false);
+        if (isMountedRef.current) {
+          setIsRestarting(false);
+          setDrainStatus(null);
+        }
       }
     },
     [t],
@@ -616,16 +626,25 @@ function RestartDaemonCard({ host }: { host: HostProfile }) {
       .then((confirmed) => {
         if (!confirmed) return;
         setIsRestarting(true);
+        setDrainStatus(null);
         const restartRequest = restartDaemonFromSettings(
           host.serverId,
           `settings_daemon_restart_${host.serverId}`,
           {
-            restartServer: (reason) => daemonClient.restartServer(reason),
+            restartServer: (reason, options) =>
+              daemonClient.restartServer(reason, undefined, options),
             getStatus: async () => ({
               ...(await daemonClient.getDaemonStatus({ timeout: 1500 })),
               serverId: daemonClient.getLastServerInfoMessage()?.serverId ?? "",
               version: daemonClient.getLastServerInfoMessage()?.version ?? null,
             }),
+          },
+          {
+            waitIdle: true,
+            idleTimeoutMs: RESTART_DRAIN_IDLE_TIMEOUT_MS,
+            onDrainProgress: (status) => {
+              if (isMountedRef.current) setDrainStatus(status);
+            },
           },
         );
         void waitForDaemonRestart(restartRequest);
@@ -640,13 +659,71 @@ function RestartDaemonCard({ host }: { host: HostProfile }) {
       });
   }, [daemonClient, host.label, host.serverId, isHostConnected, t, waitForDaemonRestart]);
 
+  // Explicit escape hatch: abandon the wait-idle drain and swap immediately.
+  const handleRestartNow = useCallback(() => {
+    if (!daemonClient || !isHostConnected()) return;
+    void confirmDialog({
+      title: t("settings.host.daemon.restart.restartNowConfirmTitle"),
+      message: t("settings.host.daemon.restart.restartNowConfirmMessage"),
+      confirmLabel: t("settings.host.daemon.restart.restartNow"),
+      cancelLabel: t("common.actions.cancel"),
+      destructive: true,
+    })
+      .then((confirmed) => {
+        if (!confirmed) return undefined;
+        // No waitIdle: this supersedes the drain and emits the restart intent.
+        void daemonClient.restartServer(
+          `settings_daemon_restart_force_${host.serverId}`,
+          undefined,
+          { force: true },
+        );
+        return undefined;
+      })
+      .catch((error) => {
+        console.error(`[HostPage] Failed to start forced restart for ${host.label}`, error);
+      });
+  }, [daemonClient, host.label, host.serverId, isHostConnected, t]);
+
+  const drainProgressText = useMemo(() => {
+    if (!isRestarting || !drainStatus) return null;
+    const agents =
+      drainStatus.agents ??
+      drainStatus.runningAgents.map((agentId) => ({
+        agentId,
+        lifecycle: "",
+        waitingForPermission: false,
+      }));
+    const permissionCount = agents.filter((agent) => agent.waitingForPermission).length;
+    if (permissionCount > 0) {
+      return t("settings.host.daemon.restart.drainPermission", { count: permissionCount });
+    }
+    const count = agents.length + (drainStatus.pendingAdmissions ?? 0);
+    if (count <= 0) return null;
+    return t("settings.host.daemon.restart.drainProgress", { count });
+  }, [drainStatus, isRestarting, t]);
+
   return (
     <View style={settingsStyles.card} testID="host-page-restart-card">
       <View style={settingsStyles.row}>
         <View style={settingsStyles.rowContent}>
           <Text style={settingsStyles.rowTitle}>{t("settings.host.daemon.restart.title")}</Text>
           <Text style={settingsStyles.rowHint}>{t("settings.host.daemon.restart.hint")}</Text>
+          {drainProgressText ? (
+            <Text style={settingsStyles.rowHint} testID="host-page-restart-drain-progress">
+              {drainProgressText}
+            </Text>
+          ) : null}
         </View>
+        {isRestarting && drainStatus ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onPress={handleRestartNow}
+            testID="host-page-restart-now-button"
+          >
+            {t("settings.host.daemon.restart.restartNow")}
+          </Button>
+        ) : null}
         <Button
           variant="outline"
           size="sm"

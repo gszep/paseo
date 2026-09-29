@@ -2516,6 +2516,12 @@ export const ja: TranslationResources = {
           confirmMessage:
             "これによりデーモンが再起動されます。実行中のエージェントは継続し、アプリは自動的に再接続します。",
           restarting: "再起動中...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "再接続できません",
           unableToReconnectMessage:
             "{{name}}がオンラインに戻りませんでした。再起動されたことを確認してください。",

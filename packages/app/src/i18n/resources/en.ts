@@ -2608,12 +2608,18 @@ export const en = {
         },
         restart: {
           title: "Restart daemon",
-          hint: "Restarts the daemon process. The app will reconnect automatically",
+          hint: "Restarts the daemon after running agents finish. The app will reconnect automatically",
           confirm: "Restart",
           confirmTitle: "Restart {{name}}",
           confirmMessage:
-            "This will restart the daemon. Agents running on it will keep going; the app will reconnect automatically.",
+            "This drains running agents before restarting the daemon, so live turns are not interrupted. Use Restart now to swap immediately instead. The app will reconnect automatically.",
           restarting: "Restarting...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "Unable to reconnect",
           unableToReconnectMessage:
             "{{name}} did not come back online. Please verify it restarted.",

@@ -7,8 +7,36 @@ interface StatusReader {
   getStatus: () => Promise<WorkerStatus>;
 }
 
+export interface DaemonDrainAgent {
+  agentId: string;
+  title?: string | null;
+  lifecycle: string;
+  waitingForPermission: boolean;
+}
+
+export interface DaemonDrainStatus {
+  phase: "draining" | "timed_out" | "already_draining";
+  runningAgents: string[];
+  agents?: DaemonDrainAgent[];
+  pendingAdmissions?: number;
+}
+
 export interface SettingsDaemonRestartDeps extends StatusReader {
-  restartServer: (reason: string) => Promise<unknown>;
+  restartServer: (
+    reason: string,
+    options?: {
+      waitIdle?: boolean;
+      idleTimeoutMs?: number;
+      force?: boolean;
+      onDrainProgress?: (status: DaemonDrainStatus) => void;
+    },
+  ) => Promise<unknown>;
+}
+
+export interface RestartDaemonOptions {
+  waitIdle?: boolean;
+  idleTimeoutMs?: number;
+  onDrainProgress?: (status: DaemonDrainStatus) => void;
 }
 
 /** Acknowledgment starts the wait; only a different ready worker completes it. */
@@ -16,11 +44,21 @@ export async function restartDaemonFromSettings(
   hostServerId: string,
   reason: string,
   deps: SettingsDaemonRestartDeps,
+  options?: RestartDaemonOptions,
 ): Promise<void> {
   const previous = await readSelectedWorker(hostServerId, deps);
   let acknowledged = false;
   try {
-    await deps.restartServer(reason);
+    await deps.restartServer(
+      reason,
+      options?.waitIdle
+        ? {
+            waitIdle: true,
+            idleTimeoutMs: options.idleTimeoutMs,
+            onDrainProgress: options.onDrainProgress,
+          }
+        : undefined,
+    );
     acknowledged = true;
   } catch (error) {
     if (!isReconnectFailure(error)) throw error;

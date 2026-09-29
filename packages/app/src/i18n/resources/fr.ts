@@ -2555,6 +2555,12 @@ export const fr: TranslationResources = {
           confirmMessage:
             "Cela redémarrera le démon. Les agents qui s'y exécutent continueront à fonctionner; l'application se reconnectera automatiquement.",
           restarting: "Redémarrage...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "Impossible de se reconnecter",
           unableToReconnectMessage:
             "{{name}}n'est pas revenu en ligne. Veuillez vérifier qu'il a redémarré.",

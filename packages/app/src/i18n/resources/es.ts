@@ -2548,6 +2548,12 @@ export const es: TranslationResources = {
           confirmMessage:
             "Esto reiniciará el demonio. Los agentes que se ejecutan en él seguirán funcionando; la aplicación se volverá a conectar automáticamente.",
           restarting: "Reiniciando...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "No se puede volver a conectar",
           unableToReconnectMessage:
             "{{name}}no volvió a conectarse. Por favor verifique que se haya reiniciado.",

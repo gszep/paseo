@@ -2465,6 +2465,12 @@ export const zhCN: TranslationResources = {
           confirmTitle: "重启 {{name}}",
           confirmMessage: "这会重启 Daemon。其上运行的 Agent 会继续运行；应用会自动重新连接。",
           restarting: "正在重启...",
+          drainProgress: "Waiting for {{count}} agent(s) to finish before restarting...",
+          drainPermission: "Waiting for a human answer on {{count}} agent(s)...",
+          restartNow: "Restart now",
+          restartNowConfirmTitle: "Restart now?",
+          restartNowConfirmMessage:
+            "Restart immediately without waiting for running agents. In-flight turns will be interrupted.",
           unableToReconnectTitle: "无法重新连接",
           unableToReconnectMessage: "{{name}} 没有重新上线。请确认它已重启。",
           unavailableTitle: "Host 不可用",

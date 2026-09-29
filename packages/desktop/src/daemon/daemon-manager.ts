@@ -353,8 +353,17 @@ export async function stopDesktopDaemon(
   return resolveDesktopDaemonStatus();
 }
 
-async function restartDaemon(): Promise<DesktopDaemonStatus> {
-  await runExternalCliJsonCommand(["daemon", "restart", "--home", getPaseoHome(), "--json"]);
+async function restartDaemon(args?: Record<string, unknown>): Promise<DesktopDaemonStatus> {
+  const force = args?.force === true;
+  await runExternalCliJsonCommand([
+    "daemon",
+    "restart",
+    ...(force ? [] : ["--wait-idle"]),
+    "--home",
+    getPaseoHome(),
+    "--json",
+    ...(force ? ["--force"] : []),
+  ]);
   return resolveDesktopDaemonStatus();
 }
 
@@ -407,7 +416,7 @@ export function createDaemonCommandHandlers(): Record<string, DesktopCommandHand
           ? { pid: args.pid, startedAt: args.startedAt }
           : undefined,
       ),
-    restart_desktop_daemon: () => restartDaemon(),
+    restart_desktop_daemon: (args) => restartDaemon(args),
     desktop_daemon_logs: () => getDaemonLogs(),
     desktop_sandbox_diagnostics: () =>
       describeSandbox({
