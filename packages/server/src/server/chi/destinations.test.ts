@@ -35,6 +35,15 @@ describe("chi destination resolution", () => {
     expect(https).toMatchObject({ destinationId: "henkaku", audience: "shared" });
   });
 
+  it("resolves a mixed-case origin to the lowercased mapping and records the rule", () => {
+    const resolved = resolveChiDestination(config, "https://github.com/Henkaku-Center/Chi.git");
+    expect(resolved).toMatchObject({
+      repo: "github:henkaku-center/chi",
+      destinationId: "henkaku",
+      matchedRule: "github:henkaku-center/chi",
+    });
+  });
+
   it("prefers an exact mapping over the owner wildcard", () => {
     expect(resolveChiDestinationForRepo(config, "github:henkaku-center/chi")).toMatchObject({
       destinationId: "henkaku",

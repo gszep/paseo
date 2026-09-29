@@ -1894,6 +1894,10 @@ export const ChiSyncDestinationSchema = z.object({
   name: z.string(),
   endpoint: z.string(),
   audience: ChiAudienceSchema,
+  /** Authenticated Chi account pinned on the association, if any. */
+  actor: z.string().nullable().optional(),
+  /** The mapping rule that matched, e.g. `github:owner/repo` or `github:owner/*`. */
+  matchedRule: z.string().nullable().optional(),
 });
 export type ChiSyncDestination = z.infer<typeof ChiSyncDestinationSchema>;
 export const ChiContinueResponseSchema = z.object({
@@ -1926,6 +1930,8 @@ export const ChiSyncResponseSchema = z.object({
       destination: ChiSyncDestinationSchema.nullable(),
       pending: z.boolean(),
       error: z.string().nullable(),
+      /** False when the destination is a peer deployment that cannot deliver mentions. */
+      mentionsAvailable: z.boolean().optional(),
     }),
     z.object({ requestId: z.string(), outcome: z.literal("failed"), error: z.string() }),
   ]),

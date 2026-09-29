@@ -6284,6 +6284,9 @@ export class Session {
       const payload = request.sync
         ? await this.readAgentDirectorySync(request)
         : await this.listFetchAgentsEntries(request);
+      // A client fetch is the earliest reliable reconnect signal for this host;
+      // retry any capture that was outstanding while the backend was unreachable.
+      void this.agentManager.chi?.reconcilePending();
       const snapshotUpdatedAtByAgentId = new Map<string, number>();
       for (const entry of payload.entries) {
         const parsedUpdatedAt = Date.parse(entry.agent.updatedAt);

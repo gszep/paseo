@@ -13,13 +13,14 @@ export function useMentionParticipants(serverId: string, agentId: string, active
   const workspaceId = useSessionStore(
     (state) => state.sessions[serverId]?.agents.get(agentId)?.workspaceId,
   );
-  const { destination } = useSyncDestination(serverId, workspaceId ?? "");
+  const { destination, mentionsAvailable } = useSyncDestination(serverId, workspaceId ?? "");
   const supported = useSessionStore(
     (state) =>
       state.sessions[serverId]?.serverInfo?.features?.chiMentions === true &&
       state.sessions[serverId]?.agents.get(agentId)?.provider === "opencode",
   );
-  const enabled = supported && Boolean(destination) && connected && Boolean(workspaceId);
+  const enabled =
+    supported && Boolean(destination) && mentionsAvailable && connected && Boolean(workspaceId);
   const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, enabled);
   const query = useFetchQuery({
     queryKey: [...mentionQueryKey(serverId, workspaceId ?? "", state), "participants"],

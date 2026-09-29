@@ -40,14 +40,18 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
   const supported = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.chiMentions === true,
   );
-  const { destination } = useSyncDestination(serverId, workspaceId ?? "");
-  const active = supported && Boolean(destination) && connected && Boolean(workspaceId);
+  const { destination, mentionsAvailable } = useSyncDestination(serverId, workspaceId ?? "");
+  const active =
+    supported && Boolean(destination) && mentionsAvailable && connected && Boolean(workspaceId);
   const { scope, state } = useMentionScope(serverId, workspaceId ?? "", client, active);
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   if (!supported || !workspaceId) return null;
   return (
     <View style={styles.rail}>
       <SelectedRecipients serverId={serverId} agentId={agentId} />
+      {destination && !mentionsAvailable ? (
+        <Text style={styles.text}>Mentions are not available for this destination.</Text>
+      ) : null}
       {active && client && state.context ? (
         <ProtectedDelivery
           key={state.generation}

@@ -29,8 +29,17 @@ import { ScreenHeader } from "@/components/headers/screen-header";
 import { ScreenTitle } from "@/components/headers/screen-title";
 import { HostBadge, HOST_BADGE_ICON_SIZE } from "@/hosts/host-badge";
 import { useHostBadges } from "@/hosts/use-host-badges";
-import { useSyncDestination, type SyncDestination } from "@/chi/use-sync-destination";
-import { WorkspaceSyncNotice } from "@/chi/sync-notice";
+import { useSyncDestination, type SyncDestinationState } from "@/chi/use-sync-destination";
+import { syncAudienceLabel } from "@/chi/sync-destination";
+import { WorkspaceSyncNotice, syncNoticeReason } from "@/chi/sync-notice";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuHint,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Combobox, type ComboboxOption } from "@/components/ui/combobox";
 import type { ShortcutKey } from "@/utils/format-shortcut";
 import {
@@ -957,36 +966,64 @@ function WorkspaceHeaderProjectRow({
           ·
         </Text>
       ) : null}
-      {showDestination ? (
-        <DestinationChip key="destination" destination={sync.destination} />
-      ) : null}
+      {showDestination ? <DestinationChip key="destination" sync={sync} /> : null}
     </View>
   );
 }
 
 /**
  * Where a workspace syncs: a database glyph and the configured destination name, or a grey
- * glyph and `local`. A name alone must not imply sharing, so this only reports the mapping.
+ * glyph and `local`. One tap opens the effective destination: URL, authenticated account,
+ * matched rule, actual audience and any remediation guidance.
  */
-function DestinationChip({ destination }: { destination: SyncDestination | null }) {
+function DestinationChip({ sync }: { sync: SyncDestinationState }) {
+  const destination = sync.destination;
+  const audience = destination ? syncAudienceLabel(destination.audience) : "Not uploaded";
+  const account = destination?.actor ? `@${destination.actor}` : "Not signed in";
   return (
-    <View
-      style={styles.headerDestination}
-      testID="workspace-header-destination"
-      accessibilityLabel={destination ? `Syncs to ${destination.name}` : "Local workspace"}
-    >
-      <ThemedDatabase
-        size={HOST_BADGE_ICON_SIZE}
-        style={styles.headerDestinationIcon}
-        uniProps={destination ? destinationIconMapping : localIconMapping}
-      />
-      <Text
-        style={[styles.headerProjectTitle, !destination && styles.headerDestinationLocal]}
-        numberOfLines={1}
+    <DropdownMenu compactMode="sheet">
+      <DropdownMenuTrigger
+        testID="workspace-header-destination"
+        accessibilityLabel={
+          destination
+            ? `Syncs to ${destination.name}. Tap for details.`
+            : "Local workspace. Tap for details."
+        }
       >
-        {destination?.name ?? "local"}
-      </Text>
-    </View>
+        <View style={styles.headerDestination}>
+          <ThemedDatabase
+            size={HOST_BADGE_ICON_SIZE}
+            style={styles.headerDestinationIcon}
+            uniProps={destination ? destinationIconMapping : localIconMapping}
+          />
+          <Text
+            style={[styles.headerProjectTitle, !destination && styles.headerDestinationLocal]}
+            numberOfLines={1}
+          >
+            {destination?.name ?? "local"}
+          </Text>
+        </View>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" width={280} testID="workspace-header-destination-details">
+        <DropdownMenuLabel>{destination ? destination.name : "Local workspace"}</DropdownMenuLabel>
+        <DropdownMenuItem disabled testID="sync-destination-endpoint">
+          {`URL: ${destination?.endpoint ?? "none"}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-audience">
+          {`Audience: ${audience}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-account">
+          {`Account: ${account}`}
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled testID="sync-destination-rule">
+          {`Matched rule: ${destination?.matchedRule ?? "none"}`}
+        </DropdownMenuItem>
+        {sync.error ? <DropdownMenuHint>{syncNoticeReason(sync.error)}</DropdownMenuHint> : null}
+        {destination && !sync.mentionsAvailable ? (
+          <DropdownMenuHint>Mentions are not available for this destination.</DropdownMenuHint>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

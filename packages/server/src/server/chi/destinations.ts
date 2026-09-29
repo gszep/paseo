@@ -13,6 +13,8 @@ export interface ResolvedChiDestination {
   name: string;
   endpoint: string;
   audience: ChiAudience;
+  /** The mapping rule that matched, `github:owner/repo` or `github:owner/*` (null for explicit). */
+  matchedRule: string | null;
 }
 
 /**
@@ -63,6 +65,7 @@ export function resolveChiDestinationForRepo(
     name: destination.name,
     endpoint: destination.endpoint,
     audience: mapping.audience ?? "private",
+    matchedRule: mapping.repo,
   };
 }
 

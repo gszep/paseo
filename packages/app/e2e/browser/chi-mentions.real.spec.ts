@@ -415,6 +415,25 @@ test.describe("sync destinations (rendered)", () => {
         fullPage: true,
       });
 
+      // One tap shows the effective destination, audience, account and matched rule.
+      await desktopPage.getByTestId("workspace-header-destination").click();
+      await expect(desktopPage.getByTestId("sync-destination-audience")).toContainText(
+        "Shared with repository readers",
+      );
+      await expect(desktopPage.getByTestId("sync-destination-endpoint")).toContainText(
+        "chi-backend",
+      );
+      await expect(desktopPage.getByTestId("sync-destination-account")).toBeVisible();
+      await expect(desktopPage.getByTestId("sync-destination-rule")).toContainText(
+        "github:gszep/chi-synthetic-two-actor-20260925",
+      );
+      await desktopPage.keyboard.press("Escape");
+      await compactPage.getByTestId("workspace-header-destination").click();
+      await expect(compactPage.getByTestId("sync-destination-audience")).toContainText(
+        "Shared with repository readers",
+      );
+      await compactPage.keyboard.press("Escape");
+
       // An unmapped, non-Git workspace stays local and exposes no Chi actions.
       await desktopPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.localAgentId}`);
       await expect(desktopPage.getByTestId("workspace-header-destination")).toContainText("local", {
@@ -671,6 +690,36 @@ test.describe("sync destinations (rendered)", () => {
         recipient.close(),
         sender.close(),
       ]);
+    }
+  });
+
+  test("a legacy association still uploads with no chi config", async ({ browser }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    // No chi config: the legacy single-deployment behaviour must be preserved,
+    // including the pinned audience of a pre-existing association.
+    const sender = await startMentionActor("sava-the-owl", origin, runId);
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    try {
+      await sender.seedLegacyAssociation();
+      await sender.seed(page);
+      await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      // No mapping means no configured destination, yet the legacy label keeps uploading.
+      await expect(page.getByTestId("workspace-header-destination")).toContainText("local", {
+        timeout: 60000,
+      });
+      const before = (await sender.sources()).length;
+      const countSources = async () => (await sender.sources()).length;
+      await sendPrompt(page, `legacy shared capture ${runId}`);
+      await expect.poll(countSources, { timeout: 120000 }).toBeGreaterThan(before);
+      await plainChat(page);
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(0);
+    } finally {
+      await Promise.allSettled([context.close(), sender.close()]);
     }
   });
 });

@@ -4,7 +4,8 @@ import { StyleSheet } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
-const NOTICE_TITLE = "Sync needs to succeed";
+const NOTICE_TITLE =
+  "For others to see this session and for its mentions to appear, sync needs to succeed.";
 
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {

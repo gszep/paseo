@@ -267,6 +267,23 @@ export async function startMentionActor(
     setFailEvidence(value: boolean) {
       failEvidence = value;
     },
+    /** Seed a pre-P1 association label: no destination, endpoint or audience. */
+    async seedLegacyAssociation() {
+      await client.updateAgent(agent.id, {
+        labels: {
+          "chi.native": JSON.stringify({
+            repo,
+            actor: `github:${actor}`,
+            sourceId: null,
+            head: null,
+            error: null,
+          }),
+        },
+      });
+    },
+    sources() {
+      return [...createdSources];
+    },
     /** Recreate the daemon on the same persisted home, then reconnect the fixture client. */
     async restart() {
       await client.close().catch(() => undefined);
@@ -342,6 +359,8 @@ process.on("message", async (value) => {
         "fail-evidence",
         "allow-evidence",
         "restart",
+        "seed-legacy",
+        "sources",
       ]),
     })
     .parse(value);
@@ -350,6 +369,7 @@ process.on("message", async (value) => {
     if (request.action === "lose-reply") instance.loseNextReplyReply();
     if (request.action === "fail-evidence") instance.setFailEvidence(true);
     if (request.action === "allow-evidence") instance.setFailEvidence(false);
+    if (request.action === "seed-legacy") await instance.seedLegacyAssociation();
     if (request.action === "hide") await instance.hideSources();
     if (request.action === "restart") await instance.restart();
     if (request.action === "close") await instance.close();
@@ -359,6 +379,7 @@ process.on("message", async (value) => {
       createAttempts: instance.createAttempts,
       replyAttempts: instance.replyAttempts,
       port: instance.port,
+      sources: instance.sources(),
     });
     if (request.action === "close") process.disconnect();
   } catch (error) {

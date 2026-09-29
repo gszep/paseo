@@ -21,6 +21,7 @@ const responseSchema = z.discriminatedUnion("ok", [
     createAttempts: z.array(z.string()),
     replyAttempts: z.array(z.string()),
     port: z.number(),
+    sources: z.array(z.string()).optional(),
   }),
   z.object({ ok: z.literal(false), id: z.string(), error: z.string() }),
 ]);
@@ -32,7 +33,9 @@ type Action =
   | "close"
   | "fail-evidence"
   | "allow-evidence"
-  | "restart";
+  | "restart"
+  | "seed-legacy"
+  | "sources";
 interface MentionActorOptions {
   chi?: unknown;
 }
@@ -107,6 +110,10 @@ export async function startMentionActor(
     attempts: () => request("attempts"),
     failEvidence: () => request("fail-evidence"),
     allowEvidence: () => request("allow-evidence"),
+    seedLegacyAssociation: () => request("seed-legacy"),
+    async sources() {
+      return (await request("sources")).sources ?? [];
+    },
     /** Recreate the daemon on the same persisted home; returns the new port. */
     async restart() {
       const result = await request("restart");

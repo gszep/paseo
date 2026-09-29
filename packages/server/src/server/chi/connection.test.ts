@@ -706,7 +706,7 @@ describe("Chi owner recovery", () => {
     await expect(f.restart().capture(agent.id)).rejects.toThrow("chi-session-busy");
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
       head: f.input.snapshotId,
-      error: "chi-session-busy",
+      error: null,
     });
     expect(
       vi
@@ -1433,8 +1433,9 @@ describe("automatic sync destinations", () => {
     mappings,
   });
 
-  async function syncFixture(config = destinationConfig()) {
+  async function syncFixture(config?: ReturnType<typeof destinationConfig> | null) {
     const f = await fixture();
+    const effective = config === undefined ? destinationConfig(f.authority.endpoint) : config;
     const evidence: Array<{ visibility: string }> = [];
     let failEvidence = false;
     const sourceId = prepareNativeCapture({
@@ -1454,12 +1455,12 @@ describe("automatic sync destinations", () => {
       }
       return base(url, init);
     }) as typeof fetch;
-    const connect = (override = config) =>
+    const connect = (override = effective) =>
       new ChiConnection(f.manager, {
         home: f.home,
         serverId: "server",
         authority: f.authority,
-        getChiConfig: () => override,
+        getChiConfig: () => override ?? undefined,
       });
     const register = (labels?: Record<string, string>) =>
       f.registration.register("ses_fork", labels ?? {});
@@ -1502,7 +1503,7 @@ describe("automatic sync destinations", () => {
     const f = await syncFixture();
     const agent = await f.register();
     await f.connect().capture(agent.id);
-    const privateConfig = destinationConfig(DEFAULT_BACKEND_URL, "private");
+    const privateConfig = destinationConfig(f.authority.endpoint, "private");
     await f.connect(privateConfig).capture(agent.id);
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).audience).toBe("shared");
     expect(f.evidence.at(-1)?.visibility).toBe("shared");
@@ -1536,7 +1537,7 @@ describe("automatic sync destinations", () => {
   });
 
   it("binds a legacy association to the configured default destination", async () => {
-    const f = await syncFixture();
+    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared"));
     const agent = await f.register({
       "chi.native": JSON.stringify({
         repo: "github:fixture/repo",
@@ -1593,5 +1594,160 @@ describe("automatic sync destinations", () => {
     await f.register();
     const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
     expect(status.destination).toBeNull();
+  });
+
+  it("keeps a legacy association shared when no chi section is configured", async () => {
+    const f = await syncFixture(null);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    await f.connect().capture(agent.id);
+    expect(f.evidence.at(-1)?.visibility).toBe("shared");
+    expect(
+      JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).audience,
+    ).toBeUndefined();
+  });
+
+  it("accepts a mixed-case repository in a legacy association", async () => {
+    const f = await syncFixture(null);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:Fixture/Repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    const result = await f.connect().capture(agent.id);
+    expect(result.repo).toBe("github:Fixture/Repo");
+    expect(result.sourceId).toBe(f.sourceId);
+    expect(f.evidence).toHaveLength(1);
+  });
+
+  it("resumes a paused association once the pinned destination is configured again", async () => {
+    const endpoint = "https://chi.invalid";
+    const f = await syncFixture(destinationConfig(endpoint, "shared"));
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+        destination: "henkaku",
+        endpoint,
+        audience: "shared",
+        paused: true,
+        capturePending: true,
+      }),
+    });
+    await expect(
+      f.connect(destinationConfig("https://other.invalid", "shared")).capture(agent.id),
+    ).rejects.toThrow("chi-destination-changed");
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).paused).toBe(true);
+    const resumed = await f.connect(destinationConfig(endpoint, "shared")).capture(agent.id);
+    expect(resumed).toMatchObject({ paused: false, capturePending: false });
+    expect(resumed.sourceId).toBe(f.sourceId);
+    expect(f.evidence).toHaveLength(1);
+  });
+
+  it("checks a destination-less association against the default deployment, not a live remap", async () => {
+    const f = await syncFixture(destinationConfig("https://remapped.invalid", "shared"));
+    const seen: string[] = [];
+    const baseRequest = f.authority.request;
+    f.authority.request = (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(url));
+      return baseRequest(url, init);
+    }) as typeof fetch;
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: "a".repeat(64),
+        head: "b".repeat(64),
+        error: null,
+        conversationId: "conversation",
+      }),
+    });
+    await f
+      .connect()
+      .withPromptAdmission(agent.id, async () => "admitted")
+      .catch(() => undefined);
+    expect(seen.some((url) => url.includes("remapped.invalid"))).toBe(false);
+  });
+
+  it("reports the default destination for an explicit association and the matched rule for a mapped one", async () => {
+    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const explicit = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+        explicit: true,
+        endpoint: DEFAULT_BACKEND_URL,
+        audience: "private",
+      }),
+    });
+    const explicitStatus = await f.connect().syncStatus({
+      workspaceId: "workspace",
+      cwd: f.home,
+    });
+    expect(explicitStatus.destination).toMatchObject({
+      id: "default",
+      endpoint: DEFAULT_BACKEND_URL,
+      audience: "private",
+      actor: "github:owner",
+    });
+    expect(explicit.id).toBeTruthy();
+
+    const mapped = await syncFixture();
+    await mapped.register();
+    const mappedStatus = await mapped.connect().syncStatus({
+      workspaceId: "workspace",
+      cwd: mapped.home,
+    });
+    expect(mappedStatus.destination).toMatchObject({
+      id: "henkaku",
+      matchedRule: "github:fixture/repo",
+    });
+    expect(mappedStatus.mentionsAvailable).toBe(true);
+  });
+
+  it("reports mentions unavailable for a peer destination", async () => {
+    const f = await syncFixture(destinationConfig("https://peer.invalid", "shared"));
+    const agent = await f.register();
+    await f.connect().capture(agent.id);
+    const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
+    expect(status.destination?.endpoint).toBe("https://peer.invalid");
+    expect(status.mentionsAvailable).toBe(false);
+  });
+
+  it("does not persist a transient busy capture as a durable error", async () => {
+    const f = await syncFixture();
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: "github:fixture/repo",
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+        destination: "henkaku",
+        endpoint: f.authority.endpoint,
+        audience: "shared",
+      }),
+    });
+    f.agents[0]!.lifecycle = "running";
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-session-busy");
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.error ?? null).toBeNull();
   });
 });

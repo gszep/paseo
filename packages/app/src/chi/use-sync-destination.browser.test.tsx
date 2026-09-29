@@ -32,9 +32,12 @@ function Probe() {
         name: "Henkaku",
         endpoint: "https://chi-backend.invalid",
         audience: "shared",
+        actor: "github:sava",
+        matchedRule: "github:fixture/repo",
       },
       pending: true,
       error: null,
+      mentionsAvailable: true,
     },
     loading: false,
     retry: () => undefined,
@@ -46,6 +49,9 @@ function Probe() {
       data-pending={String(state.pending)}
       data-loading={String(state.loading)}
       data-error={state.error ?? ""}
+      data-mentions={String(state.mentionsAvailable)}
+      data-actor={state.destination?.actor ?? ""}
+      data-rule={state.destination?.matchedRule ?? ""}
     />
   );
 }
@@ -65,6 +71,9 @@ describe("sync destination state", () => {
     expect(element.dataset.pending).toBe("true");
     expect(element.dataset.loading).toBe("false");
     expect(element.dataset.error).toBe("");
+    expect(element.dataset.mentions).toBe("true");
+    expect(element.dataset.actor).toBe("github:sava");
+    expect(element.dataset.rule).toBe("github:fixture/repo");
   });
 
   it("treats a missing response as loading, never as a local verdict", () => {
@@ -73,6 +82,16 @@ describe("sync destination state", () => {
     expect(state.destination).toBeNull();
     expect(state.pending).toBe(false);
     expect(state.error).toBeNull();
+    expect(state.mentionsAvailable).toBe(false);
+  });
+
+  it("defaults mentions unavailable for a peer destination", () => {
+    const state = deriveSyncDestinationState({
+      response: { destination: null, pending: false, error: null },
+      loading: false,
+      retry: vi.fn(),
+    });
+    expect(state.mentionsAvailable).toBe(false);
   });
 
   it("keeps a safe failure reason and pending state", () => {

@@ -55,7 +55,9 @@ describe("SyncNoticeView", () => {
     );
     const element = notice(container);
     expect(element).not.toBeNull();
-    expect(element?.textContent).toContain("Sync needs to succeed");
+    expect(element?.textContent).toContain(
+      "For others to see this session and for its mentions to appear, sync needs to succeed.",
+    );
     expect(element?.textContent).toContain(syncNoticeReason("evidence-http-503"));
     expect(button(container, "Dismiss")).toBeInstanceOf(HTMLElement);
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);

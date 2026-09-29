@@ -5,6 +5,10 @@ export interface SyncDestination {
   name: string;
   endpoint: string;
   audience: ChiAudience;
+  /** Authenticated Chi account pinned on the association, if any. */
+  actor?: string | null;
+  /** The mapping rule that matched, e.g. `github:owner/repo` or `github:owner/*`. */
+  matchedRule?: string | null;
 }
 
 /** The daemon's answer for one workspace; null destination means local. */
@@ -12,10 +16,13 @@ export interface SyncDestinationResponse {
   destination: SyncDestination | null;
   pending: boolean;
   error: string | null;
+  /** False when the destination is a peer deployment that cannot deliver mentions. */
+  mentionsAvailable?: boolean;
 }
 
 export interface SyncDestinationState extends SyncDestinationResponse {
-  /** True until the first successful status response. Never an error or local verdict. */
+  mentionsAvailable: boolean;
+  /** True until the first status response for a connected host. Never a local verdict. */
   loading: boolean;
   retry: () => void;
 }
@@ -34,7 +41,13 @@ export function deriveSyncDestinationState(input: {
     destination: input.response?.destination ?? null,
     pending: input.response?.pending ?? false,
     error: input.response?.error ?? null,
+    mentionsAvailable: input.response?.mentionsAvailable ?? false,
     loading: input.loading,
     retry: input.retry,
   };
+}
+
+/** Human-readable audience label for the chip details. */
+export function syncAudienceLabel(audience: ChiAudience): string {
+  return audience === "shared" ? "Shared with repository readers" : "Private";
 }

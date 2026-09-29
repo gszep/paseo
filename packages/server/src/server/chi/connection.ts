@@ -234,7 +234,7 @@ export class ChiConnection {
     const association = associationSchema.parse(JSON.parse(encoded));
     if (association.blocked) throw new Error("chi-conversation-pending");
     if (!association.conversationId) return;
-    const endpoint = this.endpointFor(association.repo, association.endpoint);
+    const endpoint = this.endpointFor(association.endpoint);
     const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
     if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
     const { conversation } = await this.client(association.repo, auth.sessionToken, endpoint).get({
@@ -261,7 +261,7 @@ export class ChiConnection {
       if (this.manager.isChiAgentBusy(agentId)) throw new Error("chi-session-busy");
       let association = this.association(agent);
       if (!association) association = await this.share(agentId);
-      const endpoint = this.endpointFor(association.repo, association.endpoint);
+      const endpoint = this.endpointFor(association.endpoint);
       const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
       if (auth.chiUserId !== association.actor) throw new Error("chi-identity-mismatch");
       const client = this.client(association.repo, auth.sessionToken, endpoint);
@@ -385,10 +385,12 @@ export class ChiConnection {
     }
   }
 
-  private endpointFor(repo: string, pinned?: string): string {
+  private endpointFor(pinned?: string): string {
     if (pinned) return pinned;
-    const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
-    return resolved?.endpoint ?? this.authority.endpoint;
+    // A destination-less association (legacy label or explicit canonical
+    // transfer) stays on the default deployment; a live remap must never
+    // retarget a canonical check, matching the migration path.
+    return DEFAULT_BACKEND_URL;
   }
 
   private loseMentionAuthority() {
@@ -404,7 +406,7 @@ export class ChiConnection {
       });
       const parsed = parseGitHubRemote(remote.stdout);
       if (!parsed) throw new Error("chi-repository-mismatch");
-      const repo = `github:${parsed.owner}/${parsed.repo}`;
+      const repo = `github:${parsed.owner}/${parsed.repo}`.toLowerCase();
       const auth = directoryOnly ? await this.authority.login() : await this.authorize(repo, cwd);
       return {
         repo,
@@ -440,8 +442,20 @@ export class ChiConnection {
       if (!resolved) throw new Error("chi-share-required");
       association = await this.autoAssociate(agentId, resolved, identity.actor);
     }
-    if (identity.actor !== association.actor.toLowerCase() || identity.repo !== association.repo)
+    // A peer destination cannot deliver mentions; fail before preparing one that
+    // could never be reconciled.
+    if (association.endpoint && association.endpoint !== this.authority.endpoint)
+      throw new Error("chi-mentions-unavailable");
+    if (!association.actor) {
+      // An auto-association may be created without an actor; bind it now rather
+      // than rejecting the first mention in that window.
+      association = await this.patchAssociation(agentId, { actor: identity.actor });
+    } else if (
+      identity.actor !== association.actor.toLowerCase() ||
+      identity.repo !== association.repo.toLowerCase()
+    ) {
       throw new Error("chi-identity-mismatch");
+    }
     if (!admission) throw new Error("chi-mention-admission-required");
     await this.mentions.prepare({ agentId, messageId, text, recipients, identity, admission });
   }
@@ -633,7 +647,7 @@ export class ChiConnection {
       const identity = authSchema.parse(await get("auth/session"));
       if (identity.chiUserId !== session.chiUserId) throw new Error("chi-identity-mismatch");
       const catalog = reposSchema.parse(await get("repos"));
-      if (!catalog.repos.some((entry) => entry.repo === repo))
+      if (!catalog.repos.some((entry) => entry.repo.toLowerCase() === repo.toLowerCase()))
         throw new Error("chi-repository-denied");
       return session;
     } catch (error) {
@@ -652,14 +666,14 @@ export class ChiConnection {
     });
     const parsed = parseGitHubRemote(remote.stdout);
     if (!parsed) throw new Error("chi-repository-mismatch");
-    const repo = selectedRepo ?? `github:${parsed.owner}/${parsed.repo}`;
+    const repo = (selectedRepo ?? `github:${parsed.owner}/${parsed.repo}`).toLowerCase();
     const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
     const endpoint = resolved?.endpoint ?? DEFAULT_BACKEND_URL;
     const auth = await this.authorize(repo, agent.cwd, this.authorityFor(endpoint));
     const encoded = await this.manager.updateAgentLabel(agentId, label, (current) => {
       if (current) {
         const previous = associationSchema.parse(JSON.parse(current));
-        if (previous.repo !== repo) throw new Error("chi-association-conflict");
+        if (previous.repo.toLowerCase() !== repo) throw new Error("chi-association-conflict");
         if (previous.actor !== auth.chiUserId) throw new Error("chi-identity-mismatch");
         return current;
       }
@@ -793,7 +807,7 @@ export class ChiConnection {
       if (target.lifecycle === "running" || target.lifecycle === "initializing")
         throw new Error("chi-session-busy");
       const settledTurns = [...target.finalizedForegroundTurnIds];
-      const endpoint = this.endpointFor(association.repo, association.endpoint);
+      const endpoint = this.endpointFor(association.endpoint);
       const authority = this.authorityFor(endpoint);
       const auth = await this.authorize(association.repo, target.cwd, authority);
       if (!association.actor) {
@@ -829,7 +843,7 @@ export class ChiConnection {
             workspace: { hostId: this.options.serverId, path: target.cwd },
           },
           expectedHead: pinned.head,
-          visibility: pinned.audience ?? ("private" as const),
+          visibility: pinned.audience ?? (pinned.explicit ? "private" : "shared"),
           coverage: { kind: "export" as const, reason: null },
         };
         const captured = await (retryConflict
@@ -864,7 +878,10 @@ export class ChiConnection {
       });
     } catch (error) {
       const code = safeChiError(error);
-      await this.patchAssociation(agentId, { error: code, capturePending: true });
+      // Busy is transient (the capture loop retries); never persist it as a durable
+      // sync error, which startup reconciliation would otherwise surface forever.
+      if (code !== "chi-session-busy")
+        await this.patchAssociation(agentId, { error: code, capturePending: true });
       throw new Error(code, { cause: error });
     }
   }
@@ -884,6 +901,9 @@ export class ChiConnection {
       const configured = config.destinations[association.destination];
       if (!configured || configured.endpoint !== association.endpoint)
         return this.pauseAssociation(agentId, "chi-destination-changed");
+      if (association.paused)
+        // The pinned destination is configured again: resume the durable capture.
+        return this.patchAssociation(agentId, { paused: false, capturePending: true, error: null });
       return association;
     }
     if (association.explicit) {
@@ -987,7 +1007,7 @@ export class ChiConnection {
   private destinationFromIdentities(
     identities: Array<{ association: Association | null }>,
     config: ChiDestinationsConfig | null,
-  ): ResolvedChiDestination | null {
+  ): (ResolvedChiDestination & { actor: string | null }) | null {
     for (const { association } of identities) {
       if (!association?.destination) continue;
       const configured = config?.destinations[association.destination];
@@ -998,6 +1018,23 @@ export class ChiConnection {
         name: configured.name,
         endpoint: association.endpoint ?? configured.endpoint,
         audience: association.audience ?? "private",
+        matchedRule: resolveChiDestinationForRepo(config, association.repo)?.matchedRule ?? null,
+        actor: association.actor || null,
+      };
+    }
+    // An explicit canonical transfer on an unmapped repository still uploads to
+    // the default deployment; report it so the chip never says "local" while
+    // bytes leave the host.
+    for (const { association } of identities) {
+      if (!association?.explicit) continue;
+      return {
+        repo: association.repo,
+        destinationId: "default",
+        name: "Chi",
+        endpoint: association.endpoint ?? DEFAULT_BACKEND_URL,
+        audience: association.audience ?? "private",
+        matchedRule: null,
+        actor: association.actor || null,
       };
     }
     return null;
@@ -1017,18 +1054,19 @@ export class ChiConnection {
     return { pending, error };
   }
 
-  async syncStatus(input: {
-    workspaceId: string;
-    cwd: string;
-    retry?: boolean;
-  }): Promise<{ destination: ChiSyncDestination | null; pending: boolean; error: string | null }> {
+  async syncStatus(input: { workspaceId: string; cwd: string; retry?: boolean }): Promise<{
+    destination: ChiSyncDestination | null;
+    pending: boolean;
+    error: string | null;
+    mentionsAvailable: boolean;
+  }> {
     const identities = await this.workspaceIdentities(input.workspaceId);
     if (input.retry)
       for (const identity of identities) void this.capture(identity.id).catch(() => undefined);
-    const resolved =
-      this.destinationFromIdentities(identities, this.chiConfig()) ??
-      (await this.resolveForCwd(input.cwd));
+    const fromAssociations = this.destinationFromIdentities(identities, this.chiConfig());
+    const resolved = fromAssociations ?? (await this.resolveForCwd(input.cwd));
     const { pending, error } = this.aggregateSync(identities);
+    const actor = fromAssociations?.actor ?? null;
     return {
       destination: resolved
         ? {
@@ -1036,10 +1074,13 @@ export class ChiConnection {
             name: resolved.name,
             endpoint: resolved.endpoint,
             audience: resolved.audience,
+            actor,
+            matchedRule: resolved.matchedRule,
           }
         : null,
       pending,
       error,
+      mentionsAvailable: Boolean(resolved && resolved.endpoint === this.authority.endpoint),
     };
   }
 
