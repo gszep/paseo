@@ -7,35 +7,15 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 });
 
-const stateRef = vi.hoisted(() => ({
-  current: {
-    destination: null as null | { id: string; name: string; endpoint: string; audience: string },
-    pending: false,
-    error: null as string | null,
-    loading: false,
-    retry: vi.fn(),
-  },
-}));
+import { SyncNoticeView, useSyncNoticeDismissal, syncNoticeReason } from "./sync-notice-view";
 
-vi.mock("./use-sync-destination", () => ({
-  useSyncDestination: () => stateRef.current,
-}));
-
-import { WorkspaceSyncNotice, syncNoticeReason } from "./sync-notice";
-
+const errorRef = { current: null as string | null };
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
-function render(error: string | null) {
-  stateRef.current = {
-    destination: null,
-    pending: false,
-    error,
-    loading: false,
-    retry: vi.fn(),
-  };
+function mount(node: React.ReactNode) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<WorkspaceSyncNotice serverId="host" workspaceId="workspace" />));
+  act(() => root.render(node));
   mounted.push({ root, container });
   return { root, container };
 }
@@ -48,6 +28,18 @@ function button(container: HTMLElement, label: string) {
   ) as HTMLElement | undefined;
 }
 
+function DismissProbe() {
+  const { visible, dismiss } = useSyncNoticeDismissal(errorRef.current);
+  return (
+    <div>
+      <span data-testid="probe" data-visible={String(visible)} />
+      <button type="button" data-testid="dismiss" onClick={dismiss}>
+        dismiss
+      </button>
+    </div>
+  );
+}
+
 afterEach(() => {
   for (const entry of mounted.splice(0)) {
     act(() => entry.root.unmount());
@@ -56,38 +48,50 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("WorkspaceSyncNotice", () => {
-  it("renders the required copy and a safe reason for a failure", () => {
-    const { container } = render("evidence-http-503");
+describe("SyncNoticeView", () => {
+  it("renders the required copy, a safe reason and both actions", () => {
+    const { container } = mount(
+      <SyncNoticeView error="evidence-http-503" onDismiss={vi.fn()} onRetry={vi.fn()} />,
+    );
     const element = notice(container);
     expect(element).not.toBeNull();
     expect(element?.textContent).toContain("Sync needs to succeed");
     expect(element?.textContent).toContain(syncNoticeReason("evidence-http-503"));
+    expect(button(container, "Dismiss")).toBeInstanceOf(HTMLElement);
+    expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
   });
 
-  it("is absent without an error and never a local verdict while loading", () => {
-    const { container } = render(null);
-    expect(notice(container)).toBeNull();
-  });
-
-  it("dismisses without clearing pending state, and success clears the notice", () => {
-    const { root, container } = render("chi-destination-unmapped");
-    expect(notice(container)).not.toBeNull();
+  it("routes dismiss and retry through their callbacks", () => {
+    const onDismiss = vi.fn();
+    const onRetry = vi.fn();
+    const { container } = mount(
+      <SyncNoticeView error="chi-destination-unmapped" onDismiss={onDismiss} onRetry={onRetry} />,
+    );
     act(() => button(container, "Dismiss")!.click());
-    expect(notice(container)).toBeNull();
-    // A success response clears the dismissal so a later failure shows again.
-    stateRef.current = { ...stateRef.current, error: null };
-    act(() => root.render(<WorkspaceSyncNotice serverId="host" workspaceId="workspace" />));
-    expect(notice(container)).toBeNull();
-    stateRef.current = { ...stateRef.current, error: "evidence-http-503" };
-    act(() => root.render(<WorkspaceSyncNotice serverId="host" workspaceId="workspace" />));
-    expect(notice(container)).not.toBeNull();
-  });
-
-  it("retries through the shared status hook", () => {
-    const { container } = render("evidence-http-503");
-    const retry = stateRef.current.retry;
     act(() => button(container, "Retry")!.click());
-    expect(retry).toHaveBeenCalledOnce();
+    expect(onDismiss).toHaveBeenCalledOnce();
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+});
+
+describe("useSyncNoticeDismissal", () => {
+  it("hides on dismissal and clears on success so a later failure shows again", () => {
+    errorRef.current = "chi-destination-unmapped";
+    const { root, container } = mount(<DismissProbe />);
+    const probe = container.querySelector('[data-testid="probe"]') as HTMLElement;
+    expect(probe.dataset.visible).toBe("true");
+
+    act(() => (container.querySelector('[data-testid="dismiss"]') as HTMLButtonElement).click());
+    expect(probe.dataset.visible).toBe("false");
+
+    // Success clears the dismissal.
+    errorRef.current = null;
+    act(() => root.render(<DismissProbe />));
+    expect(probe.dataset.visible).toBe("false");
+
+    // A later distinct failure shows again.
+    errorRef.current = "evidence-http-503";
+    act(() => root.render(<DismissProbe />));
+    expect(probe.dataset.visible).toBe("true");
   });
 });

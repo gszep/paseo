@@ -7,59 +7,46 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 });
 
-const clientRef = vi.hoisted(() => ({
-  current: null as null | {
-    chiSyncStatus: ReturnType<typeof vi.fn>;
-  },
-}));
-const queryRef = vi.hoisted(() => ({
-  current: {
-    isSuccess: false,
-    isLoading: true,
-    isFetching: true,
-    data: undefined as unknown,
-    refetch: vi.fn(async () => undefined),
-  },
-}));
-
-vi.mock("@/runtime/host-runtime", () => ({
-  useHostRuntimeClient: () => clientRef.current,
-  useHostRuntimeIsConnected: () => true,
-}));
-vi.mock("@/stores/session-store", () => ({
-  useSessionStore: (selector: (state: unknown) => unknown) =>
-    selector({ sessions: { host: { serverInfo: { features: { chiNative: true } } } } }),
-}));
-vi.mock("@/data/query", () => ({
-  useFetchQuery: () => queryRef.current,
-}));
-
-import { syncDestinationQueryKey, useSyncDestination } from "./use-sync-destination";
+// Imported from the pure module on purpose: the hook's runtime imports pull the
+// whole navigation graph into the browser dependency optimizer.
+import { deriveSyncDestinationState, syncDestinationQueryKey } from "./sync-destination";
 
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
-function mount() {
+function mount(node: React.ReactNode) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(<Probe />));
+  act(() => root.render(node));
   mounted.push({ root, container });
   return container;
 }
+function probe(container: HTMLElement) {
+  return container.querySelector('[data-testid="probe"]') as HTMLElement;
+}
+
 function Probe() {
-  const state = useSyncDestination("host", "workspace");
+  const state = deriveSyncDestinationState({
+    response: {
+      destination: {
+        id: "henkaku",
+        name: "Henkaku",
+        endpoint: "https://chi-backend.invalid",
+        audience: "shared",
+      },
+      pending: true,
+      error: null,
+    },
+    loading: false,
+    retry: () => undefined,
+  });
   return (
-    <div>
-      <span
-        data-testid="probe"
-        data-destination={state.destination?.id ?? "none"}
-        data-loading={String(state.loading)}
-        data-error={state.error ?? ""}
-        data-pending={String(state.pending)}
-      />
-      <button type="button" data-testid="retry" onClick={state.retry}>
-        retry
-      </button>
-    </div>
+    <span
+      data-testid="probe"
+      data-destination={state.destination?.id ?? "none"}
+      data-pending={String(state.pending)}
+      data-loading={String(state.loading)}
+      data-error={state.error ?? ""}
+    />
   );
 }
 
@@ -71,68 +58,31 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("useSyncDestination", () => {
-  it("reports loading until the first response and never treats it as local", () => {
-    clientRef.current = { chiSyncStatus: vi.fn() };
-    queryRef.current = {
-      isSuccess: false,
-      isLoading: true,
-      isFetching: true,
-      data: undefined,
-      refetch: vi.fn(async () => undefined),
-    };
-    const container = mount();
-    const probe = container.querySelector('[data-testid="probe"]') as HTMLElement;
-    expect(probe.dataset.loading).toBe("true");
-    expect(probe.dataset.destination).toBe("none");
-  });
-
+describe("sync destination state", () => {
   it("maps a resolved destination, pending state and error", () => {
-    clientRef.current = { chiSyncStatus: vi.fn() };
-    queryRef.current = {
-      isSuccess: true,
-      isLoading: false,
-      isFetching: false,
-      data: {
-        outcome: "ready",
-        destination: {
-          id: "henkaku",
-          name: "Henkaku",
-          endpoint: "https://chi-backend.invalid",
-          audience: "shared",
-        },
-        pending: true,
-        error: null,
-      },
-      refetch: vi.fn(async () => undefined),
-    };
-    const container = mount();
-    const probe = container.querySelector('[data-testid="probe"]') as HTMLElement;
-    expect(probe.dataset.destination).toBe("henkaku");
-    expect(probe.dataset.pending).toBe("true");
-    expect(probe.dataset.loading).toBe("false");
-    expect(probe.dataset.error).toBe("");
+    const element = probe(mount(<Probe />));
+    expect(element.dataset.destination).toBe("henkaku");
+    expect(element.dataset.pending).toBe("true");
+    expect(element.dataset.loading).toBe("false");
+    expect(element.dataset.error).toBe("");
   });
 
-  it("issues a retry action and refetches", async () => {
-    const chiSyncStatus = vi.fn(async () => ({ outcome: "ready" }));
-    const refetch = vi.fn(async () => undefined);
-    clientRef.current = { chiSyncStatus };
-    queryRef.current = {
-      isSuccess: true,
-      isLoading: false,
-      isFetching: false,
-      data: { outcome: "ready", destination: null, pending: false, error: "evidence-http-503" },
-      refetch,
-    };
-    const container = mount();
-    const probe = container.querySelector('[data-testid="probe"]') as HTMLElement;
-    expect(probe.dataset.error).toBe("evidence-http-503");
-    await act(async () => {
-      (container.querySelector('[data-testid="retry"]') as HTMLButtonElement).click();
+  it("treats a missing response as loading, never as a local verdict", () => {
+    const state = deriveSyncDestinationState({ response: null, loading: true, retry: vi.fn() });
+    expect(state.loading).toBe(true);
+    expect(state.destination).toBeNull();
+    expect(state.pending).toBe(false);
+    expect(state.error).toBeNull();
+  });
+
+  it("keeps a safe failure reason and pending state", () => {
+    const state = deriveSyncDestinationState({
+      response: { destination: null, pending: true, error: "evidence-http-503" },
+      loading: false,
+      retry: vi.fn(),
     });
-    expect(chiSyncStatus).toHaveBeenCalledWith({ workspaceId: "workspace", action: "retry" });
-    expect(refetch).toHaveBeenCalled();
+    expect(state.error).toBe("evidence-http-503");
+    expect(state.pending).toBe(true);
   });
 
   it("exposes a stable query key", () => {

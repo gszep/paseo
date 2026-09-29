@@ -3,6 +3,24 @@ import { randomUUID } from "node:crypto";
 import { startMentionActor } from "../support/helpers/chi-mentions";
 import { composerLocator } from "../support/helpers/composer";
 
+/**
+ * Operator-approved destination for the synthetic fixture repository. The
+ * endpoint equals the deployment the fixture authority wraps, so the automatic
+ * association and migration both resolve to it.
+ */
+const CHI_CONFIG = {
+  destinations: {
+    henkaku: { name: "Henkaku", endpoint: "https://chi-backend-vadmp23swa-an.a.run.app" },
+  },
+  mappings: [
+    {
+      repo: "github:gszep/chi-synthetic-two-actor-20260925",
+      destination: "henkaku",
+      audience: "shared" as const,
+    },
+  ],
+};
+
 async function openActions(page: Page) {
   await page.getByTestId("workspace-header-menu-trigger").click();
   await expect(page.getByTestId("workspace-header-menu")).toBeVisible();
@@ -25,8 +43,8 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
   test.setTimeout(300000);
   const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
   const runId = randomUUID();
-  const sender = await startMentionActor("sava-the-owl", origin, runId);
-  const recipient = await startMentionActor("mochi-the-kitty", origin, runId);
+  const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+  const recipient = await startMentionActor("mochi-the-kitty", origin, runId, { chi: CHI_CONFIG });
   const desktop = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
   const compact = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -118,11 +136,16 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
     await sendPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
     await expect(composerLocator(sendPage)).toBeVisible({ timeout: 60000 });
     await plainChat(sendPage);
+    // The mapped workspace resolves its destination automatically; there is no
+    // Share step, only the header chip and the automatic capture after the turn.
+    await expect(sendPage.getByTestId("workspace-header-destination")).toContainText("Henkaku");
     await openActions(sendPage);
-    await sendPage.getByRole("menuitem", { name: "Share to Chi", exact: true }).click();
+    await expect(sendPage.getByRole("menuitem", { name: "Share to Chi", exact: true })).toHaveCount(
+      0,
+    );
     await expect(
       sendPage.getByRole("menuitem", { name: "Capture to Chi", exact: true }),
-    ).toBeVisible({ timeout: 30000 });
+    ).toHaveCount(0);
     await expect(
       sendPage.getByRole("menuitem", { name: "Continue on another host", exact: true }),
     ).toBeVisible();
@@ -331,4 +354,323 @@ test("flat deployment inbox, unread first-view, exact deep link, clean chat and 
       sender.close(),
     ]);
   }
+});
+
+// ---------------------------------------------------------------------------
+// P1 sync destinations — automatic capture and its failure/recovery surfaces.
+// These run against the mapped synthetic repository (CHI_CONFIG above); no test
+// clicks Share, because a mapped workspace associates and captures on its own.
+// ---------------------------------------------------------------------------
+
+async function expectNotice(page: Page) {
+  await expect(page.getByTestId("chi-sync-notice")).toBeVisible({ timeout: 90000 });
+}
+async function sendPrompt(page: Page, text: string) {
+  await composerLocator(page).fill(text);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+}
+async function expectNoChiActions(page: Page) {
+  await page.getByTestId("workspace-header-menu-trigger").click();
+  await expect(page.getByTestId("workspace-header-menu")).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Share to Chi", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("menuitem", { name: "Capture to Chi", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+}
+
+test.describe("sync destinations (rendered)", () => {
+  test("mapped vs local header on desktop and compact", async ({ browser }, testInfo) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const compact = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const desktopPage = await desktop.newPage();
+    const compactPage = await compact.newPage();
+    desktopPage.setDefaultTimeout(30000);
+    compactPage.setDefaultTimeout(30000);
+    try {
+      await sender.seed(desktopPage);
+      await sender.seed(compactPage);
+      await desktopPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(desktopPage.getByTestId("workspace-header-destination")).toContainText(
+        "Henkaku",
+        { timeout: 60000 },
+      );
+      await compactPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(compactPage.getByTestId("workspace-header-destination")).toContainText(
+        "Henkaku",
+        { timeout: 60000 },
+      );
+      await desktopPage.screenshot({
+        path: testInfo.outputPath("sync-mapped-header-desktop.png"),
+        fullPage: true,
+      });
+      await compactPage.screenshot({
+        path: testInfo.outputPath("sync-mapped-header-compact.png"),
+        fullPage: true,
+      });
+
+      // An unmapped, non-Git workspace stays local and exposes no Chi actions.
+      await desktopPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.localAgentId}`);
+      await expect(desktopPage.getByTestId("workspace-header-destination")).toContainText("local", {
+        timeout: 60000,
+      });
+      await expectNoChiActions(desktopPage);
+      await compactPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.localAgentId}`);
+      await expect(compactPage.getByTestId("workspace-header-destination")).toContainText("local", {
+        timeout: 60000,
+      });
+      await compactPage.screenshot({
+        path: testInfo.outputPath("sync-local-header-compact.png"),
+        fullPage: true,
+      });
+    } finally {
+      await Promise.allSettled([desktop.close(), compact.close(), sender.close()]);
+    }
+  });
+
+  test("a settled turn uploads with no Share action and the recipient sees the mention", async ({
+    browser,
+  }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const recipient = await startMentionActor("mochi-the-kitty", origin, runId, {
+      chi: CHI_CONFIG,
+    });
+    const desktop = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const compact = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const sendPage = await desktop.newPage();
+    const readPage = await compact.newPage();
+    sendPage.setDefaultTimeout(30000);
+    readPage.setDefaultTimeout(30000);
+    try {
+      await sender.seed(sendPage);
+      await sendPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(sendPage)).toBeVisible({ timeout: 60000 });
+      await plainChat(sendPage);
+      await expectNoChiActions(sendPage);
+      await expect(sendPage.getByTestId("workspace-header-destination")).toContainText("Henkaku");
+
+      const question = `@mochi-the-kitty Auto-captured source ${runId}`;
+      await sendPrompt(sendPage, question);
+      await openActions(sendPage);
+      await expect(
+        sendPage.getByText("@mochi-the-kitty: Mention delivered", { exact: true }),
+      ).toBeVisible({ timeout: 120000 });
+      await sendPage.keyboard.press("Escape");
+      await plainChat(sendPage);
+      await expect(sendPage.getByTestId("workspace-header-destination")).toContainText("Henkaku");
+
+      // The recipient's History-style inbox shows a mention made only by capture.
+      await recipient.seed(readPage);
+      await readPage.goto(`${origin}/chi?view=inbox`);
+      await expect(
+        readPage.getByText("Signed in as @mochi-the-kitty", { exact: true }),
+      ).toBeVisible({
+        timeout: 45000,
+      });
+      await expect(
+        readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }),
+      ).toBeVisible({ timeout: 30000 });
+      await readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }).click();
+      await expect(readPage.getByText(/Exact entry: msg_synthetic_/)).toBeVisible({
+        timeout: 30000,
+      });
+      await readPage.getByRole("button", { name: "Acknowledge", exact: true }).click();
+      await expect(readPage.getByText("acknowledged · revision 3", { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+      await readPage
+        .getByRole("textbox", { name: "Reply to mention", exact: true })
+        .fill("Auto-captured context confirmed.");
+      await readPage.getByRole("button", { name: "Send reply", exact: true }).click();
+      await expect(readPage.getByText("acknowledged · revision 4", { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+    } finally {
+      await Promise.allSettled([
+        desktop.close(),
+        compact.close(),
+        recipient.close(),
+        sender.close(),
+      ]);
+    }
+  });
+
+  test("failed capture shows one notice while prompts keep working", async ({ browser }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    try {
+      await sender.failEvidence();
+      await sender.seed(page);
+      await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      await sendPrompt(page, `offline capture ${runId}`);
+      await expectNotice(page);
+      await expect(page.getByTestId("chi-sync-notice")).toContainText("Sync needs to succeed");
+      await expect(page.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+
+      // A further prompt in the same session still starts and settles normally.
+      await sendPrompt(page, `second prompt while offline ${runId}`);
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(1);
+      await plainChat(page);
+      await sender.allowEvidence();
+    } finally {
+      await Promise.allSettled([context.close(), sender.close()]);
+    }
+  });
+
+  test("dismiss keeps pending, offline retry dedupes, success clears", async ({ browser }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    try {
+      await sender.failEvidence();
+      await sender.seed(page);
+      await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      await sendPrompt(page, `dismiss retry ${runId}`);
+      await expectNotice(page);
+
+      // Retry while still offline keeps exactly one notice.
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(1);
+
+      // Dismiss hides the notice but not the pending state.
+      await page.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(0);
+      await page.reload();
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      await expectNotice(page);
+
+      // Success clears the notice.
+      await sender.allowEvidence();
+      await page.getByRole("button", { name: "Retry", exact: true }).click();
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(0, { timeout: 90000 });
+    } finally {
+      await Promise.allSettled([context.close(), sender.close()]);
+    }
+  });
+
+  test("restart recovery uploads a pending capture with no new turn", async ({ browser }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const page = await context.newPage();
+    page.setDefaultTimeout(30000);
+    try {
+      await sender.failEvidence();
+      await sender.seed(page);
+      await page.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      await sendPrompt(page, `restart recovery ${runId}`);
+      await expectNotice(page);
+
+      // Persist capture-needed state, then bring the backend back and restart.
+      await sender.allowEvidence();
+      await sender.restart();
+      await sender.seed(page);
+      await page.reload();
+      await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
+      await expect(page.getByTestId("chi-sync-notice")).toHaveCount(0, { timeout: 120000 });
+      await expect(page.getByTestId("workspace-header-destination")).toContainText("Henkaku");
+    } finally {
+      await Promise.allSettled([context.close(), sender.close()]);
+    }
+  });
+
+  test("recipient opens, acknowledges and replies to an auto-captured mention", async ({
+    browser,
+  }) => {
+    test.setTimeout(240000);
+    const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+    const runId = randomUUID();
+    const sender = await startMentionActor("sava-the-owl", origin, runId, { chi: CHI_CONFIG });
+    const recipient = await startMentionActor("mochi-the-kitty", origin, runId, {
+      chi: CHI_CONFIG,
+    });
+    const sendContext = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+    const readContext = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const sendPage = await sendContext.newPage();
+    const readPage = await readContext.newPage();
+    sendPage.setDefaultTimeout(30000);
+    readPage.setDefaultTimeout(30000);
+    try {
+      await sender.seed(sendPage);
+      await sendPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
+      await expect(composerLocator(sendPage)).toBeVisible({ timeout: 60000 });
+      const question = `@mochi-the-kitty Auto-capture deep link ${runId}`;
+      await sendPrompt(sendPage, question);
+      await openActions(sendPage);
+      await expect(
+        sendPage.getByText("@mochi-the-kitty: Mention delivered", { exact: true }),
+      ).toBeVisible({ timeout: 120000 });
+      await sendPage.keyboard.press("Escape");
+
+      await recipient.seed(readPage);
+      await readPage.goto(`${origin}/chi?view=inbox`);
+      await expect(
+        readPage.getByText("Signed in as @mochi-the-kitty", { exact: true }),
+      ).toBeVisible({
+        timeout: 45000,
+      });
+      await expect(readPage.getByLabel("Unread mention", { exact: true })).toHaveCount(1);
+      await readPage.getByRole("button", { name: `Open mention ${question}`, exact: true }).click();
+      await expect(readPage.getByText(/Exact entry: msg_synthetic_/)).toBeVisible({
+        timeout: 30000,
+      });
+      await expect(readPage.getByText("open · revision 2", { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+      await readPage.getByRole("button", { name: "Browse pinned context", exact: true }).click();
+      await expect(readPage.getByRole("button", { name: /^user: msg_synthetic_/ })).toBeVisible({
+        timeout: 30000,
+      });
+      await readPage.getByRole("button", { name: "Acknowledge", exact: true }).click();
+      await expect(readPage.getByText("acknowledged · revision 3", { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+      await readPage
+        .getByRole("textbox", { name: "Reply to mention", exact: true })
+        .fill("Auto-captured reply.");
+      await readPage.getByRole("button", { name: "Send reply", exact: true }).click();
+      await expect(readPage.getByText("acknowledged · revision 4", { exact: true })).toBeVisible({
+        timeout: 30000,
+      });
+      await expect(readPage.getByLabel("Unread mention", { exact: true })).toHaveCount(0);
+    } finally {
+      await Promise.allSettled([
+        sendContext.close(),
+        readContext.close(),
+        recipient.close(),
+        sender.close(),
+      ]);
+    }
+  });
 });

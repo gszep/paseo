@@ -2,27 +2,15 @@ import { useCallback } from "react";
 import { useFetchQuery } from "@/data/query";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
+import {
+  deriveSyncDestinationState,
+  syncDestinationQueryKey,
+  type SyncDestination,
+  type SyncDestinationState,
+} from "./sync-destination";
 
-export interface SyncDestination {
-  id: string;
-  name: string;
-  endpoint: string;
-  audience: "private" | "shared";
-}
-
-export interface SyncDestinationState {
-  /** Null means local: no configured destination for the workspace. */
-  destination: SyncDestination | null;
-  pending: boolean;
-  error: string | null;
-  /** True until the first successful status response. Never an error or local verdict. */
-  loading: boolean;
-  retry: () => void;
-}
-
-export function syncDestinationQueryKey(serverId: string, workspaceId: string) {
-  return ["chi-sync-status", serverId, workspaceId] as const;
-}
+export type { SyncDestination, SyncDestinationState } from "./sync-destination";
+export { syncDestinationQueryKey } from "./sync-destination";
 
 /**
  * Resolves the workspace's sync destination over the daemon RPC. This is the
@@ -63,12 +51,9 @@ export function useSyncDestination(
       .then(() => refetch())
       .catch(() => undefined);
   }, [client, workspaceId, refetch]);
-  const data = query.isSuccess ? query.data : null;
-  return {
-    destination: data?.destination ?? null,
-    pending: data?.pending ?? false,
-    error: data?.error ?? null,
+  return deriveSyncDestinationState({
+    response: query.isSuccess ? query.data : null,
     loading: enabled && !query.isSuccess,
     retry,
-  };
+  });
 }
