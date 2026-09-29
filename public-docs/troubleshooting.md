@@ -92,7 +92,7 @@ paseo reload
 
 Paseo applies runtime-safe settings and names any paths that require a restart. Invalid JSON or a schema error applies nothing; fix the reported error and run the command again. If a launch environment variable or flag owns a changed setting, reload reports it separately.
 
-Run `paseo daemon restart` only when reload requests it. In the app, open **Settings → your host → Overview** and use **Restart daemon**. Running agents keep going, and clients reconnect automatically.
+Run `paseo daemon restart --wait-idle` only when reload requests it. In the app, open **Settings → your host → Overview** and use **Restart daemon**. With `--wait-idle` the daemon drains running turns before swapping the worker, so no live turn is cut; clients reconnect automatically. A restart without `--wait-idle` (or `--force`) still interrupts in-flight turns.
 
 ## Still stuck?
 
