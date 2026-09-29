@@ -31,12 +31,12 @@ test("draining freezes prompt admission until draining is cleared", async () => 
     expect(manager.isDraining()).toBe(false);
     expect(manager.assertAcceptingPrompts()).toBeUndefined();
 
-    manager.beginDraining();
+    expect(manager.beginDraining()).toBe(true);
     expect(manager.isDraining()).toBe(true);
     expect(() => manager.assertAcceptingPrompts()).toThrow(HostRestartingError);
 
-    // Idempotent.
-    manager.beginDraining();
+    // A second begin is a no-op: a caller must never start a second drain.
+    expect(manager.beginDraining()).toBe(false);
     manager.endDraining();
     manager.endDraining();
     expect(manager.isDraining()).toBe(false);
@@ -60,7 +60,7 @@ test("waitForAllIdle reports running agents, then resolves once the turn settles
     const wait = manager.waitForAllIdle({
       timeoutMs: 5_000,
       pollIntervalMs: 10,
-      onProgress: (running) => progress.push(running.map((entry) => entry.agentId)),
+      onProgress: (state) => progress.push(state.agents.map((entry) => entry.agentId)),
     });
 
     // The wait must not resolve while the turn is still held.
@@ -79,6 +79,67 @@ test("waitForAllIdle reports running agents, then resolves once the turn settles
   }
 });
 
+test("waitForAllIdle counts an in-progress prompt admission as drain work", async () => {
+  const { manager, agent } = await setup();
+  try {
+    // A prompt passed the drain check and took a ticket just before the drain.
+    const ticket = manager.beginAdmission();
+    expect(manager.beginDraining()).toBe(true);
+
+    // The drain rejects new prompts but admits the ticket holder, so the
+    // pre-drain prompt runs instead of failing mid-receipt.
+    expect(() => manager.assertAcceptingPrompts()).toThrow(HostRestartingError);
+    expect(manager.assertAcceptingPrompts(ticket)).toBeUndefined();
+
+    const progress: number[] = [];
+    const wait = manager.waitForAllIdle({
+      timeoutMs: 5_000,
+      pollIntervalMs: 10,
+      onProgress: (state) => progress.push(state.pendingAdmissions),
+    });
+    const settledEarly = await Promise.race([
+      wait.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+    expect(settledEarly).toBe(false);
+    expect(progress.some((count) => count > 0)).toBe(true);
+
+    await expect(
+      startAgentRun(manager, agent.id, "pre-drain prompt", createTestLogger(), {
+        admissionTicket: ticket,
+      }),
+    ).resolves.toBeDefined();
+
+    manager.endAdmission(ticket);
+    await expect(wait).resolves.toEqual({ ok: true });
+  } finally {
+    manager.endDraining();
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("permission follow-ups continue already-counted work during a drain", async () => {
+  const { manager, agent } = await setup();
+  try {
+    manager.beginDraining();
+    // The follow-up turn answering a human permission request is not a new
+    // prompt; it must never be rejected by the drain.
+    await expect(
+      startAgentRun(manager, agent.id, "permission follow-up", createTestLogger(), {
+        replaceRunning: true,
+        permissionFollowUp: true,
+      }),
+    ).resolves.toBeDefined();
+    // An ordinary prompt in the same state is still rejected.
+    await expect(
+      startAgentRun(manager, agent.id, "ordinary prompt", createTestLogger()),
+    ).rejects.toBeInstanceOf(HostRestartingError);
+  } finally {
+    manager.endDraining();
+    await manager.closeAgent(agent.id);
+  }
+});
+
 test("waitForAllIdle returns the remaining agents after the deadline", async () => {
   const gate = deferred();
   const { manager, agent } = await setup({
@@ -92,7 +153,8 @@ test("waitForAllIdle returns the remaining agents after the deadline", async () 
     const outcome = await manager.waitForAllIdle({ timeoutMs: 30, pollIntervalMs: 10 });
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) {
-      expect(outcome.runningAgents.map((entry) => entry.agentId)).toContain(agent.id);
+      expect(outcome.agents.map((entry) => entry.agentId)).toContain(agent.id);
+      expect(outcome.pendingAdmissions).toBe(0);
     }
     gate.resolve();
   } finally {
@@ -120,6 +182,25 @@ test("waitForAllIdle cancels promptly when the requesting signal aborts", async 
     await expect(wait).rejects.toThrow("drain_canceled");
     manager.endDraining();
     expect(manager.isDraining()).toBe(false);
+    gate.resolve();
+  } finally {
+    await manager.closeAgent(agent.id);
+  }
+});
+
+test("endDraining aborts an active drain wait so a force restart owns the intent", async () => {
+  const gate = deferred();
+  const { manager, agent } = await setup({
+    holdTurnFor: (prompt) => (prompt.includes("hold") ? gate.promise : null),
+  });
+  try {
+    void startAgentRun(manager, agent.id, "hold this turn", createTestLogger());
+    await vi.waitFor(() => expect(manager.hasInFlightRun(agent.id)).toBe(true));
+
+    manager.beginDraining();
+    const wait = manager.waitForAllIdle({ timeoutMs: 60_000, pollIntervalMs: 10 });
+    manager.endDraining();
+    await expect(wait).rejects.toThrow("drain_canceled");
     gate.resolve();
   } finally {
     await manager.closeAgent(agent.id);

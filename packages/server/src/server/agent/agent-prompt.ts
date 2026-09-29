@@ -26,9 +26,10 @@ export type AgentRunController = Pick<
   reloadAgentSession(agentId: string): Promise<unknown>;
   /**
    * Present on the real AgentManager; optional so lightweight test fakes that
-   * never drain remain valid.
+   * never drain remain valid. A ticket from `AgentManager.beginAdmission()`
+   * exempts a prompt whose admission began before the drain.
    */
-  assertAcceptingPrompts?: () => void;
+  assertAcceptingPrompts?: (ticket?: symbol) => void;
 };
 
 export interface StartAgentRunOptions {
@@ -37,6 +38,16 @@ export interface StartAgentRunOptions {
   runOptions?: AgentRunOptions;
   /** Ask the provider to deny permissions blocking this steer. */
   clearPendingPermissions?: boolean;
+  /**
+   * Internal: ticket from `AgentManager.beginAdmission()`. Lets a prompt whose
+   * admission started before a drain finish instead of being rejected.
+   */
+  admissionTicket?: symbol;
+  /**
+   * Internal: a permission follow-up continues an already-counted run (the
+   * agent was blocked on the human answer), so a drain never rejects it.
+   */
+  permissionFollowUp?: boolean;
 }
 
 export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
@@ -121,8 +132,12 @@ export async function startAgentRun(
     return { disposition: "out_of_band" };
   }
   // Admission guard for a draining daemon. Out-of-band commands above do not
-  // start a turn, so they remain available while everything else waits.
-  agentManager.assertAcceptingPrompts?.();
+  // start a turn, so they remain available while everything else waits. A
+  // permission follow-up continues already-counted work and a ticket holder
+  // began before the drain started, so both are admitted.
+  if (!options?.permissionFollowUp) {
+    agentManager.assertAcceptingPrompts?.(options?.admissionTicket);
+  }
   try {
     return await startAgentRunInner(agentManager, agentId, prompt, logger, options);
   } catch (error) {
@@ -248,6 +263,10 @@ export interface SendPromptToAgentParams {
   unarchive?: boolean;
   /** See {@link StartAgentRunOptions.clearPendingPermissions}. */
   clearPendingPermissions?: boolean;
+  /** See {@link StartAgentRunOptions.admissionTicket}. */
+  admissionTicket?: symbol;
+  /** See {@link StartAgentRunOptions.permissionFollowUp}. */
+  permissionFollowUp?: boolean;
   logger: Logger;
 }
 
@@ -342,6 +361,8 @@ export async function sendPromptToAgent(
     replaceRunning: true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
+    admissionTicket: params.admissionTicket,
+    permissionFollowUp: params.permissionFollowUp,
     runOptions,
   });
 }

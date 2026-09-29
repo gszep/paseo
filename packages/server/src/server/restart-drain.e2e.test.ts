@@ -3,7 +3,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { RestartDrainTimeoutError } from "@getpaseo/client/internal/daemon-client";
+import {
+  RestartDrainConflictError,
+  RestartDrainTimeoutError,
+} from "@getpaseo/client/internal/daemon-client";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { createTestPaseoDaemon, DaemonClient } from "./test-utils/index.js";
 import { createTestAgentClients } from "./test-utils/fake-agent-client.js";
@@ -55,7 +58,10 @@ function holdMatching(pattern: RegExp) {
 test("restart --wait-idle waits for a running turn, rejects new prompts retryably, and lets the turn finish", async () => {
   const { agentClients, gates } = holdMatching(/hold/i);
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
-  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartResendTimeoutMs: 100,
+  });
   try {
     const agent = await startHeldTurn(daemon, client, "hold this turn");
 
@@ -110,7 +116,10 @@ test("restart --wait-idle waits for a running turn, rejects new prompts retryabl
 test("restart --wait-idle fails on timeout without restarting and stops draining", async () => {
   const { agentClients, gates } = holdMatching(/hold/i);
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
-  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartResendTimeoutMs: 100,
+  });
   try {
     const agent = await startHeldTurn(daemon, client, "hold this turn");
 
@@ -140,7 +149,10 @@ test("restart --wait-idle fails on timeout without restarting and stops draining
 test("restart --wait-idle --force swaps on drain timeout as before", async () => {
   const { agentClients, gates } = holdMatching(/hold/i);
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
-  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartResendTimeoutMs: 100,
+  });
   try {
     const agent = await startHeldTurn(daemon, client, "hold this turn");
 
@@ -154,6 +166,73 @@ test("restart --wait-idle --force swaps on drain timeout as before", async () =>
     // Force swapped while the turn was still running (today's behaviour).
     const stillRunning = await client.fetchAgent({ agentId: agent.id });
     expect(stillRunning?.agent.status).toBe("running");
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await client.close();
+    await daemon.close();
+  }
+});
+
+test("a second --wait-idle restart is rejected while a drain already owns the swap", async () => {
+  const { agentClients, gates } = holdMatching(/hold/i);
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartResendTimeoutMs: 100,
+  });
+  try {
+    await startHeldTurn(daemon, client, "hold this turn");
+
+    let draining = false;
+    const first = client.restartServer("first_drain", undefined, {
+      waitIdle: true,
+      idleTimeoutMs: 5_000,
+      onDrainProgress: () => {
+        draining = true;
+      },
+    });
+    await vi.waitFor(() => expect(draining).toBe(true));
+
+    await expect(
+      client.restartServer("second_drain", undefined, { waitIdle: true, idleTimeoutMs: 1_000 }),
+    ).rejects.toBeInstanceOf(RestartDrainConflictError);
+
+    expect(gates.length).toBeGreaterThan(0);
+    gates[0]!.resolve();
+    const ack = await first;
+    expect(ack.status).toBe("restart_requested");
+  } finally {
+    for (const gate of gates) gate.resolve();
+    await client.close();
+    await daemon.close();
+  }
+});
+
+test("a forced restart supersedes an active drain and still acknowledges the drained request", async () => {
+  const { agentClients, gates } = holdMatching(/hold/i);
+  const daemon = await createTestPaseoDaemon({ mcpEnabled: false, agentClients });
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${daemon.port}/ws`,
+    hostRestartResendTimeoutMs: 100,
+  });
+  try {
+    await startHeldTurn(daemon, client, "hold this turn");
+
+    let draining = false;
+    const drained = client.restartServer("drain", undefined, {
+      waitIdle: true,
+      idleTimeoutMs: 5_000,
+      onDrainProgress: () => {
+        draining = true;
+      },
+    });
+    await vi.waitFor(() => expect(draining).toBe(true));
+
+    const forced = await client.restartServer("force", undefined, { force: true });
+    expect(forced.status).toBe("restart_requested");
+    // The superseded drain acknowledges instead of hanging until its RPC timeout.
+    const acked = await drained;
+    expect(acked.status).toBe("restart_requested");
   } finally {
     for (const gate of gates) gate.resolve();
     await client.close();
