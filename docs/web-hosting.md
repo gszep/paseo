@@ -38,6 +38,28 @@ daemon plugin evaluator; inline scripts are hash-authorized, not broadly enabled
 React Native's generated styles require inline styles. Adding another relay or
 asset source requires an explicit policy/build change.
 
+## Branding
+
+The hosted export is brandable without moving brand assets into the fork. Set
+`PASEO_WEB_BRAND_DIR` to a directory containing `brand.json` and an `assets/`
+folder; `prepare-hosted-web.mjs` validates it, copies the icons, rewrites the
+manifest and shell, and injects the runtime brand into `index.html` as
+`globalThis.__PASEO_BRAND__`. Leave the variable unset for the default Paseo
+brand — native, Electron and daemon-served builds never set it.
+
+`brand.json` carries the app name, the mark paths shown on the splash and home
+screens, the working-indicator frames and interval, the window-title mark, the
+icon set (manifest any/maskable, apple-touch, favicon and its status variants),
+and an optional home-screen attribution link that replaces the default community
+links. The app reads the injected value in `packages/app/src/branding`. The mark
+is authored as SVG paths, so no font is referenced at runtime.
+
+The working indicator is the turn-footer loader (`BrandWorkingIndicator`); a
+branded sequence replaces the built-in synced loader and settles under
+`prefers-reduced-motion`. The browser title is `useBrandWindowTitle`: the default
+brand leaves the active session label unchanged, a branded build prefixes its
+mark and animates through the frames while an agent runs.
+
 ## Updates and offline behavior
 
 The service worker caches only the static app shell and named assets. Navigation

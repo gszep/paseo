@@ -18,10 +18,10 @@ import {
 } from "@/components/message";
 import type { TurnFooterHost } from "./layout";
 import { AssistantForkMenu } from "@/components/assistant-fork-menu";
-import { SyncedLoader } from "@/components/synced-loader";
+import { BrandWorkingIndicator } from "@/branding/brand-working-indicator";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 
-const ThemedSyncedLoader = withUnistyles(SyncedLoader);
+const ThemedWorkingIndicator = withUnistyles(BrandWorkingIndicator);
 const workingIndicatorColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 export const TURN_FOOTER_BOTTOM_SPACING = SPACING[8];
 
@@ -124,7 +124,7 @@ const WorkingIndicator = memo(function WorkingIndicator({
   return (
     <View style={stylesheet.turnFooterContent}>
       <View style={stylesheet.workingLoader}>
-        <ThemedSyncedLoader size={14} uniProps={workingIndicatorColorMapping} />
+        <ThemedWorkingIndicator size={14} uniProps={workingIndicatorColorMapping} />
       </View>
       {/* Match the completed-turn footer: actions precede timing metadata. */}
       {onForkInFlightTurn ? <AssistantForkMenu onFork={onForkInFlightTurn} /> : null}
