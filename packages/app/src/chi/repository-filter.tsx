@@ -25,6 +25,10 @@ type RenderOption = NonNullable<ComboboxProps["renderOption"]>;
  * The Mentions filter pill. Mentions arrive across repositories, so the
  * meaningful narrowing is by repository, not by host. Reuses the shared filter
  * trigger and the same anchored combobox the host filter uses.
+ *
+ * The trigger is a sibling of `Combobox`, never its child: Combobox children are
+ * popup body content and only mount while the picker is open. A trigger placed
+ * inside would be unreachable on both desktop and compact layouts.
  */
 export function RepositoryFilter({
   repositories,
@@ -71,19 +75,7 @@ export function RepositoryFilter({
   );
 
   return (
-    <Combobox
-      options={options}
-      value={selected}
-      onSelect={onSelect}
-      renderOption={renderOption}
-      open={isFilterOpen}
-      onOpenChange={setIsFilterOpen}
-      anchorRef={filterAnchorRef}
-      searchable={repositories.length > 10}
-      searchPlaceholder="Search repositories"
-      title="Filter by repository"
-      desktopPlacement="bottom-start"
-    >
+    <>
       <View ref={filterAnchorRef} collapsable={false} style={styles.filterTriggerWrap}>
         <FilterTrigger
           label={selectedLabel}
@@ -93,7 +85,20 @@ export function RepositoryFilter({
           accessibilityLabel={`Filter: ${selectedLabel}`}
         />
       </View>
-    </Combobox>
+      <Combobox
+        options={options}
+        value={selected}
+        onSelect={onSelect}
+        renderOption={renderOption}
+        open={isFilterOpen}
+        onOpenChange={setIsFilterOpen}
+        anchorRef={filterAnchorRef}
+        searchable={repositories.length > 10}
+        searchPlaceholder="Search repositories"
+        title="Filter by repository"
+        desktopPlacement="bottom-start"
+      />
+    </>
   );
 }
 

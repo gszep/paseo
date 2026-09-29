@@ -39,6 +39,8 @@ yarn-error.*
 
 # vitest browser failure screenshots
 .vitest-screenshots/
+# vitest browser attachments (failure PNGs)
+.vitest-attachments/
 
 app-example
 
