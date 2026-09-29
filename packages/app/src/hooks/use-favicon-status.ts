@@ -5,6 +5,7 @@ import { getDesktopHost } from "@/desktop/host";
 import { useWorkspaceStatusesForBadges } from "@/stores/session-store-hooks";
 import { deriveMacDockBadgeCountFromWorkspaceStatuses } from "@/utils/desktop-badge-state";
 import { isNative } from "@/constants/platform";
+import { BRAND } from "@/branding/brand";
 
 type FaviconStatus = "none" | "running" | "attention";
 type ColorScheme = "dark" | "light";
@@ -40,6 +41,10 @@ function deriveFaviconStatus(
 }
 
 function getFaviconUri(status: FaviconStatus, colorScheme: ColorScheme): string {
+  const branded = BRAND.favicons?.[colorScheme]?.[status];
+  if (branded) {
+    return branded;
+  }
   const image = FAVICON_IMAGES[colorScheme][status];
   if (typeof image === "object" && "uri" in image) {
     return image.uri;
