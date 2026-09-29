@@ -369,6 +369,23 @@ async function sendPrompt(page: Page, text: string) {
   await composerLocator(page).fill(text);
   await page.getByRole("button", { name: "Send message", exact: true }).click();
 }
+/**
+ * Send a message that mentions a recipient. The recipient must be attached
+ * through the composer autocomplete (type the short form, wait for the popover,
+ * Tab) so `chiMentions` is populated; filling the literal mention text alone
+ * leaves the recipient list empty and creates no handoff.
+ */
+async function sendMentionPrompt(page: Page, recipient: string, text: string) {
+  const input = composerLocator(page);
+  await input.fill(recipient.slice(0, 3));
+  await expect(
+    page.getByTestId("composer-autocomplete-popover").getByText(recipient, { exact: true }),
+  ).toBeVisible({ timeout: 30000 });
+  await input.press("Tab");
+  await expect(input).toHaveValue(`${recipient} `);
+  await input.fill(text);
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+}
 async function expectNoChiActions(page: Page) {
   await page.getByTestId("workspace-header-menu-trigger").click();
   await expect(page.getByTestId("workspace-header-menu")).toBeVisible();
@@ -482,7 +499,7 @@ test.describe("sync destinations (rendered)", () => {
       await expect(sendPage.getByTestId("workspace-header-destination")).toContainText("Henkaku");
 
       const question = `@mochi-the-kitty Auto-captured source ${runId}`;
-      await sendPrompt(sendPage, question);
+      await sendMentionPrompt(sendPage, "@mochi-the-kitty", question);
       await openActions(sendPage);
       await expect(
         sendPage.getByText("@mochi-the-kitty: Mention delivered", { exact: true }),
@@ -651,7 +668,7 @@ test.describe("sync destinations (rendered)", () => {
       await sendPage.goto(`${origin}/h/${sender.serverId}/agent/${sender.agentId}`);
       await expect(composerLocator(sendPage)).toBeVisible({ timeout: 60000 });
       const question = `@mochi-the-kitty Auto-capture deep link ${runId}`;
-      await sendPrompt(sendPage, question);
+      await sendMentionPrompt(sendPage, "@mochi-the-kitty", question);
       await openActions(sendPage);
       await expect(
         sendPage.getByText("@mochi-the-kitty: Mention delivered", { exact: true }),
