@@ -1944,6 +1944,22 @@ describe("automatic sync destinations", () => {
     expect(association.provenanceRef).toBe("refs/chi/provenance/owner/ses_fork");
   });
 
+  it("writes provenance even when the upload fails, without blocking the retry", async () => {
+    const provenance = vi.fn<ProvenanceWriter>(() => ({
+      attempted: true,
+      created: true,
+      reason: "created-push-pending",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    const f = await syncFixture();
+    const agent = await f.register();
+    f.setFailEvidence(true);
+    await expect(
+      f.connect(undefined, undefined, { provenance }).capture(agent.id),
+    ).rejects.toThrow();
+    expect(provenance).toHaveBeenCalledOnce();
+  });
+
   it("never writes provenance for an unmapped workspace", async () => {
     const provenance = vi.fn<ProvenanceWriter>(() => ({
       attempted: true,
@@ -2027,9 +2043,18 @@ describe("automatic sync destinations", () => {
       .connect(undefined, undefined, { provenance, provenanceRemover })
       .capture(agent.id);
     f.setEvidenceRejection("object-deleted", 409);
+    const deletedProvenance = vi.fn<ProvenanceWriter>(() => ({
+      attempted: true,
+      created: true,
+      reason: "created-pushed",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
     await expect(
-      f.connect(undefined, undefined, { provenanceRemover }).capture(agent.id),
+      f.connect(undefined, undefined, { provenance: deletedProvenance, provenanceRemover }).capture(
+        agent.id,
+      ),
     ).rejects.toThrow("object-deleted");
+    expect(deletedProvenance).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(removed).toHaveLength(1));
     expect(removed[0]).toMatchObject({
       user: "github:owner",

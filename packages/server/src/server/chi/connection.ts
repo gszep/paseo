@@ -899,18 +899,59 @@ export class ChiConnection {
           visibility: pinned.audience ?? (pinned.explicit ? "private" : "shared"),
           coverage: { kind: "export" as const, reason: null },
         };
-        // Local pre-upload scan: block before any bytes leave the host. The server
-        // scan remains the authority. Missing scanner fails closed.
-        await this.localScan({
-          native: input.native,
-          mapping: input.mapping,
-          coverage: input.coverage,
-          sessionId: input.sessionId,
-        });
-        const captured = await (retryConflict
-          ? retryCaptureNative(input, auth.chiUserId, authority.request)
-          : captureNative(input, authority.request));
         const parsed = prepareNativeCapture(input);
+        let captured: Awaited<ReturnType<typeof captureNative>> | null = null;
+        let captureError: unknown = null;
+        try {
+          // Local pre-upload scan: block before any bytes leave the host. The server
+          // scan remains the authority. Missing scanner fails closed.
+          await this.localScan({
+            native: input.native,
+            mapping: input.mapping,
+            coverage: input.coverage,
+            sessionId: input.sessionId,
+          });
+          captured = await (retryConflict
+            ? retryCaptureNative(input, auth.chiUserId, authority.request)
+            : captureNative(input, authority.request));
+        } catch (error) {
+          captureError = error;
+        }
+        // Provenance is independent of upload success: the repo snapshot has its
+        // own diff scan, and a purged source (`object-deleted`) must not be
+        // re-created. Best-effort, mapped only, never on the prompt path.
+        if (
+          pinned.destination &&
+          !pinned.paused &&
+          !safeChiError(captureError).endsWith("object-deleted")
+        ) {
+          try {
+            const outcome = this.provenanceWriter({
+              root: target.cwd,
+              user: auth.chiUserId,
+              sessionId,
+              repo: pinned.repo,
+              sourceId: captured?.sourceId ?? pinned.sourceId,
+              head: captured?.head ?? pinned.head,
+              evidence: parsed,
+              continuation: Boolean(target.labels["chi.continuation"]),
+              delegation: this.delegationFor(target),
+              ...(this.options.provenanceScanner
+                ? { scanner: this.options.provenanceScanner }
+                : {}),
+            });
+            if (outcome.created) {
+              await this.patchAssociation(agentId, {
+                provenanceRef: outcome.ref,
+                provenanceError: null,
+              });
+            }
+          } catch {
+            // Provenance never blocks a settled turn.
+          }
+        }
+        if (captureError) throw captureError;
+        if (!captured) throw new Error("capture-incomplete");
         const updated = await this.patchAssociation(agentId, {
           sourceId: captured.sourceId,
           head: captured.head,
@@ -934,34 +975,6 @@ export class ChiConnection {
               payload: parsed.payloads[entry.revision]!,
             })),
           });
-        }
-        // After capture: snapshot the working tree into the hidden provenance ref.
-        // Mapped workspaces only, best-effort, and never on the prompt path.
-        if (pinned.destination && !pinned.paused) {
-          try {
-            const outcome = this.provenanceWriter({
-              root: target.cwd,
-              user: auth.chiUserId,
-              sessionId,
-              repo: pinned.repo,
-              sourceId: captured.sourceId,
-              head: captured.head,
-              evidence: parsed,
-              continuation: Boolean(target.labels["chi.continuation"]),
-              delegation: this.delegationFor(target),
-              ...(this.options.provenanceScanner
-                ? { scanner: this.options.provenanceScanner }
-                : {}),
-            });
-            if (outcome.created) {
-              await this.patchAssociation(agentId, {
-                provenanceRef: outcome.ref,
-                provenanceError: null,
-              });
-            }
-          } catch {
-            // Provenance never blocks a settled turn.
-          }
         }
         return updated;
       });
