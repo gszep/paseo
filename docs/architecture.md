@@ -69,8 +69,11 @@ retries stop until the user retries explicitly. A missing scanner stays
 retryable once installed. Findings only in omitted content warn without blocking
 the minimised upload. Full-export attribution over budget surfaces a warning;
 the projection's byte/node limits, exact-upload scan and cut-window scan still
-fail closed. A surviving secret prefix or exhausted cut-window budget rejects
-even when the full export exceeds its attribution budget.
+fail closed. Complete cut windows are scanned in at most 1 MiB batches with an
+8 MiB total cap. A surviving secret prefix or private-key BEGIN without a matching
+END in the same window rejects even when full-export attribution is over budget.
+Exhaustion is terminal `capture-local-cut-scan-limit`; sync status and capture
+errors explain the capacity limit without claiming a secret was found.
 The server scan remains the authority.
 
 Provenance orphan cleanup checks source existence under the stored repository
