@@ -13,8 +13,11 @@ import {
   captureNative,
   retryCaptureNative,
   prepareNativeCapture,
-  scanNativeCapture,
+  minimiseNativeExport,
+  scanCaptureVerdict,
+  type CaptureInput,
   type LocalScanInput,
+  type LocalScanVerdict,
 } from "@henkaku-center/chi-native/capture";
 import {
   ConversationClient,
@@ -93,6 +96,8 @@ const associationSchema = z.object({
   // Owner deletion outcome: whether the hidden ref was removed from the remote.
   provenanceRemoved: z.boolean().optional(),
   provenanceError: z.string().nullable().optional(),
+  // Non-blocking capture warning (e.g. a secret only in minimised-away content).
+  warning: z.string().nullable().optional(),
   adopt: z.object({ id: z.string(), sourceId: hash, expectedHead: hash }).optional(),
   reserve: z
     .object({
@@ -171,8 +176,8 @@ export interface ChiConnectionOptions {
   authority?: ChiAuthority;
   /** Live daemon `chi` config; re-read on every resolution so reloads apply. */
   getChiConfig?: () => MutableChiConfig | undefined;
-  /** Local pre-upload secret scan; defaults to the vendored chi-native scanner. */
-  localScan?: (input: LocalScanInput) => Promise<void>;
+  /** Local full→minimised scan gate; defaults to the vendored verdict scanner. */
+  scanCapture?: (full: LocalScanInput, minimised: LocalScanInput) => Promise<LocalScanVerdict>;
   /** Hidden provenance writer; defaults to the vendored chi-native writer. */
   provenance?: ProvenanceWriter;
   provenanceRemover?: ProvenanceRemover;
@@ -373,7 +378,10 @@ export class ChiConnection {
   private readonly dirty = new Set<string>();
   private readonly continuing = new Set<string>();
   private readonly authority: ChiAuthority;
-  private readonly localScan: (input: LocalScanInput) => Promise<void>;
+  private readonly scanCapture: (
+    full: LocalScanInput,
+    minimised: LocalScanInput,
+  ) => Promise<LocalScanVerdict>;
   private readonly provenanceWriter: ProvenanceWriter;
   private readonly provenanceRemover: ProvenanceRemover;
   private readonly authorityByEndpoint = new Map<string, ChiAuthority>();
@@ -387,7 +395,8 @@ export class ChiConnection {
     private readonly options: ChiConnectionOptions,
   ) {
     this.authority = options.authority ?? createDeployment();
-    this.localScan = options.localScan ?? ((input) => scanNativeCapture(input));
+    this.scanCapture =
+      options.scanCapture ?? ((full, minimised) => scanCaptureVerdict(full, minimised));
     this.provenanceWriter = options.provenance ?? writeProvenance;
     this.provenanceRemover = options.provenanceRemover ?? removeProvenance;
     this.authorityByEndpoint.set(this.authority.endpoint, this.authority);
@@ -887,44 +896,51 @@ export class ChiConnection {
           )
             throw new Error("chi-session-busy");
         }
+        const mapping = {
+          instanceId: `${this.options.serverId}:opencode`,
+          workspace: { hostId: this.options.serverId, path: target.cwd },
+        };
+        const coverage = { kind: "export" as const, reason: null };
+        const gitCoordinate = await this.captureGitCoordinate(target.cwd);
+        const minimised = minimiseNativeExport({
+          native,
+          mapping,
+          coverage,
+          sessionId,
+          ...(gitCoordinate ? { git: gitCoordinate } : {}),
+        });
         const input = {
           endpoint,
           token: auth.sessionToken,
           repo: pinned.repo,
           sessionId,
-          native,
-          mapping: {
-            instanceId: `${this.options.serverId}:opencode`,
-            workspace: { hostId: this.options.serverId, path: target.cwd },
-          },
+          native: minimised.native,
+          mapping,
           expectedHead: pinned.head,
           visibility: pinned.audience ?? (pinned.explicit ? "private" : "shared"),
-          coverage: { kind: "export" as const, reason: null },
+          coverage,
+          capture: minimised,
         };
-        const parsed = prepareNativeCapture(input);
-        let captured: Awaited<ReturnType<typeof captureNative>> | null = null;
-        let captureError: unknown = null;
-        try {
-          // Local pre-upload scan: block before any bytes leave the host. The server
-          // scan remains the authority. Missing scanner fails closed.
-          await this.localScan({
-            native: input.native,
-            mapping: input.mapping,
-            coverage: input.coverage,
-            sessionId: input.sessionId,
-          });
-          captured = await (retryConflict
-            ? retryCaptureNative(input, auth.chiUserId, authority.request)
-            : captureNative(input, authority.request));
-        } catch (error) {
-          captureError = error;
+        const { parsed, captured, captureError, warning } = await this.scanAndCapture({
+          input,
+          full: { native, mapping, coverage, sessionId },
+          minimised: { native: minimised.native, mapping, coverage, sessionId },
+          retryConflict,
+          ownerId: auth.chiUserId,
+          request: authority.request,
+        });
+        if (!captured) {
+          if (warning) {
+            await this.patchAssociation(agentId, { warning }).catch(() => undefined);
+          }
+          return { parsed, captured: null, captureError, updated: null };
         }
-        if (!captured) return { parsed, captured: null, captureError, updated: null };
         const updated = await this.patchAssociation(agentId, {
           sourceId: captured.sourceId,
           head: captured.head,
           error: null,
           capturePending: false,
+          warning,
         });
         // Mentions stay on the primary deployment; a peer destination's mentions
         // are out of P1 scope and are never cross-posted.
@@ -946,28 +962,7 @@ export class ChiConnection {
         }
         return { parsed, captured, captureError, updated };
       });
-      // The provenance write needs only the parsed export, so it runs outside the
-      // pooled native runtime. It is async with timeouts and best-effort: the repo
-      // snapshot has its own diff scan, and a purged source (`object-deleted`) must
-      // not be re-created.
-      if (
-        pinned.destination &&
-        !pinned.paused &&
-        !safeChiError(settled.captureError).endsWith("object-deleted")
-      ) {
-        await this.writeProvenanceFor(
-          target,
-          pinned,
-          auth.chiUserId,
-          sessionId,
-          settled.parsed,
-          settled.captured,
-          agentId,
-        );
-      }
-      if (settled.captureError) throw settled.captureError;
-      if (!settled.updated) throw new Error("capture-incomplete");
-      return settled.updated;
+      return await this.finishCapture(settled, pinned, auth.chiUserId, sessionId, target, agentId);
     } catch (error) {
       const code = safeChiError(error);
       // Owner deletion: the backend fences the deleted source with
@@ -1033,6 +1028,94 @@ export class ChiConnection {
     return this.patchAssociation(agentId, { paused: true, capturePending: false, error: code });
   }
 
+  /**
+   * Runs after the native runtime is released: best-effort provenance write (a
+   * purged `object-deleted` source must not be re-created), then surface the
+   * capture result or error.
+   */
+  private async finishCapture(
+    settled: {
+      parsed: ReturnType<typeof prepareNativeCapture>;
+      captured: Awaited<ReturnType<typeof captureNative>> | null;
+      captureError: unknown;
+      updated: Association | null;
+    },
+    association: Association,
+    user: string,
+    sessionId: string,
+    target: CaptureTarget,
+    agentId: string,
+  ): Promise<Association> {
+    const deleted = safeChiError(settled.captureError).endsWith("object-deleted");
+    if (association.destination && !association.paused && !deleted) {
+      await this.writeProvenanceFor(
+        target,
+        association,
+        user,
+        sessionId,
+        settled.parsed,
+        settled.captured,
+        agentId,
+      );
+    }
+    if (settled.captureError) throw settled.captureError;
+    if (!settled.updated) throw new Error("capture-incomplete");
+    return settled.updated;
+  }
+
+  /**
+   * Full-export scan then upload of the minimised form. A finding in uploaded
+   * content blocks (`capture-local-secret-rejected`); a finding only in omitted
+   * content records a non-blocking warning and syncs. Missing scanner fails
+   * closed. The server scan remains the authority.
+   */
+  private async scanAndCapture(args: {
+    input: CaptureInput;
+    full: LocalScanInput;
+    minimised: LocalScanInput;
+    retryConflict: boolean;
+    ownerId: string;
+    request: typeof fetch;
+  }): Promise<{
+    parsed: ReturnType<typeof prepareNativeCapture>;
+    captured: Awaited<ReturnType<typeof captureNative>> | null;
+    captureError: unknown;
+    warning: string | null;
+  }> {
+    const parsed = prepareNativeCapture(args.input);
+    let captured: Awaited<ReturnType<typeof captureNative>> | null = null;
+    let captureError: unknown = null;
+    let warning: string | null = null;
+    try {
+      const verdict = await this.scanCapture(args.full, args.minimised);
+      if (verdict.verdict === "omitted-warning") warning = "capture-local-secret-omitted-content";
+      captured = await (args.retryConflict
+        ? retryCaptureNative(args.input, args.ownerId, args.request)
+        : captureNative(args.input, args.request));
+    } catch (error) {
+      captureError = error;
+    }
+    return { parsed, captured, captureError, warning };
+  }
+
+  /** Repository coordinate for a v2 capture; best-effort, absent off a branch. */
+  private async captureGitCoordinate(
+    cwd: string,
+  ): Promise<{ branch: string; commit: string } | null> {
+    try {
+      const branch = (
+        await execCommand("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd, timeout: 5000 })
+      ).stdout.trim();
+      const commit = (
+        await execCommand("git", ["rev-parse", "--short", "HEAD"], { cwd, timeout: 5000 })
+      ).stdout.trim();
+      if (!branch || branch === "HEAD" || !/^[a-f0-9]{7,64}$/.test(commit)) return null;
+      return { branch, commit };
+    } catch {
+      return null;
+    }
+  }
+
   /** A delegated agent's parent session, for `origin: delegation`. */
   private delegationFor(target: CaptureTarget): { parentSessionId: string } | null {
     const parentId = target.labels[PARENT_AGENT_ID_LABEL];
@@ -1067,12 +1150,9 @@ export class ChiConnection {
         evidence: parsed,
         continuation: Boolean(target.labels["chi.continuation"]),
         delegation: this.delegationFor(target),
-        ...(this.options.provenanceScanner
-          ? { scanner: this.options.provenanceScanner }
-          : {}),
+        ...(this.options.provenanceScanner ? { scanner: this.options.provenanceScanner } : {}),
       });
-      const noop =
-        outcome.reason === "worktree-clean" || outcome.reason === "snapshot-unchanged";
+      const noop = outcome.reason === "worktree-clean" || outcome.reason === "snapshot-unchanged";
       const clean = noop || (outcome.created && outcome.pushReason === "pushed");
       await this.patchAssociation(agentId, {
         provenanceRef: outcome.ref,
@@ -1189,47 +1269,59 @@ export class ChiConnection {
       const sessionId = record.persistence?.nativeHandle ?? record.persistence?.sessionId;
       if (!sessionId) continue;
       checked += 1;
-      try {
-        const endpoint = this.endpointFor(association.endpoint);
-        const authority = this.authorityFor(endpoint);
-        const auth = await this.authorize(association.repo, record.cwd, authority);
-        if (!sameActor(auth.chiUserId, association.actor)) continue;
-        const url = append(endpointUrl(authority.endpoint), "evidence/inspect");
-        url.searchParams.set("sourceId", association.sourceId);
-        const response = await authority.request(url, {
-          redirect: "error",
-          signal: AbortSignal.timeout(30000),
-          headers: { authorization: `Bearer ${auth.sessionToken}` },
-        });
-        await response.body?.cancel();
-        // Only a confirmed deletion purges; 401/403/5xx/network/actor mismatch do not.
-        if (response.status !== 404) continue;
-      } catch {
-        continue;
-      }
-      try {
-        const outcome = await this.provenanceRemover({
-          root: record.cwd,
-          user: association.actor,
-          sessionId,
-          ref: association.provenanceRef,
-        });
-        if (outcome.removed) {
-          await this.patchAssociation(record.id, {
-            provenanceRemoved: true,
-            provenanceRef: undefined,
-            provenanceError: null,
-          }).catch(() => undefined);
-        } else {
-          await this.patchAssociation(record.id, { provenanceError: outcome.reason }).catch(
-            () => undefined,
-          );
-        }
-      } catch {
-        // A stored record that is not loaded cannot be patched; the purge stands.
+      if (await this.confirmOrphan(record, association)) {
+        await this.purgeOrphan(record, association, sessionId);
       }
     }
     this.orphanSweepCursor = (start + Math.max(checked, 1)) % records.length;
+  }
+
+  /** Only a confirmed 404 purges; 401/403/5xx/network/actor mismatch do not. */
+  private async confirmOrphan(record: StoredChiAgent, association: Association): Promise<boolean> {
+    try {
+      const authority = this.authorityFor(this.endpointFor(association.endpoint));
+      const auth = await this.authorize(association.repo, record.cwd, authority);
+      if (!sameActor(auth.chiUserId, association.actor)) return false;
+      const url = append(endpointUrl(authority.endpoint), "evidence/inspect");
+      url.searchParams.set("sourceId", association.sourceId!);
+      const response = await authority.request(url, {
+        redirect: "error",
+        signal: AbortSignal.timeout(30000),
+        headers: { authorization: `Bearer ${auth.sessionToken}` },
+      });
+      await response.body?.cancel();
+      return response.status === 404;
+    } catch {
+      return false;
+    }
+  }
+
+  private async purgeOrphan(
+    record: StoredChiAgent,
+    association: Association,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      const outcome = await this.provenanceRemover({
+        root: record.cwd,
+        user: association.actor,
+        sessionId,
+        ref: association.provenanceRef!,
+      });
+      if (outcome.removed) {
+        await this.patchAssociation(record.id, {
+          provenanceRemoved: true,
+          provenanceRef: undefined,
+          provenanceError: null,
+        }).catch(() => undefined);
+      } else {
+        await this.patchAssociation(record.id, { provenanceError: outcome.reason }).catch(
+          () => undefined,
+        );
+      }
+    } catch {
+      // A stored record that is not loaded cannot be patched; the purge stands.
+    }
   }
 
   private async workspaceIdentities(
@@ -1421,21 +1513,19 @@ export class ChiConnection {
         throw new Error("chi-conversation-recovery-required");
       const native = JSON.stringify(await runtime.export(sessionId));
       const coverage = { kind: "export" as const, reason: null };
-      // Continuation content leaves the host too; scan it before the capture is
-      // persisted or published. Same scanner, same terminal handling.
-      await this.localScan({ native, mapping: destination, coverage, sessionId });
-      const capture = prepareNativeCapture({
-        sessionId,
-        native,
-        mapping: destination,
-        coverage,
-      }).capture;
+      const minimised = minimiseNativeExport({ native, mapping: destination, coverage, sessionId });
+      // Continuation content leaves the host too; scan the full export then the
+      // minimised form that would upload. Same scanner, same terminal handling.
+      await this.scanCapture(
+        { native, mapping: destination, coverage, sessionId },
+        { native: minimised.native, mapping: destination, coverage, sessionId },
+      );
       const publication: PublishRequest = {
         id,
         revision: current.conversation.revision,
         transferId,
         claimId,
-        capture,
+        capture: minimised,
       };
       await publishConversationReceipt(publicationPath, publication);
       // Always use the winner, including when another process published while
