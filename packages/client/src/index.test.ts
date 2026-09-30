@@ -265,6 +265,7 @@ test("createPaseoApi borrows daemon capabilities without exposing connection own
 
   expect(Object.keys(paseo).sort()).toEqual([
     "agents",
+    "chi",
     "config",
     "dispose",
     "observeEvents",

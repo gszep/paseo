@@ -137,6 +137,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
       },
     };
     writeFileSync(join(directory, `${key}.json`), JSON.stringify(receipt), { mode: 0o600 });
+    // One timestamp: the manager sorts by lastActivityAt descending, and letting
+    // `new Date()` tick between rows makes the order depend on wall-clock timing.
+    const listedAt = new Date();
     const rows = [
       "ses_replica",
       ...(receipt.destination.sessionId ? ["ses_fork"] : []),
@@ -148,7 +151,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
       title: null,
       firstPromptPreview: null,
       lastPromptPreview: null,
-      lastActivityAt: new Date(),
+      lastActivityAt: listedAt,
     }));
     class NativeClient extends TestAgentClient {
       override readonly capabilities = { ...TEST_CAPABILITIES, supportsSessionListing: true };
@@ -176,6 +179,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
             login: vi.fn(),
             invalidate: vi.fn(),
           },
+          // Quarantine recovery is the subject here; the real gitleaks binary
+          // is not part of the unit environment.
+          scanCapture: async () => ({ verdict: "clean" as const }),
         },
       });
     try {
@@ -238,7 +244,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
           sessionID: "ses_replica",
           boundary: { type: "through", messageID: "msg_source" },
         };
-        const payload = { text: "synthetic", type: "text" };
+        const payload = { text: "synthetic", type: "user" };
         const ready = {
           ...receipt,
           destination: { ...receipt.destination, nativeFork },
@@ -313,6 +319,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
               request,
               login: async () => ({ chiUserId: identity.actor, sessionToken: "synthetic" }),
             },
+            // Recovery is the subject here; the real gitleaks binary is not
+            // part of the unit environment.
+            scanCapture: async () => ({ verdict: "clean" as const }),
           },
         });
         const runtime: NativeRuntime = {

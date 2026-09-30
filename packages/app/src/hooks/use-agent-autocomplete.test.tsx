@@ -11,10 +11,14 @@ import { useAgentAutocomplete } from "./use-agent-autocomplete";
 import { Autocomplete } from "@/components/ui/autocomplete";
 
 const fixture = vi.hoisted(() => ({
-  client: { chiMentions: vi.fn(), getDirectorySuggestions: vi.fn(), getCheckoutStatus: vi.fn() },
+  client: {
+    chiMentions: vi.fn(),
+    getDirectorySuggestions: vi.fn(),
+    chiSyncStatus: vi.fn(),
+  },
   connected: true,
-  isGit: true,
-  remoteUrl: "https://github.com/fixture/repo.git" as string | null,
+  hasDestination: true,
+  mentionsAvailable: true,
   workspace: "workspace",
   native: false,
   appState: "active",
@@ -51,7 +55,7 @@ vi.mock("@/stores/session-store", () => ({
 }));
 function sessionState() {
   const session = {
-    serverInfo: { features: { chiMentions: true } },
+    serverInfo: { features: { chiMentions: true, chiNative: true } },
     agents: new Map([
       [
         "agent",
@@ -59,7 +63,7 @@ function sessionState() {
           provider: "opencode",
           cwd: "/workspace",
           workspaceId: fixture.workspace,
-          projectPlacement: { checkout: { isGit: fixture.isGit, remoteUrl: fixture.remoteUrl } },
+          labels: {},
         },
       ],
     ]),
@@ -131,16 +135,27 @@ beforeEach(() => {
   focusManager.setFocused(true);
   onlineManager.setOnline(true);
   fixture.connected = true;
-  fixture.isGit = true;
-  fixture.remoteUrl = "https://github.com/fixture/repo.git";
-  fixture.client.getCheckoutStatus.mockImplementation(async () => ({
-    isGit: fixture.isGit,
-    remoteUrl: fixture.remoteUrl,
-  }));
+  fixture.hasDestination = true;
+  fixture.mentionsAvailable = true;
   fixture.workspace = "workspace";
   fixture.client.chiMentions.mockReset();
   fixture.client.getDirectorySuggestions.mockReset();
   fixture.client.getDirectorySuggestions.mockImplementation(() => new Promise(() => {}));
+  fixture.client.chiSyncStatus.mockReset();
+  fixture.client.chiSyncStatus.mockImplementation(async () => ({
+    outcome: "ready",
+    destination: fixture.hasDestination
+      ? {
+          id: "destination",
+          name: "fixture/repo",
+          endpoint: "https://chi.invalid",
+          audience: "shared",
+        }
+      : null,
+    pending: false,
+    error: null,
+    mentionsAvailable: fixture.mentionsAvailable,
+  }));
   fixture.client.chiMentions.mockImplementation(async ({ operation }) =>
     operation.action === "scope"
       ? { kind: "scope", actor: context.actor, context }
@@ -162,25 +177,22 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it.each([false, true])(
-  "a local workspace (isGit=%s, no remote) makes no mention RPC and keeps file completion",
-  async (isGit) => {
-    fixture.isGit = isGit;
-    fixture.remoteUrl = null;
-    fixture.client.getDirectorySuggestions.mockResolvedValue({
-      entries: [{ path: "local.txt", name: "local.txt", kind: "file" }],
-      error: null,
-    });
-    render("");
-    render("@local");
-    await expect
-      .poll(() => fixture.client.getDirectorySuggestions.mock.calls.length)
-      .toBeGreaterThan(0);
-    expect(fixture.client.chiMentions).not.toHaveBeenCalled();
-    expect(person()).toBeNull();
-    expect(container.textContent).not.toContain("Mention context unavailable");
-  },
-);
+it("a local workspace without a sync destination makes no mention RPC and keeps file completion", async () => {
+  fixture.hasDestination = false;
+  fixture.mentionsAvailable = false;
+  fixture.client.getDirectorySuggestions.mockResolvedValue({
+    entries: [{ path: "local.txt", name: "local.txt", kind: "file" }],
+    error: null,
+  });
+  render("");
+  render("@local");
+  await expect
+    .poll(() => fixture.client.getDirectorySuggestions.mock.calls.length)
+    .toBeGreaterThan(0);
+  expect(fixture.client.chiMentions).not.toHaveBeenCalled();
+  expect(person()).toBeNull();
+  expect(container.textContent).not.toContain("Mention context unavailable");
+});
 
 it("prefetches before typing and renders people synchronously while files and background revalidation are pending", async () => {
   render("");

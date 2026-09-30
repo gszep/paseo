@@ -15,8 +15,14 @@ const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
   ["lint", { name: "lint", contract: "quality" }],
   ["typecheck", { name: "typecheck", contract: "quality" }],
-  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
-  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
+  [
+    "server-tests-ubuntu",
+    { name: "server-tests (ubuntu-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+  ],
+  [
+    "server-tests-windows",
+    { name: "server-tests (windows-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+  ],
   ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
   ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
@@ -90,7 +96,12 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
     assert.ok(job, `missing static job ${jobId}`);
-    assert.match(job, new RegExp(`^    name: ${expected.name.replace(/[()]/g, "\\$&")}$`, "m"));
+    // Literal match: matrix expressions (`${{ ... }}`) make the job name
+    // dynamic, so a regex would have to escape far more than parentheses.
+    assert.ok(
+      job.split("\n").includes(`    name: ${expected.name}`),
+      `job ${jobId} name drifted: expected "    name: ${expected.name}"`,
+    );
     assert.match(job, /needs\.changes\.outputs\.full != 'false'/);
     for (const contract of expected.contracts ?? [expected.contract]) {
       assert.match(job, new RegExp(`needs\\.changes\\.outputs\\.${contract} != 'false'`));

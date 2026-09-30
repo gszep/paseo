@@ -33,6 +33,13 @@ test("packed server carries the private Chi closure outside the checkout", async
   const manifest = JSON.parse(
     await readFile(join(repoRoot, "packages/server/package.json"), "utf8"),
   );
+  const nativeManifest = JSON.parse(await readFile(join(native, "package.json"), "utf8"));
+  const carriedDependencies = Object.fromEntries(
+    Object.keys(nativeManifest.dependencies ?? {}).map((name) => [
+      name,
+      manifest.dependencies[name],
+    ]),
+  );
   await writeFile(
     join(source, "package.json"),
     JSON.stringify({ private: true, workspaces: ["packages/server"] }),
@@ -46,6 +53,7 @@ test("packed server carries the private Chi closure outside the checkout", async
       files: ["entry.mjs"],
       dependencies: {
         "@henkaku-center/chi-native": manifest.dependencies["@henkaku-center/chi-native"],
+        ...carriedDependencies,
       },
       bundleDependencies: manifest.bundleDependencies,
     }),
@@ -65,10 +73,11 @@ test("packed server carries the private Chi closure outside the checkout", async
   npm(["pack", "--offline", "--ignore-scripts", "--pack-destination", root], server);
   await rm(source, { recursive: true, force: true });
   await writeFile(join(installed, "package.json"), JSON.stringify({ private: true }));
+  // The private chi-native bundle travels in the tarball; its public runtime
+  // dependency (zod) resolves from the registry like any other server dep.
   npm(
     [
       "install",
-      "--offline",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",

@@ -17,6 +17,7 @@ export {
 import { TerminalProfileSchema } from "./terminal-profile.js";
 export { TerminalProfileSchema, type TerminalProfile } from "./terminal-profile.js";
 import { z } from "zod";
+import { ChiAudienceSchema, MutableChiConfigSchema } from "./chi-config.js";
 import {
   ChiMentionRequestSchema,
   ChiMentionResponseSchema,
@@ -176,36 +177,16 @@ const MutableRelayConfigSchema = z
   .passthrough();
 
 /** Who may read an uploaded source. Today's backend accepts exactly these two. */
-export const ChiAudienceSchema = z.enum(["private", "shared"]);
-export type ChiAudience = z.infer<typeof ChiAudienceSchema>;
-
-/** A configured deployment peers with the default Henkaku deployment. */
-export const ChiDestinationConfigSchema = z
-  .object({
-    name: z.string().min(1),
-    endpoint: z.string().min(1),
-  })
-  .strict();
-export type ChiDestinationConfig = z.infer<typeof ChiDestinationConfigSchema>;
-
-export const ChiMappingConfigSchema = z
-  .object({
-    // `github:owner/repo` exact or an owner wildcard `github:owner/*`; exact wins.
-    repo: z.string().min(1),
-    destination: z.string().min(1),
-    // Unspecified means owner-private.
-    audience: ChiAudienceSchema.optional(),
-  })
-  .strict();
-export type ChiMappingConfig = z.infer<typeof ChiMappingConfigSchema>;
-
-export const MutableChiConfigSchema = z
-  .object({
-    destinations: z.record(z.string(), ChiDestinationConfigSchema).default({}),
-    mappings: z.array(ChiMappingConfigSchema).default([]),
-  })
-  .strict();
-export type MutableChiConfig = z.infer<typeof MutableChiConfigSchema>;
+export {
+  ChiAudienceSchema,
+  ChiDestinationConfigSchema,
+  ChiMappingConfigSchema,
+  MutableChiConfigSchema,
+  type ChiAudience,
+  type ChiDestinationConfig,
+  type ChiMappingConfig,
+  type MutableChiConfig,
+} from "./chi-config.js";
 
 export const MutableDaemonConfigSchema = z
   .object({
@@ -1930,6 +1911,8 @@ export const ChiSyncResponseSchema = z.object({
       destination: ChiSyncDestinationSchema.nullable(),
       pending: z.boolean(),
       error: z.string().nullable(),
+      /** Non-blocking capture warning, e.g. a secret only in omitted content. */
+      warning: z.string().nullable().optional(),
       /** False when the destination is a peer deployment that cannot deliver mentions. */
       mentionsAvailable: z.boolean().optional(),
     }),

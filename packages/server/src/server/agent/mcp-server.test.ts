@@ -223,6 +223,9 @@ function buildAgentManagerSpies() {
     subscribe: vi.fn().mockReturnValue(() => {}),
     streamAgent: vi.fn(() => (async function* noop() {})()),
     waitForAgentRunStart: vi.fn().mockResolvedValue(undefined),
+    runPromptAdmission: vi.fn((run: (ticket: symbol) => Promise<unknown>) =>
+      run(Symbol("prompt-admission")),
+    ),
     respondToPermission: vi.fn(),
     cancelAgentRun: vi.fn(),
     getPendingPermissions: vi.fn(),

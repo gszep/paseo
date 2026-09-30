@@ -90,10 +90,13 @@ export async function pressInterruptShortcut(page: Page): Promise<void> {
 
 export async function openAttachmentMenu(page: Page): Promise<void> {
   await page.getByTestId("message-input-attach-button").filter({ visible: true }).first().click();
+  // Mobile sheets render both the content wrapper and its inner content; `.or()`
+  // matches both, so assert the first visible surface instead of strict mode.
   await expect(
     page
       .getByTestId("message-input-attachment-menu")
-      .or(page.getByTestId("message-input-attachment-menu-content")),
+      .or(page.getByTestId("message-input-attachment-menu-content"))
+      .first(),
   ).toBeVisible({ timeout: 5_000 });
 }
 
