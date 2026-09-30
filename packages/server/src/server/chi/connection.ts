@@ -1069,7 +1069,9 @@ export class ChiConnection {
           ? { scanner: this.options.provenanceScanner }
           : {}),
       });
-      const clean = outcome.created && outcome.pushReason === "pushed";
+      const noop =
+        outcome.reason === "worktree-clean" || outcome.reason === "snapshot-unchanged";
+      const clean = noop || (outcome.created && outcome.pushReason === "pushed");
       await this.patchAssociation(agentId, {
         provenanceRef: outcome.ref,
         provenanceError: clean ? null : outcome.reason,
