@@ -35,6 +35,11 @@ export function asAgentManager(stub: {
 }): SessionOptions["agentManager"] {
   return createStub<SessionOptions["agentManager"]>({
     listProviderSubagentActivity: () => [],
+    // Mirror production: AgentManager.chi is null unless Chi options are
+    // configured. Without this default, createStub's proxy fallback (a
+    // throwing function) makes `agentManager.chi?.reconcilePending()` throw
+    // "not a function" instead of short-circuiting on every fetch_agents_request.
+    chi: null,
     ...stub,
   });
 }
