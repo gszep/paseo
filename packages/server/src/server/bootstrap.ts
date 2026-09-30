@@ -1785,8 +1785,7 @@ export async function createPaseoDaemon(
 
       // Retry any capture that was outstanding when the daemon last stopped.
       void agentManager.chi?.reconcilePending().catch(() => undefined);
-      // Bootstrap-only: purge refs for stored associations whose source is gone.
-      void agentManager.chi?.reconcileProvenanceOrphans().catch(() => undefined);
+      agentManager.chi?.startProvenanceSweep();
       // Start speech service after listening so synchronous Sherpa native
       // model loading doesn't block the server from accepting connections.
       speechService.start();
@@ -1805,6 +1804,7 @@ export async function createPaseoDaemon(
   };
 
   const stop = async () => {
+    agentManager.chi?.stopProvenanceSweep();
     await pluginRuntime.stopAllPlugins();
     unsubscribePluginProviders();
     await hubRelationships.stop();

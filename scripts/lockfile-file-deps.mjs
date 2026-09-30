@@ -9,12 +9,16 @@ export const ALLOWED_FILE_DEPENDENCY = "file:vendor/henkaku-center-chi-native-0.
  * `resolved: file:` entry that is not exactly the vendored Chi tarball, so any
  * other local-file resolution fails instead of inheriting the exception.
  */
-export function unapprovedFileDeps(lockfile, allowed = ALLOWED_FILE_DEPENDENCY) {
+export function unapprovedFileDeps(lockfile) {
   const packages = lockfile?.packages ?? {};
   const unapproved = [];
   for (const [name, entry] of Object.entries(packages)) {
     const resolved = entry?.resolved;
-    if (typeof resolved === "string" && resolved.startsWith("file:") && resolved !== allowed) {
+    if (
+      typeof resolved === "string" &&
+      resolved.startsWith("file:") &&
+      (resolved !== ALLOWED_FILE_DEPENDENCY || name !== "node_modules/@henkaku-center/chi-native")
+    ) {
       unapproved.push(`${name} -> ${resolved}`);
     }
   }

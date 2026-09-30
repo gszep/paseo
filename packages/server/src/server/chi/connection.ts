@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { writeJsonFileAtomic } from "../atomic-file.js";
 import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
@@ -14,8 +15,8 @@ import {
   captureNative,
   retryCaptureNative,
   prepareNativeCapture,
+  nativeSourceExists,
   minimiseNativeExport,
-  MINIMISER_VERSION,
   scanCaptureVerdict,
   type CaptureInput,
   type LocalScanInput,
@@ -394,6 +395,8 @@ export class ChiConnection {
   // so a restart resumes rather than restarting the tail.
   private orphanSweepCursor = 0;
   private orphanCursorLoaded = false;
+  private orphanSweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private orphanSweepStopped = true;
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
@@ -1265,14 +1268,17 @@ export class ChiConnection {
    * gone (404 only). Bounded, quiet, and rotating so the tail is not starved.
    */
   async reconcileProvenanceOrphans(): Promise<void> {
-    const records = (await this.options.listStoredAgents?.()) ?? [];
+    const records = [...((await this.options.listStoredAgents?.()) ?? [])].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
     this.loadOrphanCursor();
     if (records.length === 0) return;
     const cap = 50;
     const start = this.orphanSweepCursor % records.length;
     let checked = 0;
-    for (let offset = 0; offset < records.length && checked < cap; offset += 1) {
-      const record = records[(start + offset) % records.length];
+    let visited = 0;
+    for (; visited < records.length && checked < cap; visited += 1) {
+      const record = records[(start + visited) % records.length];
       if (record.provider !== "opencode") continue;
       const association = this.parseAssociation(record.labels?.[label]);
       if (!association?.provenanceRef || !association.actor || !association.sourceId) continue;
@@ -1284,8 +1290,32 @@ export class ChiConnection {
         await this.purgeOrphan(record, association, sessionId);
       }
     }
-    this.orphanSweepCursor = (start + Math.max(checked, 1)) % records.length;
-    this.persistOrphanCursor();
+    this.orphanSweepCursor = (start + visited) % records.length;
+    await this.persistOrphanCursor();
+  }
+
+  startProvenanceSweep(): void {
+    if (!this.orphanSweepStopped) return;
+    this.orphanSweepStopped = false;
+    const sweep = async () => {
+      try {
+        await this.reconcileProvenanceOrphans();
+      } catch {
+        /* Retry transient authorization, storage and remote failures. */
+      } finally {
+        if (!this.orphanSweepStopped) {
+          this.orphanSweepTimer = setTimeout(() => void sweep(), 60_000);
+          this.orphanSweepTimer.unref();
+        }
+      }
+    };
+    void sweep();
+  }
+
+  stopProvenanceSweep(): void {
+    this.orphanSweepStopped = true;
+    if (this.orphanSweepTimer) clearTimeout(this.orphanSweepTimer);
+    this.orphanSweepTimer = null;
   }
 
   private orphanCursorPath(): string {
@@ -1306,15 +1336,9 @@ export class ChiConnection {
     }
   }
 
-  private persistOrphanCursor(): void {
-    try {
-      mkdirSync(join(this.options.home, "chi"), { recursive: true, mode: 0o700 });
-      writeFileSync(this.orphanCursorPath(), JSON.stringify({ cursor: this.orphanSweepCursor }), {
-        mode: 0o600,
-      });
-    } catch {
-      // Best-effort; a failed write only loses rotation progress.
-    }
+  private async persistOrphanCursor(): Promise<void> {
+    await mkdir(join(this.options.home, "chi"), { recursive: true, mode: 0o700 });
+    await writeJsonFileAtomic(this.orphanCursorPath(), { cursor: this.orphanSweepCursor });
   }
 
   /** Only a confirmed 404 purges; 401/403/5xx/network/actor mismatch do not. */
@@ -1323,15 +1347,15 @@ export class ChiConnection {
       const authority = this.authorityFor(this.endpointFor(association.endpoint));
       const auth = await this.authorize(association.repo, record.cwd, authority);
       if (!sameActor(auth.chiUserId, association.actor)) return false;
-      const url = append(endpointUrl(authority.endpoint), "evidence/inspect");
-      url.searchParams.set("sourceId", association.sourceId!);
-      const response = await authority.request(url, {
-        redirect: "error",
-        signal: AbortSignal.timeout(30000),
-        headers: { authorization: `Bearer ${auth.sessionToken}`, "x-chi-repo": association.repo },
-      });
-      await response.body?.cancel();
-      return response.status === 404;
+      return !(await nativeSourceExists(
+        {
+          endpoint: authority.endpoint,
+          token: auth.sessionToken,
+          repo: association.repo,
+          sourceId: association.sourceId!,
+        },
+        authority.request,
+      ));
     } catch {
       return false;
     }
@@ -1542,6 +1566,39 @@ export class ChiConnection {
     return journal;
   }
 
+  private async scanPublicationCapture(
+    capture: unknown,
+    sessionId: string,
+    destination: ConversationDestination,
+  ): Promise<void> {
+    let receiptCapture: CaptureInput["capture"];
+    try {
+      receiptCapture = prepareNativeCapture({
+        capture: capture as CaptureInput["capture"],
+        sessionId,
+      }).capture;
+    } catch {
+      throw new Error("chi-conversation-capture-unminimised");
+    }
+    if (
+      receiptCapture.harness !== "opencode-v2" ||
+      receiptCapture.coverage.kind !== "export" ||
+      receiptCapture.mapping.instanceId !== destination.instanceId ||
+      receiptCapture.mapping.workspace.hostId !== destination.workspace.hostId ||
+      receiptCapture.mapping.workspace.path !== destination.workspace.path
+    )
+      throw new Error("chi-conversation-capture-unminimised");
+    const receiptScan = {
+      native: receiptCapture.native,
+      mapping: receiptCapture.mapping,
+      coverage: receiptCapture.coverage,
+      sessionId,
+      projection: receiptCapture.projection,
+      ...(receiptCapture.git ? { git: receiptCapture.git } : {}),
+    };
+    await this.scanCapture(receiptScan, receiptScan);
+  }
+
   private async publishFork(
     journal: ClaimJournal,
     path: string,
@@ -1599,29 +1656,7 @@ export class ChiConnection {
     // A saved receipt may predate this build. Never transmit it unchanged:
     // require the supported v2 min-v1 projection and scan its exact capture
     // (the same bytes that would publish).
-    const receiptCapture = z
-      .object({
-        harness: z.literal("opencode-v2"),
-        version: z.literal(2),
-        native: z.string(),
-        coverage: z.object({ kind: z.enum(["export", "partial"]), reason: z.string().nullable() }),
-        projection: z.object({
-          kind: z.literal("minimised"),
-          minimiser: z.literal(MINIMISER_VERSION),
-        }),
-        git: z.object({ branch: z.string(), commit: z.string() }).optional(),
-      })
-      .safeParse(publication.capture);
-    if (!receiptCapture.success) throw new Error("chi-conversation-capture-unminimised");
-    const receiptScan = {
-      native: receiptCapture.data.native,
-      mapping: destination,
-      coverage: receiptCapture.data.coverage,
-      sessionId,
-      projection: receiptCapture.data.projection,
-      ...(receiptCapture.data.git ? { git: receiptCapture.data.git } : {}),
-    };
-    await this.scanCapture(receiptScan, receiptScan);
+    await this.scanPublicationCapture(publication.capture, sessionId, destination);
     // A complete visible winner may have been linked by a competing process
     // whose directory sync is still pending. Every publisher owns this barrier.
     await syncConversationReceiptDirectory(publicationPath);

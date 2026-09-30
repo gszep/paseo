@@ -25,3 +25,14 @@ test("any other local-file resolution is rejected", () => {
     "node_modules/also-evil -> file:../../elsewhere/pkg.tgz",
   ]);
 });
+
+test("the permitted tarball path cannot be assigned to another package", () => {
+  assert.deepEqual(
+    unapprovedFileDeps({
+      packages: {
+        "node_modules/other": { resolved: ALLOWED_FILE_DEPENDENCY },
+      },
+    }),
+    [`node_modules/other -> ${ALLOWED_FILE_DEPENDENCY}`],
+  );
+});

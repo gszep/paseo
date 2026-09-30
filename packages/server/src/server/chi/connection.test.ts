@@ -1102,7 +1102,15 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
-      scanCapture: async () => {
+      scanCapture: async (full, minimised) => {
+        expect(minimised).toEqual({
+          native: capture.native,
+          mapping: capture.mapping,
+          coverage: capture.coverage,
+          projection: capture.projection,
+          sessionId: "ses_fork",
+        });
+        expect(full).toEqual(minimised);
         recorded.push("scan");
         throw new Error("capture-local-secret-rejected");
       },
@@ -1113,6 +1121,61 @@ describe("canonical Chi coordination", () => {
     expect(recorded).toEqual(["scan"]);
     expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toHaveLength(0);
   });
+
+  it.each(["raw-output", "mapping", "unknown-field", "unknown-version"])(
+    "refuses an unsafe saved receipt (%s) without rewriting it or transmitting it",
+    async (kind) => {
+      const f = await canonicalFixture();
+      await f.ready();
+      const path = f.journalPath.replace(".claim.json", ".publication.json");
+      const capture = minimiseNativeExport({
+        native: JSON.stringify({ info: { id: "ses_fork" }, messages: [] }),
+        mapping: f.claim.destination,
+        coverage: { kind: "export", reason: null },
+      });
+      if (kind === "raw-output")
+        capture.native = JSON.stringify({
+          info: { id: "ses_fork" },
+          messages: [
+            {
+              id: "msg",
+              type: "assistant",
+              content: [
+                {
+                  type: "tool",
+                  state: {
+                    status: "completed",
+                    input: {},
+                    content: [{ type: "text", text: "private raw output" }],
+                  },
+                },
+              ],
+            },
+          ],
+        });
+      if (kind === "mapping")
+        capture.mapping = {
+          ...capture.mapping,
+          workspace: { ...capture.mapping.workspace, path: "/unscanned/elsewhere" },
+        };
+      if (kind === "unknown-field") Object.assign(capture, { extra: "unscanned receipt bytes" });
+      if (kind === "unknown-version")
+        capture.projection = { kind: "minimised", minimiser: "min-future" };
+      const original = JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture,
+      });
+      await writeFile(path, original, { mode: 0o600 });
+      await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
+        "chi-conversation-capture-unminimised",
+      );
+      expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toEqual([]);
+      expect(await readFile(path, "utf8")).toBe(original);
+    },
+  );
 
   it("merges a delayed Share capture with preparation using replaced snapshot labels", async () => {
     const f = await fixture();
@@ -1542,13 +1605,12 @@ describe("automatic sync destinations", () => {
     let evidenceRejectionStatus = 422;
     let evidenceAttempts = 0;
     const sourceId = prepareNativeCapture({
-      capture: {
-        version: 1,
-        harness: "opencode-v2",
+      capture: minimiseNativeExport({
         native: JSON.stringify(f.transfer),
         mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
         coverage: { kind: "export", reason: null },
-      },
+        sessionId: "ses_fork",
+      }),
       sessionId: "ses_fork",
     }).sourceId;
     const base = f.authority.request;
@@ -2240,7 +2302,7 @@ describe("automatic sync destinations", () => {
       return base(url, init);
     }) as typeof fetch;
     const records = Array.from({ length: 60 }, (_, i) => ({
-      id: `stored-${i}`,
+      id: `stored-${String(i).padStart(3, "0")}`,
       cwd: f.home,
       provider: "opencode",
       workspaceId: "workspace",
@@ -2287,7 +2349,7 @@ describe("automatic sync destinations", () => {
       return base(url, init);
     }) as typeof fetch;
     const records = Array.from({ length: 60 }, (_, i) => ({
-      id: `stored-${i}`,
+      id: `stored-${String(i).padStart(3, "0")}`,
       cwd: f.home,
       provider: "opencode",
       workspaceId: "workspace",
@@ -2304,12 +2366,44 @@ describe("automatic sync destinations", () => {
       },
     }));
     const options = { provenanceRemover, listStoredAgents: async () => records };
+    records.unshift(
+      ...Array.from({ length: 10 }, (_, i) => ({
+        ...records[0],
+        id: `a-ineligible-${i}`,
+        provider: "claude",
+      })),
+    );
     await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
     expect(removed).toHaveLength(50);
     // A fresh connection (a daemon restart) resumes at the persisted cursor.
     await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
     expect(removed).toHaveLength(100);
     expect(removed[50].endsWith("ses_50")).toBe(true);
+  });
+
+  it("retries orphan sweeps while running, serializes slow sweeps, and stops on shutdown", async () => {
+    const f = await syncFixture();
+    const connection = f.connect();
+    const pending = barrier();
+    const sweep = vi
+      .spyOn(connection, "reconcileProvenanceOrphans")
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    try {
+      connection.startProvenanceSweep();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+      pending.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+      connection.stopProvenanceSweep();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+    } finally {
+      connection.stopProvenanceSweep();
+      vi.useRealTimers();
+    }
   });
 
   it("writes provenance even when the upload fails, without blocking the retry", async () => {
