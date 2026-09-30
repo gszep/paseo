@@ -1,13 +1,7 @@
-import { test } from "@playwright/test";
-import { loadDaemonClientConstructor } from "../support/helpers/daemon-client-loader";
+import { expect } from "@playwright/test";
+import { daemonTest } from "../support/fixtures";
 
-test("debug relay import under the real config", async () => {
-  try {
-    const Ctor = await loadDaemonClientConstructor();
-    console.log("DEBUG_LOADED", typeof Ctor);
-  } catch (error) {
-    console.log("DEBUG_LOADERR", (error as Error).message);
-    console.log("DEBUG_STACK", (error as Error).stack);
-    throw error;
-  }
+daemonTest("debug e2eWorkerClient import", async ({ e2eWorkerClient }) => {
+  console.log("DEBUG_CLIENT", typeof e2eWorkerClient.fetchWorkspaces);
+  expect(typeof e2eWorkerClient.fetchWorkspaces).toBe("function");
 });
