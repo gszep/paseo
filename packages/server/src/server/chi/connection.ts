@@ -920,7 +920,7 @@ export class ChiConnection {
           coverage,
           sessionId,
           ...(gitCoordinate ? { git: gitCoordinate } : {}),
-        });
+        }).capture;
         const input = {
           endpoint,
           token: auth.sessionToken,
@@ -1366,6 +1366,10 @@ export class ChiConnection {
         .parse(JSON.parse(readFileSync(this.orphanCursorPath(), "utf8")));
       this.orphanSweepCursor = parsed.cursor;
       this.orphanBackoff = parsed.backoff ?? {};
+      const latestCheck = Date.now() + 24 * 60 * 60 * 1000;
+      for (const backoff of Object.values(this.orphanBackoff)) {
+        backoff.nextCheck = Math.min(backoff.nextCheck, latestCheck);
+      }
     } catch {
       // First run, or an unreadable cursor: start from zero.
     }
@@ -1654,7 +1658,12 @@ export class ChiConnection {
         throw new Error("chi-conversation-recovery-required");
       const native = JSON.stringify(await runtime.export(sessionId));
       const coverage = { kind: "export" as const, reason: null };
-      const minimised = minimiseNativeExport({ native, mapping: destination, coverage, sessionId });
+      const minimised = minimiseNativeExport({
+        native,
+        mapping: destination,
+        coverage,
+        sessionId,
+      }).capture;
       const verdict = await this.scanCapture(
         { native, mapping: destination, coverage, sessionId },
         {

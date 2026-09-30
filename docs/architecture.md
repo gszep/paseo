@@ -55,9 +55,11 @@ hoisted workspace dependency even when named in `bundleDependencies`. It is a
 source-integration artifact, not a published package release.
 
 Managed capture bounds-validates and scans the complete production min-v1 projection
-locally with host `gitleaks`, then scans the full export for attribution, using the same
-extended default rules, `--ignore-gitleaks-allow` and redacted output as the
-server scan, before any evidence POST. The daemon finds `gitleaks` on `PATH` or,
+locally with host `gitleaks`, checks bounded windows around prose cuts, then scans
+the full export for attribution. All scans use extended default rules and
+`--ignore-gitleaks-allow` before any evidence POST. Cut-window and attribution
+reports retain raw secrets only in private temporary files removed after scanning;
+only the minimiser result's `capture` is uploadable. The daemon finds `gitleaks` on `PATH` or,
 when it is absent there, under `/opt/homebrew/bin`, `/usr/local/bin` or
 `~/.local/bin`; without it capture fails closed
 (`capture-local-scanner-unavailable`) rather than uploading unscanned. A local
@@ -66,7 +68,9 @@ finding (`capture-local-secret-rejected`) or a server rejection
 retries stop until the user retries explicitly. A missing scanner stays
 retryable once installed. Findings only in omitted content warn without blocking
 the minimised upload. Full-export attribution over budget surfaces a warning;
-the projection's byte/node limits and exact-upload scan still fail closed.
+the projection's byte/node limits, exact-upload scan and cut-window scan still
+fail closed. A surviving secret prefix or exhausted cut-window budget rejects
+even when the full export exceeds its attribution budget.
 The server scan remains the authority.
 
 Provenance orphan cleanup checks source existence under the stored repository
@@ -74,6 +78,7 @@ and owner authorization without invalidating the primary login. Only a 404 with
 an explicit `reason: 'not-found'` body permits deletion. Bounded sweeps of archived
 or unloaded records run serially, persist their rotation cursor and per-record
 backoff atomically, and retry unavailable repositories and failed deletions.
+Loaded retry times are clamped to at most 24 hours from startup.
 
 Capture association errors retain the HTTP status and an allowlisted public Chi
 reason (for example `evidence-http-413-native-store-limit`). The native client
