@@ -860,6 +860,22 @@ async function canonicalFixture() {
 }
 
 describe("canonical Chi coordination", () => {
+  it("surfaces attribution-unavailable on Continue without waiting for another turn", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      scanCapture: async () => ({ verdict: "attribution-unavailable" }),
+    });
+    const result = await connection.continue(f.input, f.registration);
+    expect(f.requests.some((request) => request.path.endsWith("/publish"))).toBe(true);
+    expect(JSON.parse(result.snapshot.labels["chi.native"]!).warning).toBe(
+      "capture-local-attribution-unavailable",
+    );
+  });
+
   it("syncs an already-visible publication before HTTP, even while its writer is paused before directory sync", async () => {
     const f = await canonicalFixture();
     await f.ready();
@@ -1644,7 +1660,9 @@ describe("automatic sync destinations", () => {
       scanCapture: (
         full: unknown,
         minimised: unknown,
-      ) => Promise<{ verdict: "clean" | "omitted-warning" }> = async () => ({ verdict: "clean" }),
+      ) => Promise<{
+        verdict: "clean" | "omitted-warning" | "attribution-unavailable";
+      }> = async () => ({ verdict: "clean" }),
       provenance: Pick<
         ChiConnectionOptions,
         "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents"
@@ -2210,7 +2228,7 @@ describe("automatic sync destinations", () => {
     f.authority.request = (async (url, init) => {
       if (new URL(String(url)).pathname === "/evidence/inspect") {
         inspectHeaders.push(init?.headers as Record<string, string>);
-        return new Response(null, { status: 404 });
+        return Response.json({ reason: "not-found" }, { status: 404 });
       }
       return base(url, init);
     }) as typeof fetch;
@@ -2297,7 +2315,7 @@ describe("automatic sync destinations", () => {
     const base = f.authority.request;
     f.authority.request = (async (url, init) => {
       if (new URL(String(url)).pathname === "/evidence/inspect") {
-        return new Response(null, { status: 404 });
+        return Response.json({ reason: "not-found" }, { status: 404 });
       }
       return base(url, init);
     }) as typeof fetch;
@@ -2327,9 +2345,9 @@ describe("automatic sync destinations", () => {
     const firstRun = new Set(removed);
     await connection.reconcileProvenanceOrphans();
     // The cursor advances, so the tail is checked first on the next run.
-    expect(removed).toHaveLength(100);
+    expect(removed).toHaveLength(60);
     const nextRun = removed.slice(50);
-    expect(nextRun).toHaveLength(50);
+    expect(nextRun).toHaveLength(10);
     expect(nextRun.slice(0, 10).every((ref) => !firstRun.has(ref))).toBe(true);
     expect(new Set(removed).size).toBe(60);
   });
@@ -2344,7 +2362,7 @@ describe("automatic sync destinations", () => {
     const base = f.authority.request;
     f.authority.request = (async (url, init) => {
       if (new URL(String(url)).pathname === "/evidence/inspect") {
-        return new Response(null, { status: 404 });
+        return Response.json({ reason: "not-found" }, { status: 404 });
       }
       return base(url, init);
     }) as typeof fetch;
@@ -2377,8 +2395,123 @@ describe("automatic sync destinations", () => {
     expect(removed).toHaveLength(50);
     // A fresh connection (a daemon restart) resumes at the persisted cursor.
     await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
-    expect(removed).toHaveLength(100);
+    expect(removed).toHaveLength(60);
     expect(removed[50].endsWith("ses_50")).toBe(true);
+  });
+
+  function orphanRecord(f: Awaited<ReturnType<typeof syncFixture>>, id = "stored") {
+    return {
+      id,
+      cwd: f.home,
+      provider: "opencode",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    };
+  }
+
+  it.each(["catalog", "origin"])(
+    "orphan sweep %s access loss leaves the primary login and participants intact",
+    async (loss) => {
+      const f = await syncFixture();
+      const invalidated = vi.spyOn(f.authority, "invalidate");
+      const base = f.authority.request;
+      f.authority.request = (async (url, init) => {
+        if (loss === "catalog" && new URL(String(url)).pathname === "/repos")
+          return Response.json({ ok: true, repos: [] });
+        return base(url, init);
+      }) as typeof fetch;
+      if (loss === "origin")
+        execFileSync("git", [
+          "-C",
+          f.home,
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.com/other/repo.git",
+        ]);
+      const connection = f.connect(undefined, undefined, {
+        listStoredAgents: async () => [orphanRecord(f)],
+      });
+      await connection.reconcileProvenanceOrphans();
+      expect(invalidated).not.toHaveBeenCalled();
+    },
+  );
+
+  it("orphan sweep checks only archived or unloaded records and backs off each across restarts", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const inspected: string[] = [];
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") inspected.push(String(url));
+      return base(url, init);
+    }) as typeof fetch;
+    const records = [orphanRecord(f, agent.id), orphanRecord(f, "unloaded")];
+    const options = { listStoredAgents: async () => records };
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(1);
+      clock.mockReturnValue(1_060_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(1);
+      // A newly archived loaded record is independently eligible during the other's backoff.
+      const archived = { ...records[0], archivedAt: new Date().toISOString() };
+      const archivedOptions = { listStoredAgents: async () => [archived, records[1]] };
+      await f.connect(undefined, undefined, archivedOptions).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(2);
+      clock.mockReturnValue(1_300_000);
+      await f.connect(undefined, undefined, archivedOptions).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(3);
+      clock.mockReturnValue(1_600_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(3); // second retry now waits ten minutes
+      clock.mockReturnValue(1_900_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(4);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(["", "<html>Not found</html>", "{}", '{"reason":"repository-denied"}'])(
+    "orphan sweep never purges an ambiguous 404 body: %s",
+    async (body) => {
+      const f = await syncFixture();
+      const base = f.authority.request;
+      f.authority.request = (async (url, init) =>
+        new URL(String(url)).pathname === "/evidence/inspect"
+          ? new Response(body, { status: 404 })
+          : base(url, init)) as typeof fetch;
+      const provenanceRemover = vi.fn<ProvenanceRemover>();
+      await f
+        .connect(undefined, undefined, {
+          provenanceRemover,
+          listStoredAgents: async () => [orphanRecord(f)],
+        })
+        .reconcileProvenanceOrphans();
+      expect(provenanceRemover).not.toHaveBeenCalled();
+    },
+  );
+
+  it("surfaces attribution-unavailable while uploading a clean minimised capture", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const connection = f.connect(undefined, async () => ({ verdict: "attribution-unavailable" }));
+    await connection.capture(agent.id);
+    expect(f.evidence).toHaveLength(1);
+    expect((await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).warning).toBe(
+      "capture-local-attribution-unavailable",
+    );
   });
 
   it("retries orphan sweeps while running, serializes slow sweeps, and stops on shutdown", async () => {

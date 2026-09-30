@@ -394,6 +394,7 @@ export class ChiConnection {
   // Rotating cursor for the bounded startup provenance-orphan sweep, persisted
   // so a restart resumes rather than restarting the tail.
   private orphanSweepCursor = 0;
+  private orphanBackoff: Record<string, { nextCheck: number; delay: number }> = {};
   private orphanCursorLoaded = false;
   private orphanSweepTimer: ReturnType<typeof setTimeout> | null = null;
   private orphanSweepStopped = true;
@@ -694,37 +695,41 @@ export class ChiConnection {
 
   private async authorize(repo: string, cwd: string, authority: ChiAuthority = this.authority) {
     try {
-      const remote = await execCommand("git", ["remote", "get-url", "origin"], {
-        cwd,
-        timeout: 5000,
-      });
-      const parsed = parseGitHubRemote(remote.stdout);
-      if (!parsed || `github:${parsed.owner}/${parsed.repo}`.toLowerCase() !== repo.toLowerCase())
-        throw new Error("chi-repository-mismatch");
-      const session = await authority.login();
-      const endpoint = endpointUrl(authority.endpoint);
-      const get = async (path: string) => {
-        const response = await authority.request(append(endpoint, path), {
-          redirect: "error",
-          signal: AbortSignal.timeout(30000),
-          headers: { authorization: `Bearer ${session.sessionToken}` },
-        });
-        if (!response.ok) {
-          await response.body?.cancel();
-          throw new Error(`chi-http-${response.status}`);
-        }
-        return JSON.parse(await boundedText(response, 1024 * 1024));
-      };
-      const identity = authSchema.parse(await get("auth/session"));
-      if (identity.chiUserId !== session.chiUserId) throw new Error("chi-identity-mismatch");
-      const catalog = reposSchema.parse(await get("repos"));
-      if (!catalog.repos.some((entry) => entry.repo.toLowerCase() === repo.toLowerCase()))
-        throw new Error("chi-repository-denied");
-      return session;
+      return await this.authorizeRepository(repo, cwd, authority);
     } catch (error) {
       if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
       throw error;
     }
+  }
+
+  private async authorizeRepository(repo: string, cwd: string, authority: ChiAuthority) {
+    const remote = await execCommand("git", ["remote", "get-url", "origin"], {
+      cwd,
+      timeout: 5000,
+    });
+    const parsed = parseGitHubRemote(remote.stdout);
+    if (!parsed || `github:${parsed.owner}/${parsed.repo}`.toLowerCase() !== repo.toLowerCase())
+      throw new Error("chi-repository-mismatch");
+    const session = await authority.login();
+    const endpoint = endpointUrl(authority.endpoint);
+    const get = async (path: string) => {
+      const response = await authority.request(append(endpoint, path), {
+        redirect: "error",
+        signal: AbortSignal.timeout(30000),
+        headers: { authorization: `Bearer ${session.sessionToken}` },
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`chi-http-${response.status}`);
+      }
+      return JSON.parse(await boundedText(response, 1024 * 1024));
+    };
+    const identity = authSchema.parse(await get("auth/session"));
+    if (identity.chiUserId !== session.chiUserId) throw new Error("chi-identity-mismatch");
+    const catalog = reposSchema.parse(await get("repos"));
+    if (!catalog.repos.some((entry) => entry.repo.toLowerCase() === repo.toLowerCase()))
+      throw new Error("chi-repository-denied");
+    return session;
   }
 
   async share(agentId: string, selectedRepo?: string): Promise<Association> {
@@ -1077,7 +1082,7 @@ export class ChiConnection {
   }
 
   /**
-   * Full-export scan then upload of the minimised form. A finding in uploaded
+   * Exact-upload scan followed by full-export attribution. A finding in uploaded
    * content blocks (`capture-local-secret-rejected`); a finding only in omitted
    * content records a non-blocking warning and syncs. Missing scanner fails
    * closed. The server scan remains the authority.
@@ -1102,6 +1107,8 @@ export class ChiConnection {
     try {
       const verdict = await this.scanCapture(args.full, args.minimised);
       if (verdict.verdict === "omitted-warning") warning = "capture-local-secret-omitted-content";
+      if (verdict.verdict === "attribution-unavailable")
+        warning = "capture-local-attribution-unavailable";
       captured = await (args.retryConflict
         ? retryCaptureNative(args.input, args.ownerId, args.request)
         : captureNative(args.input, args.request));
@@ -1265,13 +1272,17 @@ export class ChiConnection {
    * capture re-attempts. A source deleted after the agent is archived (or the
    * workspace removed) would orphan its ref forever. At daemon bootstrap, verify
    * stored associations with a hidden ref and purge the ones the backend reports
-   * gone (404 only). Bounded, quiet, and rotating so the tail is not starved.
+   * gone explicitly. Bounded, quiet, and rotating so the tail is not starved.
    */
   async reconcileProvenanceOrphans(): Promise<void> {
     const records = [...((await this.options.listStoredAgents?.()) ?? [])].sort((a, b) =>
       a.id.localeCompare(b.id),
     );
     this.loadOrphanCursor();
+    const ids = new Set(records.map((record) => record.id));
+    for (const id of Object.keys(this.orphanBackoff)) {
+      if (!ids.has(id)) delete this.orphanBackoff[id];
+    }
     if (records.length === 0) return;
     const cap = 50;
     const start = this.orphanSweepCursor % records.length;
@@ -1279,19 +1290,28 @@ export class ChiConnection {
     let visited = 0;
     for (; visited < records.length && checked < cap; visited += 1) {
       const record = records[(start + visited) % records.length];
-      if (record.provider !== "opencode") continue;
-      const association = this.parseAssociation(record.labels?.[label]);
-      if (!association?.provenanceRef || !association.actor || !association.sourceId) continue;
-      if (association.provenanceRemoved) continue;
-      const sessionId = record.persistence?.nativeHandle ?? record.persistence?.sessionId;
-      if (!sessionId) continue;
-      checked += 1;
-      if (await this.confirmOrphan(record, association)) {
-        await this.purgeOrphan(record, association, sessionId);
-      }
+      if (await this.sweepOrphan(record)) checked += 1;
     }
     this.orphanSweepCursor = (start + visited) % records.length;
     await this.persistOrphanCursor();
+  }
+
+  private async sweepOrphan(record: StoredChiAgent): Promise<boolean> {
+    if (record.provider !== "opencode") return false;
+    if (!record.archivedAt && this.manager.getAgent(record.id)) return false;
+    const previous = this.orphanBackoff[record.id];
+    if (previous && previous.nextCheck > Date.now()) return false;
+    const association = this.parseAssociation(record.labels?.[label]);
+    if (!association?.provenanceRef || !association.actor || !association.sourceId) return false;
+    if (association.provenanceRemoved) return false;
+    const sessionId = record.persistence?.nativeHandle ?? record.persistence?.sessionId;
+    if (!sessionId) return false;
+    const delay = Math.min((previous?.delay ?? 150_000) * 2, 24 * 60 * 60 * 1000);
+    this.orphanBackoff[record.id] = { nextCheck: Date.now() + delay, delay };
+    if (await this.confirmOrphan(record, association)) {
+      await this.purgeOrphan(record, association, sessionId);
+    }
+    return true;
   }
 
   startProvenanceSweep(): void {
@@ -1326,11 +1346,26 @@ export class ChiConnection {
     if (this.orphanCursorLoaded) return;
     this.orphanCursorLoaded = true;
     try {
-      const parsed = JSON.parse(readFileSync(this.orphanCursorPath(), "utf8")) as {
-        cursor?: unknown;
-      };
-      if (Number.isSafeInteger(parsed?.cursor) && (parsed.cursor as number) >= 0)
-        this.orphanSweepCursor = parsed.cursor as number;
+      const parsed = z
+        .object({
+          cursor: z.number().int().nonnegative(),
+          backoff: z
+            .record(
+              z.string(),
+              z.object({
+                nextCheck: z.number().finite().nonnegative(),
+                delay: z
+                  .number()
+                  .finite()
+                  .min(300_000)
+                  .max(24 * 60 * 60 * 1000),
+              }),
+            )
+            .optional(),
+        })
+        .parse(JSON.parse(readFileSync(this.orphanCursorPath(), "utf8")));
+      this.orphanSweepCursor = parsed.cursor;
+      this.orphanBackoff = parsed.backoff ?? {};
     } catch {
       // First run, or an unreadable cursor: start from zero.
     }
@@ -1338,14 +1373,17 @@ export class ChiConnection {
 
   private async persistOrphanCursor(): Promise<void> {
     await mkdir(join(this.options.home, "chi"), { recursive: true, mode: 0o700 });
-    await writeJsonFileAtomic(this.orphanCursorPath(), { cursor: this.orphanSweepCursor });
+    await writeJsonFileAtomic(this.orphanCursorPath(), {
+      cursor: this.orphanSweepCursor,
+      backoff: this.orphanBackoff,
+    });
   }
 
-  /** Only a confirmed 404 purges; 401/403/5xx/network/actor mismatch do not. */
+  /** Only an explicit not-found response purges; access loss leaves login intact. */
   private async confirmOrphan(record: StoredChiAgent, association: Association): Promise<boolean> {
     try {
       const authority = this.authorityFor(this.endpointFor(association.endpoint));
-      const auth = await this.authorize(association.repo, record.cwd, authority);
+      const auth = await this.authorizeRepository(association.repo, record.cwd, authority);
       if (!sameActor(auth.chiUserId, association.actor)) return false;
       return !(await nativeSourceExists(
         {
@@ -1617,11 +1655,7 @@ export class ChiConnection {
       const native = JSON.stringify(await runtime.export(sessionId));
       const coverage = { kind: "export" as const, reason: null };
       const minimised = minimiseNativeExport({ native, mapping: destination, coverage, sessionId });
-      // Continuation content leaves the host too; scan the full export then the
-      // minimised form that would upload. Same scanner, same terminal handling.
-      // An omitted-warning verdict is deliberately not recorded here: the
-      // destination's own next settled-turn capture surfaces it for that source.
-      await this.scanCapture(
+      const verdict = await this.scanCapture(
         { native, mapping: destination, coverage, sessionId },
         {
           native: minimised.native,
@@ -1632,6 +1666,13 @@ export class ChiConnection {
           ...(minimised.git ? { git: minimised.git } : {}),
         },
       );
+      if (verdict.verdict !== "clean") {
+        const warning =
+          verdict.verdict === "attribution-unavailable"
+            ? "capture-local-attribution-unavailable"
+            : "capture-local-secret-omitted-content";
+        await this.patchAssociation(snapshot.id, { warning });
+      }
       const publication: PublishRequest = {
         id,
         revision: current.conversation.revision,
