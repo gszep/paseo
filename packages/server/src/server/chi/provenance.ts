@@ -1,12 +1,10 @@
 import {
-  createProvenanceCommit,
   currentBranch,
   deriveTurnCoordinates,
-  gitStdout,
   normalizeProvenanceUser,
   provenanceRefFor,
   purgeProvenanceRef,
-  pushProvenanceRef,
+  writeProvenanceRef,
   type ProvenanceOrigin,
 } from "@henkaku-center/chi-native/provenance";
 import {
@@ -20,8 +18,9 @@ import {
  * Daemon-side provenance writer. Runs after a settled turn in a mapped git
  * worktree, snapshotting the working tree into a hidden per-user ref. It never
  * moves HEAD, never touches the real index, secret-scans the diff, and pushes
- * with the user's own credentials. Failures are returned, never thrown, so they
- * can never block a prompt.
+ * with the user's own credentials. Every git/scan/push call is async with a
+ * timeout, and failures are returned, never thrown, so they cannot block a
+ * prompt or the event loop.
  */
 
 export interface CaptureEvidence {
@@ -43,6 +42,7 @@ export interface ProvenanceWriteInput {
   continuation?: boolean;
   delegation?: { parentSessionId: string; turnId?: string } | null;
   scanner?: string;
+  remote?: string;
 }
 
 export interface ProvenanceOutcome {
@@ -53,7 +53,7 @@ export interface ProvenanceOutcome {
   pushReason?: string;
 }
 
-export type ProvenanceWriter = (input: ProvenanceWriteInput) => ProvenanceOutcome;
+export type ProvenanceWriter = (input: ProvenanceWriteInput) => Promise<ProvenanceOutcome>;
 
 export interface ProvenanceRemoveInput {
   root: string;
@@ -68,7 +68,14 @@ export interface ProvenanceRemoval {
   reason: string;
 }
 
-export type ProvenanceRemover = (input: ProvenanceRemoveInput) => ProvenanceRemoval;
+export type ProvenanceRemover = (input: ProvenanceRemoveInput) => Promise<ProvenanceRemoval>;
+
+const REASON_MAX = 120;
+
+function boundedReason(value: unknown): string {
+  const text = value instanceof Error ? value.message : String(value);
+  return text.replace(/[\r\n]+/g, " ").slice(0, REASON_MAX) || "provenance-failed";
+}
 
 export function provenanceRefForSession(user: string, sessionId: string): string {
   return provenanceRefFor(normalizeProvenanceUser(user), sessionId);
@@ -92,7 +99,7 @@ function originFor(input: ProvenanceWriteInput): {
   return { origin: "human-request" };
 }
 
-export function writeProvenance(input: ProvenanceWriteInput): ProvenanceOutcome {
+export async function writeProvenance(input: ProvenanceWriteInput): Promise<ProvenanceOutcome> {
   const ref = provenanceRefForSession(input.user, input.sessionId);
   try {
     const { origin, originRef } = originFor(input);
@@ -103,48 +110,36 @@ export function writeProvenance(input: ProvenanceWriteInput): ProvenanceOutcome 
       ...(originRef ? { originRef } : {}),
       agent: "opencode",
       repo: input.repo.replace(/^github:/i, ""),
-      baseBranch: currentBranch(input.root),
+      baseBranch: await currentBranch(input.root),
       provenanceBranch: ref,
       ...(input.sourceId ? { chiSourceId: input.sourceId } : {}),
       ...(input.head ? { chiHeadRevision: input.head } : {}),
     };
-    const result = createProvenanceCommit({
+    const result = await writeProvenanceRef({
       root: input.root,
       coordinates,
       ...(input.scanner ? { scanner: input.scanner } : {}),
+      ...(input.remote ? { remote: input.remote } : {}),
     });
-    let pushReason = "not-pushed";
-    if (gitStdout(input.root, ["rev-parse", "--verify", ref], { allowFailure: true })) {
-      const push = pushProvenanceRef({ root: input.root, ref });
-      pushReason = push.pushed ? "pushed" : "push-failed";
-    }
-    const reason = result.created
-      ? pushReason === "pushed"
-        ? "created-pushed"
-        : "created-push-pending"
-      : result.reason;
-    return { attempted: true, created: result.created, reason, ref, pushReason };
-  } catch (error) {
     return {
       attempted: true,
-      created: false,
-      reason: error instanceof Error ? error.message : "provenance-failed",
+      created: result.created,
+      reason: result.reason,
       ref,
+      pushReason: result.pushReason,
     };
+  } catch (error) {
+    return { attempted: true, created: false, reason: boundedReason(error), ref };
   }
 }
 
-export function removeProvenance(input: ProvenanceRemoveInput): ProvenanceRemoval {
+export async function removeProvenance(input: ProvenanceRemoveInput): Promise<ProvenanceRemoval> {
   const ref = input.ref ?? provenanceRefForSession(input.user, input.sessionId);
   try {
-    const result = purgeProvenanceRef({ root: input.root, ref });
+    const result = await purgeProvenanceRef({ root: input.root, ref });
     return { removed: result.remote, ref, reason: result.reason };
   } catch (error) {
-    return {
-      removed: false,
-      ref,
-      reason: error instanceof Error ? error.message : "provenance-purge-failed",
-    };
+    return { removed: false, ref, reason: boundedReason(error) };
   }
 }
 
@@ -155,23 +150,27 @@ export interface BlameResult {
 }
 
 /** Token-budgeted blame entry the future `chi_commons` blame op calls. */
-export function blameProvenance(input: {
+export async function blameProvenance(input: {
   root: string;
   ref: string;
   file: string;
   lineStart?: number;
   lineEnd?: number;
+  maxRows?: number;
   tokenBudget?: number;
-}): BlameResult {
-  const rows = blameProvenanceFile({ root: input.root, ref: input.ref, file: input.file });
-  const ranged = rows.filter(
-    (row) =>
-      (input.lineStart === undefined || row.line >= input.lineStart) &&
-      (input.lineEnd === undefined || row.line <= input.lineEnd),
-  );
+}): Promise<BlameResult> {
+  // Range is applied before the row cap inside the library.
+  const rows = await blameProvenanceFile({
+    root: input.root,
+    ref: input.ref,
+    file: input.file,
+    ...(input.lineStart !== undefined ? { lineStart: input.lineStart } : {}),
+    ...(input.lineEnd !== undefined ? { lineEnd: input.lineEnd } : {}),
+    ...(input.maxRows !== undefined ? { maxRows: input.maxRows } : {}),
+  });
   return {
-    rows: ranged,
-    rendered: formatProvenanceBlame(ranged, {
+    rows,
+    rendered: formatProvenanceBlame(rows, {
       file: input.file,
       ref: input.ref,
       ...(input.tokenBudget ? { tokenBudget: input.tokenBudget } : {}),
