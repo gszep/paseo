@@ -54,8 +54,8 @@ the locked installed package beneath `packages/server/node_modules`: npm omits a
 hoisted workspace dependency even when named in `bundleDependencies`. It is a
 source-integration artifact, not a published package release.
 
-Managed capture bounds-validates the production min-v1 projection and scans both
-the full export and the complete projected capture locally with host `gitleaks`, using the same
+Managed capture bounds-validates and scans the complete production min-v1 projection
+locally with host `gitleaks`, then scans the full export for attribution, using the same
 extended default rules, `--ignore-gitleaks-allow` and redacted output as the
 server scan, before any evidence POST. The daemon finds `gitleaks` on `PATH` or,
 when it is absent there, under `/opt/homebrew/bin`, `/usr/local/bin` or
@@ -65,12 +65,15 @@ finding (`capture-local-secret-rejected`) or a server rejection
 (`server-secret-scan-rejected`) is terminal: nothing is uploaded and automatic
 retries stop until the user retries explicitly. A missing scanner stays
 retryable once installed. Findings only in omitted content warn without blocking
-the minimised upload. The server scan remains the authority.
+the minimised upload. Full-export attribution over budget surfaces a warning;
+the projection's byte/node limits and exact-upload scan still fail closed.
+The server scan remains the authority.
 
 Provenance orphan cleanup checks source existence under the stored repository
-and owner authorization. Only a confirmed 404 permits deletion. Bounded sweeps
-run serially while the daemon is active, persist their rotation cursor atomically,
-and retry unavailable repositories and failed deletions on later passes.
+and owner authorization without invalidating the primary login. Only a 404 with
+an explicit `reason: 'not-found'` body permits deletion. Bounded sweeps of archived
+or unloaded records run serially, persist their rotation cursor and per-record
+backoff atomically, and retry unavailable repositories and failed deletions.
 
 Capture association errors retain the HTTP status and an allowlisted public Chi
 reason (for example `evidence-http-413-native-store-limit`). The native client
