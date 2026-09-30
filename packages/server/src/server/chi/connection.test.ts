@@ -145,7 +145,7 @@ async function fixture() {
       home,
       serverId: "server",
       authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
   return {
     home,
@@ -657,7 +657,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "other",
       authority: f.authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
     await expect(otherOwner.continue(f.input, f.registration)).rejects.toThrow(
       "selection-mismatch",
@@ -730,7 +730,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
-      localScan: async () => {
+      scanCapture: async () => {
         throw new Error("capture-local-secret-rejected");
       },
     });
@@ -1012,7 +1012,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
     const b = ownerB.continue(f.input, {
       find: async () => structuredClone(bAgent),
@@ -1492,10 +1492,7 @@ describe("automatic sync destinations", () => {
       }
       return base(url, init);
     }) as typeof fetch;
-    const noopProvenance: Pick<
-      ChiConnectionOptions,
-      "provenance" | "provenanceRemover"
-    > = {
+    const noopProvenance: Pick<ChiConnectionOptions, "provenance" | "provenanceRemover"> = {
       provenance: async () => ({
         attempted: true,
         created: false,
@@ -1506,7 +1503,10 @@ describe("automatic sync destinations", () => {
     };
     const connect = (
       override = effective,
-      localScan: (input: unknown) => Promise<void> = async () => undefined,
+      scanCapture: (
+        full: unknown,
+        minimised: unknown,
+      ) => Promise<{ verdict: "clean" | "omitted-warning" }> = async () => ({ verdict: "clean" }),
       provenance: Pick<
         ChiConnectionOptions,
         "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents"
@@ -1516,7 +1516,7 @@ describe("automatic sync destinations", () => {
         home: f.home,
         serverId: "server",
         authority: f.authority,
-        localScan,
+        scanCapture: scanCapture as never,
         getChiConfig: () => override ?? undefined,
         ...provenance,
       });
@@ -1866,10 +1866,10 @@ describe("automatic sync destinations", () => {
   it("blocks a local secret finding before any upload and stops automatic retries", async () => {
     const f = await syncFixture();
     const agent = await f.register();
-    const localScan = vi.fn(async () => {
+    const scanCapture = vi.fn(async () => {
       throw new Error("capture-local-secret-rejected");
     });
-    const connection = f.connect(undefined, localScan);
+    const connection = f.connect(undefined, scanCapture);
     await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-secret-rejected");
     expect(f.evidenceAttempts()).toBe(0);
     expect(f.evidence).toHaveLength(0);
@@ -1877,20 +1877,20 @@ describe("automatic sync destinations", () => {
       error: "capture-local-secret-rejected",
       capturePending: false,
     });
-    const afterCapture = localScan.mock.calls.length;
+    const afterCapture = scanCapture.mock.calls.length;
     connection.afterTurn(agent.id);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(localScan.mock.calls.length).toBe(afterCapture);
+    expect(scanCapture.mock.calls.length).toBe(afterCapture);
     expect(f.evidenceAttempts()).toBe(0);
   });
 
   it("fails closed when the local scanner is unavailable and retries on the next turn", async () => {
     const f = await syncFixture();
     const agent = await f.register();
-    const localScan = vi.fn(async () => {
+    const scanCapture = vi.fn(async () => {
       throw new Error("capture-local-scanner-unavailable");
     });
-    const connection = f.connect(undefined, localScan);
+    const connection = f.connect(undefined, scanCapture);
     await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-scanner-unavailable");
     expect(f.evidenceAttempts()).toBe(0);
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
@@ -1898,12 +1898,12 @@ describe("automatic sync destinations", () => {
       capturePending: true,
     });
     // Retryable once gitleaks is installed: a settled turn retries (bounded).
-    const afterCapture = localScan.mock.calls.length;
+    const afterCapture = scanCapture.mock.calls.length;
     connection.afterTurn(agent.id);
-    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterCapture));
-    const afterTurn = localScan.mock.calls.length;
+    await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterCapture));
+    const afterTurn = scanCapture.mock.calls.length;
     await connection.reconcilePending();
-    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterTurn));
+    await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterTurn));
     expect(f.evidenceAttempts()).toBe(0);
   });
 
@@ -1968,6 +1968,65 @@ describe("automatic sync destinations", () => {
     await f.connect(undefined, undefined, { provenance }).capture(agent.id);
     const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
     expect(association.provenanceError).toBe("secret-scan-rejected");
+  });
+
+  it("scans the full export then uploads only the minimised projection", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    // Add a tool output so the full and minimised natives differ.
+    f.transfer.messages.push({
+      id: "msg_tool",
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          id: "call_1",
+          state: { status: "completed", content: [{ type: "text", text: "TOOL-SECRET-BYTES" }] },
+        },
+      ],
+    });
+    const order: string[] = [];
+    let posted: {
+      capture: {
+        version: number;
+        projection?: { kind: string; minimiser: string };
+        native: string;
+      };
+    } | null = null;
+    const seen: { full: string; minimised: string } = { full: "", minimised: "" };
+    const scanCapture = vi.fn(async (full: { native: string }, minimised: { native: string }) => {
+      order.push("scan");
+      seen.full = full.native;
+      seen.minimised = minimised.native;
+      return { verdict: "clean" as const };
+    });
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence" && init?.method === "POST") {
+        order.push("post");
+        posted = JSON.parse(String(init.body));
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    await f.connect(undefined, scanCapture).capture(agent.id);
+    expect(order).toEqual(["scan", "post"]);
+    expect(seen.full).toContain("TOOL-SECRET-BYTES");
+    expect(seen.minimised).not.toContain("TOOL-SECRET-BYTES");
+    expect(posted).not.toBeNull();
+    expect(posted!.capture.version).toBe(2);
+    expect(posted!.capture.projection).toEqual({ kind: "minimised", minimiser: "min-v1" });
+    expect(posted!.capture.native).not.toContain("TOOL-SECRET-BYTES");
+  });
+
+  it("records a warning and keeps syncing when a finding is only in omitted content", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const scanCapture = vi.fn(async () => ({ verdict: "omitted-warning" as const }));
+    const result = await f.connect(undefined, scanCapture).capture(agent.id);
+    expect(result.sourceId).toBe(f.sourceId);
+    expect(f.evidence).toHaveLength(1);
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.warning).toBe("capture-local-secret-omitted-content");
   });
 
   it("does not block other daemon work while a provenance write is pending", async () => {
@@ -2159,9 +2218,9 @@ describe("automatic sync destinations", () => {
     }));
     const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
     const agent = await f.register();
-    await expect(
-      f.connect(undefined, undefined, { provenance }).capture(agent.id),
-    ).rejects.toThrow("chi-share-required");
+    await expect(f.connect(undefined, undefined, { provenance }).capture(agent.id)).rejects.toThrow(
+      "chi-share-required",
+    );
     expect(provenance).not.toHaveBeenCalled();
   });
 
@@ -2207,11 +2266,13 @@ describe("automatic sync destinations", () => {
         encoding: "utf8",
       }).trim(),
     ).toBe(ref);
-    expect(execFileSync("git", ["-C", f.home, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(
-      head,
-    );
     expect(
-      execFileSync("git", ["-C", f.home, "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim(),
+      execFileSync("git", ["-C", f.home, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    ).toBe(head);
+    expect(
+      execFileSync("git", ["-C", f.home, "diff", "--cached", "--name-only"], {
+        encoding: "utf8",
+      }).trim(),
     ).toBe(staged);
   });
 
@@ -2229,9 +2290,7 @@ describe("automatic sync destinations", () => {
     };
     const f = await syncFixture();
     const agent = await f.register();
-    await f
-      .connect(undefined, undefined, { provenance, provenanceRemover })
-      .capture(agent.id);
+    await f.connect(undefined, undefined, { provenance, provenanceRemover }).capture(agent.id);
     f.setEvidenceRejection("object-deleted", 409);
     const deletedProvenance = vi.fn<ProvenanceWriter>(async () => ({
       attempted: true,
@@ -2240,9 +2299,9 @@ describe("automatic sync destinations", () => {
       ref: "refs/chi/provenance/owner/ses_fork",
     }));
     await expect(
-      f.connect(undefined, undefined, { provenance: deletedProvenance, provenanceRemover }).capture(
-        agent.id,
-      ),
+      f
+        .connect(undefined, undefined, { provenance: deletedProvenance, provenanceRemover })
+        .capture(agent.id),
     ).rejects.toThrow("object-deleted");
     expect(deletedProvenance).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(removed).toHaveLength(1));
@@ -2252,9 +2311,7 @@ describe("automatic sync destinations", () => {
       ref: "refs/chi/provenance/owner/ses_fork",
     });
     await vi.waitFor(() => {
-      const association = JSON.parse(
-        f.manager.getAgent(agent.id)!.labels["chi.native"]!,
-      );
+      const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
       expect(association.provenanceRemoved).toBe(true);
     });
   });
