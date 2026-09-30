@@ -16,6 +16,12 @@ jobs:
           cache: "npm"
       - run: node scripts/npm-retry.mjs ci
       - run: npm run build:server
+      - name: Build native app dependency (same as playwright job)
+        run: npm run build --workspace=@getpaseo/expo-two-way-audio
+      - name: Verify relay dist survived
+        run: |
+          ls -la packages/relay/dist/e2ee.js
+          grep -c createClientChannel packages/relay/dist/e2ee.js
       - name: Inspect relay dist and resolution
         run: |
           set -x
