@@ -121,10 +121,15 @@ export async function writeProvenance(input: ProvenanceWriteInput): Promise<Prov
       ...(input.scanner ? { scanner: input.scanner } : {}),
       ...(input.remote ? { remote: input.remote } : {}),
     });
+    const reason = result.created
+      ? result.pushReason === "pushed"
+        ? "created-pushed"
+        : `created-${result.pushReason ?? "push-pending"}`
+      : result.reason;
     return {
       attempted: true,
       created: result.created,
-      reason: result.reason,
+      reason,
       ref,
       pushReason: result.pushReason,
     };

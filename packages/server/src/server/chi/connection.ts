@@ -380,6 +380,8 @@ export class ChiConnection {
   // Status polls re-resolve the same cwd repeatedly; capture still re-reads the
   // remote. Cleared whenever the chi config reloads.
   private readonly originCache = new Map<string, string>();
+  // Rotating cursor for the bounded startup provenance-orphan sweep.
+  private orphanSweepCursor = 0;
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
@@ -1163,24 +1165,27 @@ export class ChiConnection {
         continue;
       void this.capture(candidate.id).catch(() => undefined);
     }
-    void this.reconcileProvenanceOrphans().catch(() => undefined);
   }
 
   /**
    * Owner deletion reaches refs only when the association still exists and a
    * capture re-attempts. A source deleted after the agent is archived (or the
-   * workspace removed) would orphan its ref forever. On startup, verify stored
-   * associations with a hidden ref and purge the ones the backend reports gone.
-   * Bounded and quiet: unavailable workspaces are skipped, never blocking boot.
+   * workspace removed) would orphan its ref forever. At daemon bootstrap, verify
+   * stored associations with a hidden ref and purge the ones the backend reports
+   * gone (404 only). Bounded, quiet, and rotating so the tail is not starved.
    */
   async reconcileProvenanceOrphans(): Promise<void> {
     const records = (await this.options.listStoredAgents?.()) ?? [];
+    if (records.length === 0) return;
+    const cap = 50;
+    const start = this.orphanSweepCursor % records.length;
     let checked = 0;
-    for (const record of records) {
-      if (checked >= 50) break;
+    for (let offset = 0; offset < records.length && checked < cap; offset += 1) {
+      const record = records[(start + offset) % records.length];
       if (record.provider !== "opencode") continue;
       const association = this.parseAssociation(record.labels?.[label]);
       if (!association?.provenanceRef || !association.actor || !association.sourceId) continue;
+      if (association.provenanceRemoved) continue;
       const sessionId = record.persistence?.nativeHandle ?? record.persistence?.sessionId;
       if (!sessionId) continue;
       checked += 1;
@@ -1197,6 +1202,7 @@ export class ChiConnection {
           headers: { authorization: `Bearer ${auth.sessionToken}` },
         });
         await response.body?.cancel();
+        // Only a confirmed deletion purges; 401/403/5xx/network/actor mismatch do not.
         if (response.status !== 404) continue;
       } catch {
         continue;
@@ -1208,14 +1214,22 @@ export class ChiConnection {
           sessionId,
           ref: association.provenanceRef,
         });
-        await this.patchAssociation(record.id, {
-          provenanceRemoved: outcome.removed,
-          provenanceError: outcome.removed ? null : outcome.reason,
-        });
+        if (outcome.removed) {
+          await this.patchAssociation(record.id, {
+            provenanceRemoved: true,
+            provenanceRef: undefined,
+            provenanceError: null,
+          }).catch(() => undefined);
+        } else {
+          await this.patchAssociation(record.id, { provenanceError: outcome.reason }).catch(
+            () => undefined,
+          );
+        }
       } catch {
         // A stored record that is not loaded cannot be patched; the purge stands.
       }
     }
+    this.orphanSweepCursor = (start + Math.max(checked, 1)) % records.length;
   }
 
   private async workspaceIdentities(
