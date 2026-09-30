@@ -872,7 +872,7 @@ export class ChiConnection {
       await this.patchAssociation(agentId, { capturePending: true });
       const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
       if (!sessionId) throw new Error("chi-native-agent-required");
-      return await this.manager.withNativeRuntime(sessionId, async (runtime) => {
+      const settled = await this.manager.withNativeRuntime(sessionId, async (runtime) => {
         const native = JSON.stringify(await runtime.export(sessionId));
         if (target.live) {
           const current = this.manager.getAgent(agentId);
@@ -917,41 +917,7 @@ export class ChiConnection {
         } catch (error) {
           captureError = error;
         }
-        // Provenance is independent of upload success: the repo snapshot has its
-        // own diff scan, and a purged source (`object-deleted`) must not be
-        // re-created. Best-effort, mapped only, never on the prompt path.
-        if (
-          pinned.destination &&
-          !pinned.paused &&
-          !safeChiError(captureError).endsWith("object-deleted")
-        ) {
-          try {
-            const outcome = this.provenanceWriter({
-              root: target.cwd,
-              user: auth.chiUserId,
-              sessionId,
-              repo: pinned.repo,
-              sourceId: captured?.sourceId ?? pinned.sourceId,
-              head: captured?.head ?? pinned.head,
-              evidence: parsed,
-              continuation: Boolean(target.labels["chi.continuation"]),
-              delegation: this.delegationFor(target),
-              ...(this.options.provenanceScanner
-                ? { scanner: this.options.provenanceScanner }
-                : {}),
-            });
-            if (outcome.created) {
-              await this.patchAssociation(agentId, {
-                provenanceRef: outcome.ref,
-                provenanceError: null,
-              });
-            }
-          } catch {
-            // Provenance never blocks a settled turn.
-          }
-        }
-        if (captureError) throw captureError;
-        if (!captured) throw new Error("capture-incomplete");
+        if (!captured) return { parsed, captured: null, captureError, updated: null };
         const updated = await this.patchAssociation(agentId, {
           sourceId: captured.sourceId,
           head: captured.head,
@@ -976,8 +942,30 @@ export class ChiConnection {
             })),
           });
         }
-        return updated;
+        return { parsed, captured, captureError, updated };
       });
+      // The provenance write needs only the parsed export, so it runs outside the
+      // pooled native runtime. It is async with timeouts and best-effort: the repo
+      // snapshot has its own diff scan, and a purged source (`object-deleted`) must
+      // not be re-created.
+      if (
+        pinned.destination &&
+        !pinned.paused &&
+        !safeChiError(settled.captureError).endsWith("object-deleted")
+      ) {
+        await this.writeProvenanceFor(
+          target,
+          pinned,
+          auth.chiUserId,
+          sessionId,
+          settled.parsed,
+          settled.captured,
+          agentId,
+        );
+      }
+      if (settled.captureError) throw settled.captureError;
+      if (!settled.updated) throw new Error("capture-incomplete");
+      return settled.updated;
     } catch (error) {
       const code = safeChiError(error);
       // Owner deletion: the backend fences the deleted source with
@@ -1053,6 +1041,46 @@ export class ChiConnection {
     return { parentSessionId: sessionId };
   }
 
+  /**
+   * Async, best-effort hidden-ref write. The bounded reason is persisted so a
+   * skipped or failed snapshot is visible on the association instead of silent.
+   */
+  private async writeProvenanceFor(
+    target: CaptureTarget,
+    association: Association,
+    user: string,
+    sessionId: string,
+    parsed: ReturnType<typeof prepareNativeCapture>,
+    captured: { sourceId: string; head: string } | null,
+    agentId: string,
+  ): Promise<void> {
+    try {
+      const outcome = await this.provenanceWriter({
+        root: target.cwd,
+        user,
+        sessionId,
+        repo: association.repo,
+        sourceId: captured?.sourceId ?? association.sourceId,
+        head: captured?.head ?? association.head,
+        evidence: parsed,
+        continuation: Boolean(target.labels["chi.continuation"]),
+        delegation: this.delegationFor(target),
+        ...(this.options.provenanceScanner
+          ? { scanner: this.options.provenanceScanner }
+          : {}),
+      });
+      const clean = outcome.created && outcome.pushReason === "pushed";
+      await this.patchAssociation(agentId, {
+        provenanceRef: outcome.ref,
+        provenanceError: clean ? null : outcome.reason,
+      });
+    } catch {
+      await this.patchAssociation(agentId, { provenanceError: "provenance-failed" }).catch(
+        () => undefined,
+      );
+    }
+  }
+
   /** Best-effort owner-deletion sweep for the source's hidden provenance ref. */
   private async purgeProvenance(
     agentId: string,
@@ -1062,7 +1090,7 @@ export class ChiConnection {
     const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
     if (!sessionId || !association.actor) return;
     try {
-      const outcome = this.provenanceRemover({
+      const outcome = await this.provenanceRemover({
         root: target.cwd,
         user: association.actor,
         sessionId,
@@ -1132,6 +1160,59 @@ export class ChiConnection {
       )
         continue;
       void this.capture(candidate.id).catch(() => undefined);
+    }
+    void this.reconcileProvenanceOrphans().catch(() => undefined);
+  }
+
+  /**
+   * Owner deletion reaches refs only when the association still exists and a
+   * capture re-attempts. A source deleted after the agent is archived (or the
+   * workspace removed) would orphan its ref forever. On startup, verify stored
+   * associations with a hidden ref and purge the ones the backend reports gone.
+   * Bounded and quiet: unavailable workspaces are skipped, never blocking boot.
+   */
+  async reconcileProvenanceOrphans(): Promise<void> {
+    const records = (await this.options.listStoredAgents?.()) ?? [];
+    let checked = 0;
+    for (const record of records) {
+      if (checked >= 50) break;
+      if (record.provider !== "opencode") continue;
+      const association = this.parseAssociation(record.labels?.[label]);
+      if (!association?.provenanceRef || !association.actor || !association.sourceId) continue;
+      const sessionId = record.persistence?.nativeHandle ?? record.persistence?.sessionId;
+      if (!sessionId) continue;
+      checked += 1;
+      try {
+        const endpoint = this.endpointFor(association.endpoint);
+        const authority = this.authorityFor(endpoint);
+        const auth = await this.authorize(association.repo, record.cwd, authority);
+        if (!sameActor(auth.chiUserId, association.actor)) continue;
+        const url = append(endpointUrl(authority.endpoint), "evidence/inspect");
+        url.searchParams.set("sourceId", association.sourceId);
+        const response = await authority.request(url, {
+          redirect: "error",
+          signal: AbortSignal.timeout(30000),
+          headers: { authorization: `Bearer ${auth.sessionToken}` },
+        });
+        await response.body?.cancel();
+        if (response.status !== 404) continue;
+      } catch {
+        continue;
+      }
+      try {
+        const outcome = await this.provenanceRemover({
+          root: record.cwd,
+          user: association.actor,
+          sessionId,
+          ref: association.provenanceRef,
+        });
+        await this.patchAssociation(record.id, {
+          provenanceRemoved: outcome.removed,
+          provenanceError: outcome.removed ? null : outcome.reason,
+        });
+      } catch {
+        // A stored record that is not loaded cannot be patched; the purge stands.
+      }
     }
   }
 
