@@ -186,6 +186,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: windows-latest
+    # native Windows deferred; WSL supported
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
