@@ -914,7 +914,6 @@ export class ChiConnection {
           token: auth.sessionToken,
           repo: pinned.repo,
           sessionId,
-          native: minimised.native,
           mapping,
           expectedHead: pinned.head,
           visibility: pinned.audience ?? (pinned.explicit ? "private" : "shared"),
@@ -924,7 +923,14 @@ export class ChiConnection {
         const { parsed, captured, captureError, warning } = await this.scanAndCapture({
           input,
           full: { native, mapping, coverage, sessionId },
-          minimised: { native: minimised.native, mapping, coverage, sessionId },
+          minimised: {
+            native: minimised.native,
+            mapping,
+            coverage,
+            sessionId,
+            projection: minimised.projection,
+            ...(minimised.git ? { git: minimised.git } : {}),
+          },
           retryConflict,
           ownerId: auth.chiUserId,
           request: authority.request,
@@ -1389,21 +1395,25 @@ export class ChiConnection {
   private aggregateSync(identities: Array<{ association: Association | null }>): {
     pending: boolean;
     error: string | null;
+    warning: string | null;
   } {
     let pending = false;
     let error: string | null = null;
+    let warning: string | null = null;
     for (const { association } of identities) {
       if (!association) continue;
       if (association.capturePending) pending = true;
       if (association.error) error = association.error;
+      if (association.warning) warning = association.warning;
     }
-    return { pending, error };
+    return { pending, error, warning };
   }
 
   async syncStatus(input: { workspaceId: string; cwd: string; retry?: boolean }): Promise<{
     destination: ChiSyncDestination | null;
     pending: boolean;
     error: string | null;
+    warning: string | null;
     mentionsAvailable: boolean;
   }> {
     const identities = await this.workspaceIdentities(input.workspaceId);
@@ -1411,7 +1421,7 @@ export class ChiConnection {
       for (const identity of identities) void this.capture(identity.id).catch(() => undefined);
     const fromAssociations = this.destinationFromIdentities(identities, this.chiConfig());
     const resolved = fromAssociations ?? (await this.resolveForCwd(input.cwd, { cache: true }));
-    const { pending, error } = this.aggregateSync(identities);
+    const { pending, error, warning } = this.aggregateSync(identities);
     const actor = fromAssociations?.actor ?? null;
     return {
       destination: resolved
@@ -1426,6 +1436,7 @@ export class ChiConnection {
         : null,
       pending,
       error,
+      warning,
       mentionsAvailable: Boolean(resolved && resolved.endpoint === this.authority.endpoint),
     };
   }
@@ -1516,9 +1527,18 @@ export class ChiConnection {
       const minimised = minimiseNativeExport({ native, mapping: destination, coverage, sessionId });
       // Continuation content leaves the host too; scan the full export then the
       // minimised form that would upload. Same scanner, same terminal handling.
+      // An omitted-warning verdict is deliberately not recorded here: the
+      // destination's own next settled-turn capture surfaces it for that source.
       await this.scanCapture(
         { native, mapping: destination, coverage, sessionId },
-        { native: minimised.native, mapping: destination, coverage, sessionId },
+        {
+          native: minimised.native,
+          mapping: destination,
+          coverage,
+          sessionId,
+          projection: minimised.projection,
+          ...(minimised.git ? { git: minimised.git } : {}),
+        },
       );
       const publication: PublishRequest = {
         id,

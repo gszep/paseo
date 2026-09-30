@@ -7,6 +7,15 @@ import { Button } from "@/components/ui/button";
 const NOTICE_TITLE =
   "For others to see this session and for its mentions to appear, sync needs to succeed.";
 
+export const OMITTED_CONTENT_WARNING =
+  "A secret was found in content that was left out of the upload. Rotate it or clean the session history.";
+
+/** Non-blocking warning copy; the capture synced, but omitted content held a secret. */
+export function syncWarningReason(code: string): string {
+  if (code === "capture-local-secret-omitted-content") return OMITTED_CONTENT_WARNING;
+  return "This session synced with content left out of the upload.";
+}
+
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {
   if (!code) return "Sync did not complete. Retry when this host is back online.";
@@ -57,6 +66,32 @@ export function SyncNoticeView({
             Retry
           </Button>
         )}
+      </Alert>
+    </View>
+  );
+}
+
+/**
+ * Non-blocking warning notice: the capture synced, but omitted content held a
+ * secret. Dismiss only; there is nothing to retry.
+ */
+export function SyncWarningView({
+  warning,
+  onDismiss,
+}: {
+  warning: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <View style={styles.container} testID="chi-sync-warning">
+      <Alert
+        variant="warning"
+        title="Synced with a hidden secret"
+        description={syncWarningReason(warning)}
+      >
+        <Button size="sm" variant="ghost" onPress={onDismiss}>
+          Dismiss
+        </Button>
       </Alert>
     </View>
   );

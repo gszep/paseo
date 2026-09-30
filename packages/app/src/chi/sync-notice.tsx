@@ -1,12 +1,13 @@
 import { isTerminalSecretError } from "./sync-destination";
-import { SyncNoticeView, useSyncNoticeDismissal } from "./sync-notice-view";
+import { SyncNoticeView, SyncWarningView, useSyncNoticeDismissal } from "./sync-notice-view";
 import { useSyncDestination } from "./use-sync-destination";
 
-export { syncNoticeReason } from "./sync-notice-view";
+export { syncNoticeReason, syncWarningReason, OMITTED_CONTENT_WARNING } from "./sync-notice-view";
 
 /**
- * A single dismissible sync notice, mounted outside the chat feed. Dismissal
- * hides the notice but keeps the pending sync state; a later success clears it.
+ * A single dismissible sync notice, mounted outside the chat feed. An error
+ * hides behind its own dismissal; an omitted-content warning (the capture
+ * synced) is non-blocking and shown only when there is no error.
  */
 export function WorkspaceSyncNotice({
   serverId,
@@ -16,14 +17,20 @@ export function WorkspaceSyncNotice({
   workspaceId: string;
 }) {
   const state = useSyncDestination(serverId, workspaceId);
-  const { visible, dismiss } = useSyncNoticeDismissal(state.error);
-  if (!state.error || !visible) return null;
-  return (
-    <SyncNoticeView
-      error={state.error}
-      terminal={isTerminalSecretError(state.error)}
-      onDismiss={dismiss}
-      onRetry={state.retry}
-    />
-  );
+  const errorDismissal = useSyncNoticeDismissal(state.error);
+  const warningDismissal = useSyncNoticeDismissal(state.warning);
+  if (state.error && errorDismissal.visible) {
+    return (
+      <SyncNoticeView
+        error={state.error}
+        terminal={isTerminalSecretError(state.error)}
+        onDismiss={errorDismissal.dismiss}
+        onRetry={state.retry}
+      />
+    );
+  }
+  if (!state.error && state.warning && warningDismissal.visible) {
+    return <SyncWarningView warning={state.warning} onDismiss={warningDismissal.dismiss} />;
+  }
+  return null;
 }
