@@ -181,7 +181,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
           },
           // Quarantine recovery is the subject here; the real gitleaks binary
           // is not part of the unit environment.
-          localScan: async () => {},
+          scanCapture: async () => ({ verdict: "clean" as const }),
         },
       });
     try {
@@ -321,7 +321,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
             },
             // Recovery is the subject here; the real gitleaks binary is not
             // part of the unit environment.
-            localScan: async () => {},
+            scanCapture: async () => ({ verdict: "clean" as const }),
           },
         });
         const runtime: NativeRuntime = {
