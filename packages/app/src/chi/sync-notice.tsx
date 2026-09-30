@@ -1,4 +1,4 @@
-import { isTerminalSecretError } from "./sync-destination";
+import { isTerminalSyncError } from "./sync-destination";
 import { SyncNoticeView, SyncWarningView, useSyncNoticeDismissal } from "./sync-notice-view";
 import { useSyncDestination } from "./use-sync-destination";
 
@@ -23,7 +23,7 @@ export function WorkspaceSyncNotice({
     return (
       <SyncNoticeView
         error={state.error}
-        terminal={isTerminalSecretError(state.error)}
+        terminal={isTerminalSyncError(state.error)}
         onDismiss={errorDismissal.dismiss}
         onRetry={state.retry}
       />

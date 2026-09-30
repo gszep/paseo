@@ -2019,26 +2019,35 @@ describe("automatic sync destinations", () => {
     expect(f.evidence).toHaveLength(1);
   });
 
-  it("blocks a local secret finding before any upload and stops automatic retries", async () => {
-    const f = await syncFixture();
-    const agent = await f.register();
-    const scanCapture = vi.fn(async () => {
-      throw new Error("capture-local-secret-rejected");
-    });
-    const connection = f.connect(undefined, scanCapture);
-    await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-secret-rejected");
-    expect(f.evidenceAttempts()).toBe(0);
-    expect(f.evidence).toHaveLength(0);
-    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
-      error: "capture-local-secret-rejected",
-      capturePending: false,
-    });
-    const afterCapture = scanCapture.mock.calls.length;
-    connection.afterTurn(agent.id);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(scanCapture.mock.calls.length).toBe(afterCapture);
-    expect(f.evidenceAttempts()).toBe(0);
-  });
+  it.each(["capture-local-secret-rejected", "capture-local-cut-scan-limit"])(
+    "blocks %s before any upload, surfaces its reason and stops automatic retries",
+    async (code) => {
+      const f = await syncFixture();
+      const agent = await f.register();
+      const scanCapture = vi.fn(async () => {
+        throw new Error(code);
+      });
+      const connection = f.connect(undefined, scanCapture);
+      await expect(connection.capture(agent.id)).rejects.toThrow(code);
+      expect(f.evidenceAttempts()).toBe(0);
+      expect(f.evidence).toHaveLength(0);
+      expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+        error: code,
+        capturePending: false,
+      });
+      const afterCapture = scanCapture.mock.calls.length;
+      expect(await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).toMatchObject({
+        error: code,
+        pending: false,
+      });
+      connection.afterTurn(agent.id);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(scanCapture.mock.calls.length).toBe(afterCapture);
+      await connection.reconcilePending();
+      expect(scanCapture.mock.calls.length).toBe(afterCapture);
+      expect(f.evidenceAttempts()).toBe(0);
+    },
+  );
 
   it("fails closed when the local scanner is unavailable and retries on the next turn", async () => {
     const f = await syncFixture();

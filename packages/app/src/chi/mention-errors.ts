@@ -12,6 +12,8 @@ export function mentionError(error: unknown): string {
       "This workspace is local. Only workspaces mapped to a destination deliver human mentions.",
     "capture-local-secret-rejected":
       "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.",
+    "capture-local-cut-scan-limit":
+      "This session exceeds the local truncation safety-scan limit. Nothing was uploaded. Start a shorter session or keep this session local.",
     "capture-local-scanner-unavailable":
       "The secret scanner is unavailable on this host, so nothing was uploaded. Install gitleaks on the host to sync this session.",
     "evidence-http-422-server-secret-scan-rejected":

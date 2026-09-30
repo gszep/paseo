@@ -108,6 +108,21 @@ describe("SyncNoticeView", () => {
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
     expect(container.textContent).toContain("The secret scanner is unavailable on this host");
   });
+  it("explains a terminal cut-scan limit without claiming a secret finding", () => {
+    const { container } = mount(
+      <SyncNoticeView
+        error="capture-local-cut-scan-limit"
+        terminal
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain(
+      "This session exceeds the local truncation safety-scan limit. Nothing was uploaded.",
+    );
+    expect(container.textContent).not.toContain("A secret was detected");
+    expect(button(container, "Retry")).toBeUndefined();
+  });
   it("renders the non-blocking omitted-content warning with Dismiss only", () => {
     const { container } = mount(
       <SyncWarningView warning="capture-local-secret-omitted-content" onDismiss={vi.fn()} />,

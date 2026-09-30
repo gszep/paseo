@@ -143,10 +143,11 @@ function sameActor(a: string, b: string): boolean {
   // login as typed by either the mention path (lowercased) or the capture path.
   return a.toLowerCase() === b.toLowerCase();
 }
-/** Secret rejections are terminal: never auto-retry, never "reconnect and retry".
+/** Secret rejections and cut-scan limits are terminal: never auto-retry.
  * A missing local scanner is retryable (install it and the next turn/reconnect retries). */
 const TERMINAL_SYNC_ERRORS = new Set<string>([
   "capture-local-secret-rejected",
+  "capture-local-cut-scan-limit",
   "evidence-http-422-server-secret-scan-rejected",
 ]);
 function isTerminalSyncError(error: string | null | undefined): boolean {

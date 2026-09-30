@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { mentionError } from "./mention-errors";
-import { isTerminalSecretError } from "./sync-destination";
+import { isTerminalSyncError } from "./sync-destination";
 
 const SECRET_COPY =
   "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.";
@@ -13,7 +13,7 @@ test.each(["capture-local-secret-rejected", "evidence-http-422-server-secret-sca
     const message = mentionError(new Error(code));
     expect(message).toBe(SECRET_COPY);
     expect(message).not.toContain("Reconnect");
-    expect(isTerminalSecretError(code)).toBe(true);
+    expect(isTerminalSyncError(code)).toBe(true);
   },
 );
 
@@ -22,11 +22,19 @@ test("maps a missing local scanner to the host-dependency copy", () => {
   expect(message).toBe(SCANNER_COPY);
   expect(message).not.toContain("Reconnect");
   // Retryable: installing gitleaks and retrying can succeed.
-  expect(isTerminalSecretError("capture-local-scanner-unavailable")).toBe(false);
+  expect(isTerminalSyncError("capture-local-scanner-unavailable")).toBe(false);
 });
 
 test("a transient failure still suggests a retry, not the secret copy", () => {
   const message = mentionError(new Error("evidence-http-503"));
   expect(message).not.toBe(SECRET_COPY);
-  expect(isTerminalSecretError("evidence-http-503")).toBe(false);
+  expect(isTerminalSyncError("evidence-http-503")).toBe(false);
+});
+
+test("a cut-scan limit explains capacity without claiming a secret was found", () => {
+  const code = "capture-local-cut-scan-limit";
+  expect(mentionError(new Error(code))).toBe(
+    "This session exceeds the local truncation safety-scan limit. Nothing was uploaded. Start a shorter session or keep this session local.",
+  );
+  expect(isTerminalSyncError(code)).toBe(true);
 });

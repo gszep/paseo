@@ -19,6 +19,8 @@ export function syncWarningReason(code: string): string {
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {
   if (!code) return "Sync did not complete. Retry when this host is back online.";
+  if (code === "capture-local-cut-scan-limit")
+    return "This session exceeds the local truncation safety-scan limit. Nothing was uploaded. Start a shorter session or keep this session local.";
   if (
     code === "capture-local-secret-rejected" ||
     code === "evidence-http-422-server-secret-scan-rejected"
