@@ -12,9 +12,19 @@ export async function loadDaemonClientConstructor<ClientConfig, ClientInstance>(
   const moduleUrl = pathToFileURL(
     path.join(repoRoot, "packages/client/dist/daemon-client.js"),
   ).href;
-  const mod = (await import(moduleUrl)) as {
-    DaemonClient: new (config: ClientConfig) => ClientInstance;
-  };
+  console.log("DEBUG_RESOLVE_RELAY", import.meta.resolve("@getpaseo/relay/e2ee"));
+  console.log("DEBUG_RESOLVE_CLIENT", import.meta.resolve("@getpaseo/client"));
+  let mod;
+  try {
+    mod = (await import(moduleUrl)) as {
+      DaemonClient: new (config: ClientConfig) => ClientInstance;
+    };
+  } catch (error) {
+    console.log("DEBUG_IMPORT_ERR", (error as Error).message);
+    const relay = await import("@getpaseo/relay/e2ee").catch((e) => ({ err: String(e) }));
+    console.log("DEBUG_RELAY_KEYS", Object.keys(relay));
+    throw error;
+  }
   return mod.DaemonClient;
 }
 
