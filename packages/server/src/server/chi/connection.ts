@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import {
   retryCaptureNative,
   prepareNativeCapture,
   minimiseNativeExport,
+  MINIMISER_VERSION,
   scanCaptureVerdict,
   type CaptureInput,
   type LocalScanInput,
@@ -388,8 +390,10 @@ export class ChiConnection {
   // Status polls re-resolve the same cwd repeatedly; capture still re-reads the
   // remote. Cleared whenever the chi config reloads.
   private readonly originCache = new Map<string, string>();
-  // Rotating cursor for the bounded startup provenance-orphan sweep.
+  // Rotating cursor for the bounded startup provenance-orphan sweep, persisted
+  // so a restart resumes rather than restarting the tail.
   private orphanSweepCursor = 0;
+  private orphanCursorLoaded = false;
   constructor(
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
@@ -1262,6 +1266,7 @@ export class ChiConnection {
    */
   async reconcileProvenanceOrphans(): Promise<void> {
     const records = (await this.options.listStoredAgents?.()) ?? [];
+    this.loadOrphanCursor();
     if (records.length === 0) return;
     const cap = 50;
     const start = this.orphanSweepCursor % records.length;
@@ -1280,6 +1285,36 @@ export class ChiConnection {
       }
     }
     this.orphanSweepCursor = (start + Math.max(checked, 1)) % records.length;
+    this.persistOrphanCursor();
+  }
+
+  private orphanCursorPath(): string {
+    return join(this.options.home, "chi", "provenance-sweep.json");
+  }
+
+  private loadOrphanCursor(): void {
+    if (this.orphanCursorLoaded) return;
+    this.orphanCursorLoaded = true;
+    try {
+      const parsed = JSON.parse(readFileSync(this.orphanCursorPath(), "utf8")) as {
+        cursor?: unknown;
+      };
+      if (Number.isSafeInteger(parsed?.cursor) && (parsed.cursor as number) >= 0)
+        this.orphanSweepCursor = parsed.cursor as number;
+    } catch {
+      // First run, or an unreadable cursor: start from zero.
+    }
+  }
+
+  private persistOrphanCursor(): void {
+    try {
+      mkdirSync(join(this.options.home, "chi"), { recursive: true, mode: 0o700 });
+      writeFileSync(this.orphanCursorPath(), JSON.stringify({ cursor: this.orphanSweepCursor }), {
+        mode: 0o600,
+      });
+    } catch {
+      // Best-effort; a failed write only loses rotation progress.
+    }
   }
 
   /** Only a confirmed 404 purges; 401/403/5xx/network/actor mismatch do not. */
@@ -1293,7 +1328,7 @@ export class ChiConnection {
       const response = await authority.request(url, {
         redirect: "error",
         signal: AbortSignal.timeout(30000),
-        headers: { authorization: `Bearer ${auth.sessionToken}` },
+        headers: { authorization: `Bearer ${auth.sessionToken}`, "x-chi-repo": association.repo },
       });
       await response.body?.cancel();
       return response.status === 404;
@@ -1561,6 +1596,32 @@ export class ChiConnection {
         capture: z.unknown(),
       })
       .parse(saved);
+    // A saved receipt may predate this build. Never transmit it unchanged:
+    // require the supported v2 min-v1 projection and scan its exact capture
+    // (the same bytes that would publish).
+    const receiptCapture = z
+      .object({
+        harness: z.literal("opencode-v2"),
+        version: z.literal(2),
+        native: z.string(),
+        coverage: z.object({ kind: z.enum(["export", "partial"]), reason: z.string().nullable() }),
+        projection: z.object({
+          kind: z.literal("minimised"),
+          minimiser: z.literal(MINIMISER_VERSION),
+        }),
+        git: z.object({ branch: z.string(), commit: z.string() }).optional(),
+      })
+      .safeParse(publication.capture);
+    if (!receiptCapture.success) throw new Error("chi-conversation-capture-unminimised");
+    const receiptScan = {
+      native: receiptCapture.data.native,
+      mapping: destination,
+      coverage: receiptCapture.data.coverage,
+      sessionId,
+      projection: receiptCapture.data.projection,
+      ...(receiptCapture.data.git ? { git: receiptCapture.data.git } : {}),
+    };
+    await this.scanCapture(receiptScan, receiptScan);
     // A complete visible winner may have been linked by a competing process
     // whose directory sync is still pending. Every publisher owns this barrier.
     await syncConversationReceiptDirectory(publicationPath);

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
-import { prepareNativeCapture } from "@henkaku-center/chi-native/capture";
+import { minimiseNativeExport, prepareNativeCapture } from "@henkaku-center/chi-native/capture";
 import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority, type ChiConnectionOptions } from "./connection.js";
@@ -53,7 +53,7 @@ async function fixture() {
     sessionID: "ses_source",
     boundary: { type: "through", messageID: "msg_source" },
   };
-  const payload = { text: "fixture", type: "text" };
+  const payload = { text: "fixture", type: "user" };
   const transfer = {
     info: { id: "ses_fork", location: { directory: home }, fork: nativeFork },
     messages: [{ id: "msg_fork", ...payload }],
@@ -590,7 +590,7 @@ describe("Chi owner recovery", () => {
     f.runtime.identity = "http://new-process-after-crash";
     const first = await f.restart().continue(f.input, f.registration);
     expect(first.snapshot.id).toBe("paseo-agent");
-    f.nativeTransfer.messages.push({ id: "msg_new", type: "text", text: "later work" });
+    f.nativeTransfer.messages.push({ id: "msg_new", type: "user", text: "later work" });
     f.runtime.identity = "http://restarted-runtime-port";
     const recovered = await f.restart().continue(f.input, f.registration);
     expect(recovered.snapshot.id).toBe(first.snapshot.id);
@@ -1024,7 +1024,7 @@ describe("canonical Chi coordination", () => {
     const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
     const original = await readFile(publicationPath, "utf8");
     await f.restart().withPromptAdmission("paseo-agent", async () => {
-      native.messages.push({ id: "msg_later", type: "text", text: "later turn" });
+      native.messages.push({ id: "msg_later", type: "user", text: "later turn" });
     });
     releaseB.resolve();
     await b;
@@ -1040,6 +1040,78 @@ describe("canonical Chi coordination", () => {
     ]);
     expect(f.registration.register).toHaveBeenCalledTimes(1);
     expect(f.runtime.fork).not.toHaveBeenCalled();
+  });
+
+  it("refuses a legacy v1 publication receipt before transmitting it", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
+    // A pre-upgrade receipt carries a full v1 capture; it must never publish.
+    await writeFile(
+      publicationPath,
+      JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture: {
+          version: 1,
+          harness: "opencode-v2",
+          mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+          coverage: { kind: "export", reason: null },
+          native: JSON.stringify({
+            info: { id: "ses_fork" },
+            messages: [{ id: "msg", type: "user", text: "raw tool output" }],
+          }),
+        },
+      }),
+      { mode: 0o600 },
+    );
+    await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
+      "chi-conversation-capture-unminimised",
+    );
+    expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toHaveLength(0);
+  });
+
+  it("scans a valid saved publication receipt before publishing it", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
+    const capture = minimiseNativeExport({
+      native: JSON.stringify({
+        info: { id: "ses_fork" },
+        messages: [{ id: "msg", type: "user", text: "x" }],
+      }),
+      mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+      coverage: { kind: "export", reason: null },
+      sessionId: "ses_fork",
+    });
+    await writeFile(
+      publicationPath,
+      JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture,
+      }),
+      { mode: 0o600 },
+    );
+    const recorded: string[] = [];
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      scanCapture: async () => {
+        recorded.push("scan");
+        throw new Error("capture-local-secret-rejected");
+      },
+    });
+    await expect(connection.continue(f.input, f.registration)).rejects.toThrow(
+      "capture-local-secret-rejected",
+    );
+    expect(recorded).toEqual(["scan"]);
+    expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toHaveLength(0);
   });
 
   it("merges a delayed Share capture with preparation using replaced snapshot labels", async () => {
@@ -2072,8 +2144,10 @@ describe("automatic sync destinations", () => {
       return { removed: true, ref: input.ref ?? "", reason: "purged" };
     };
     const base = f.authority.request;
+    const inspectHeaders: Array<Record<string, string>> = [];
     f.authority.request = (async (url, init) => {
       if (new URL(String(url)).pathname === "/evidence/inspect") {
+        inspectHeaders.push(init?.headers as Record<string, string>);
         return new Response(null, { status: 404 });
       }
       return base(url, init);
@@ -2102,6 +2176,7 @@ describe("automatic sync destinations", () => {
     await connection.reconcileProvenanceOrphans();
     expect(removed).toHaveLength(1);
     expect(removed[0].ref).toBe("refs/chi/provenance/owner/ses_fork");
+    expect(inspectHeaders[0]?.["x-chi-repo"]).toBe("github:fixture/repo");
   });
 
   it("does not purge when the inspect read is denied, failing or actor-mismatched", async () => {
@@ -2195,6 +2270,46 @@ describe("automatic sync destinations", () => {
     expect(nextRun).toHaveLength(50);
     expect(nextRun.slice(0, 10).every((ref) => !firstRun.has(ref))).toBe(true);
     expect(new Set(removed).size).toBe(60);
+  });
+
+  it("persists the orphan sweep cursor across a restart", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        return new Response(null, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const records = Array.from({ length: 60 }, (_, i) => ({
+      id: `stored-${i}`,
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: `refs/chi/provenance/owner/ses_${i}`,
+        }),
+      },
+    }));
+    const options = { provenanceRemover, listStoredAgents: async () => records };
+    await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(50);
+    // A fresh connection (a daemon restart) resumes at the persisted cursor.
+    await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(100);
+    expect(removed[50].endsWith("ses_50")).toBe(true);
   });
 
   it("writes provenance even when the upload fails, without blocking the retry", async () => {
