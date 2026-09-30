@@ -59,6 +59,13 @@ import {
   type ChiDestinationsConfig,
   type ResolvedChiDestination,
 } from "./destinations.js";
+import {
+  removeProvenance,
+  writeProvenance,
+  type ProvenanceRemover,
+  type ProvenanceWriter,
+} from "./provenance.js";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 
 const label = "chi.native";
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -81,6 +88,11 @@ const associationSchema = z.object({
   // True for associations created by the explicit canonical-transfer path on an
   // unmapped repository; they keep legacy default-deployment capture.
   explicit: z.boolean().optional(),
+  // Hidden provenance ref written after a settled turn in a mapped workspace.
+  provenanceRef: z.string().optional(),
+  // Owner deletion outcome: whether the hidden ref was removed from the remote.
+  provenanceRemoved: z.boolean().optional(),
+  provenanceError: z.string().nullable().optional(),
   adopt: z.object({ id: z.string(), sourceId: hash, expectedHead: hash }).optional(),
   reserve: z
     .object({
@@ -161,6 +173,11 @@ export interface ChiConnectionOptions {
   getChiConfig?: () => MutableChiConfig | undefined;
   /** Local pre-upload secret scan; defaults to the vendored chi-native scanner. */
   localScan?: (input: LocalScanInput) => Promise<void>;
+  /** Hidden provenance writer; defaults to the vendored chi-native writer. */
+  provenance?: ProvenanceWriter;
+  provenanceRemover?: ProvenanceRemover;
+  /** Scanner binary forwarded to the default provenance writer (tests). */
+  provenanceScanner?: string;
   /** Persisted agents not yet loaded into memory, for restart reconciliation. */
   listStoredAgents?: () => Promise<readonly StoredChiAgent[]>;
   getStoredAgent?: (agentId: string) => Promise<StoredChiAgent | null>;
@@ -357,6 +374,8 @@ export class ChiConnection {
   private readonly continuing = new Set<string>();
   private readonly authority: ChiAuthority;
   private readonly localScan: (input: LocalScanInput) => Promise<void>;
+  private readonly provenanceWriter: ProvenanceWriter;
+  private readonly provenanceRemover: ProvenanceRemover;
   private readonly authorityByEndpoint = new Map<string, ChiAuthority>();
   // Status polls re-resolve the same cwd repeatedly; capture still re-reads the
   // remote. Cleared whenever the chi config reloads.
@@ -367,6 +386,8 @@ export class ChiConnection {
   ) {
     this.authority = options.authority ?? createDeployment();
     this.localScan = options.localScan ?? ((input) => scanNativeCapture(input));
+    this.provenanceWriter = options.provenance ?? writeProvenance;
+    this.provenanceRemover = options.provenanceRemover ?? removeProvenance;
     this.authorityByEndpoint.set(this.authority.endpoint, this.authority);
     this.mentions = new ChiMentions(options.home, {
       endpoint: this.authority.endpoint,
@@ -914,10 +935,44 @@ export class ChiConnection {
             })),
           });
         }
+        // After capture: snapshot the working tree into the hidden provenance ref.
+        // Mapped workspaces only, best-effort, and never on the prompt path.
+        if (pinned.destination && !pinned.paused) {
+          try {
+            const outcome = this.provenanceWriter({
+              root: target.cwd,
+              user: auth.chiUserId,
+              sessionId,
+              repo: pinned.repo,
+              sourceId: captured.sourceId,
+              head: captured.head,
+              evidence: parsed,
+              continuation: Boolean(target.labels["chi.continuation"]),
+              delegation: this.delegationFor(target),
+              ...(this.options.provenanceScanner
+                ? { scanner: this.options.provenanceScanner }
+                : {}),
+            });
+            if (outcome.created) {
+              await this.patchAssociation(agentId, {
+                provenanceRef: outcome.ref,
+                provenanceError: null,
+              });
+            }
+          } catch {
+            // Provenance never blocks a settled turn.
+          }
+        }
         return updated;
       });
     } catch (error) {
       const code = safeChiError(error);
+      // Owner deletion: the backend fences the deleted source with
+      // `object-deleted`; the daemon holds the user's git credentials, so it
+      // removes the matching hidden provenance refs best-effort.
+      if (code.endsWith("object-deleted")) {
+        void this.purgeProvenance(agentId, target, association).catch(() => undefined);
+      }
       // A terminal secret-scan rejection must not be retried automatically and
       // must not be persisted as a durable capture-needed state.
       if (isTerminalSyncError(code)) {
@@ -973,6 +1028,40 @@ export class ChiConnection {
 
   private pauseAssociation(agentId: string, code: string): Promise<Association> {
     return this.patchAssociation(agentId, { paused: true, capturePending: false, error: code });
+  }
+
+  /** A delegated agent's parent session, for `origin: delegation`. */
+  private delegationFor(target: CaptureTarget): { parentSessionId: string } | null {
+    const parentId = target.labels[PARENT_AGENT_ID_LABEL];
+    if (!parentId) return null;
+    const parent = this.manager.getAgent(parentId);
+    const sessionId =
+      parent?.persistence?.nativeHandle ?? parent?.persistence?.sessionId ?? parentId;
+    return { parentSessionId: sessionId };
+  }
+
+  /** Best-effort owner-deletion sweep for the source's hidden provenance ref. */
+  private async purgeProvenance(
+    agentId: string,
+    target: CaptureTarget,
+    association: Association,
+  ): Promise<void> {
+    const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
+    if (!sessionId || !association.actor) return;
+    try {
+      const outcome = this.provenanceRemover({
+        root: target.cwd,
+        user: association.actor,
+        sessionId,
+        ...(association.provenanceRef ? { ref: association.provenanceRef } : {}),
+      });
+      await this.patchAssociation(agentId, {
+        provenanceRemoved: outcome.removed,
+        provenanceError: outcome.removed ? null : outcome.reason,
+      });
+    } catch {
+      // Deletion is best-effort; a failed sweep retries on the next capture attempt.
+    }
   }
 
   afterTurn(agentId: string): void {
