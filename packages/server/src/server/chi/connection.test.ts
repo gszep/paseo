@@ -1101,7 +1101,7 @@ describe("canonical Chi coordination", () => {
       mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
       coverage: { kind: "export", reason: null },
       sessionId: "ses_fork",
-    });
+    }).capture;
     await writeFile(
       publicationPath,
       JSON.stringify({
@@ -1148,7 +1148,7 @@ describe("canonical Chi coordination", () => {
         native: JSON.stringify({ info: { id: "ses_fork" }, messages: [] }),
         mapping: f.claim.destination,
         coverage: { kind: "export", reason: null },
-      });
+      }).capture;
       if (kind === "raw-output")
         capture.native = JSON.stringify({
           info: { id: "ses_fork" },
@@ -1626,7 +1626,7 @@ describe("automatic sync destinations", () => {
         mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
         coverage: { kind: "export", reason: null },
         sessionId: "ses_fork",
-      }),
+      }).capture,
       sessionId: "ses_fork",
     }).sourceId;
     const base = f.authority.request;
@@ -2478,6 +2478,42 @@ describe("automatic sync destinations", () => {
       clock.mockReturnValue(1_900_000);
       await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
       expect(inspected).toHaveLength(4);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("clamps a loaded far-future orphan check to 24 hours and persists it across restarts", async () => {
+    const f = await syncFixture();
+    const inspected: string[] = [];
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") inspected.push(String(url));
+      return base(url, init);
+    }) as typeof fetch;
+    const cursorPath = join(f.home, "chi", "provenance-sweep.json");
+    await mkdir(join(f.home, "chi"), { recursive: true });
+    await writeFile(
+      cursorPath,
+      JSON.stringify({
+        cursor: 0,
+        backoff: {
+          stored: { nextCheck: Number.MAX_SAFE_INTEGER, delay: 300_000 },
+        },
+      }),
+    );
+    const options = { listStoredAgents: async () => [orphanRecord(f)] };
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(0);
+      expect(JSON.parse(await readFile(cursorPath, "utf8")).backoff.stored.nextCheck).toBe(
+        now + 24 * 60 * 60 * 1000,
+      );
+      clock.mockReturnValue(now + 24 * 60 * 60 * 1000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(1);
     } finally {
       clock.mockRestore();
     }
