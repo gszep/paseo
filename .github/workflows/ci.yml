@@ -186,12 +186,13 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: windows-latest
-    # native Windows deferred; WSL supported
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest]
         opencode: ["opencode-ai@1.14.46", "@opencode/cli@2.0.10"]
+    # native Windows deferred; WSL supported
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps: *server_test_steps
 
   desktop-tests-ubuntu:
