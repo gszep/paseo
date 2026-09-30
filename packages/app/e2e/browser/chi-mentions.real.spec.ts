@@ -21,6 +21,14 @@ const CHI_CONFIG = {
   ],
 };
 
+/**
+ * An obviously fake key that gitleaks' default Google API rule still detects.
+ * Assembled from parts so no committed literal matches a real key pattern.
+ */
+const SYNTHETIC_GOOGLE_API_KEY = ["AI", "za", "SyA", "1234567890", "abcdefghijklmnopqrstuv"].join(
+  "",
+);
+
 async function openActions(page: Page) {
   await page.getByTestId("workspace-header-menu-trigger").click();
   await expect(page.getByTestId("workspace-header-menu")).toBeVisible();
@@ -782,7 +790,7 @@ test.describe("sync destinations (rendered)", () => {
       await expect(composerLocator(page)).toBeVisible({ timeout: 60000 });
       const before = (await sender.sources()).length;
       // An obviously fake Google API key: gitleaks' default rules detect it locally.
-      await sendPrompt(page, `leaked AIzaSyA1234567890abcdefghijklmnopqrstuv ${runId}`);
+      await sendPrompt(page, `leaked ${SYNTHETIC_GOOGLE_API_KEY} ${runId}`);
       await expect(page.getByTestId("chi-sync-notice")).toContainText(
         "A secret was detected in this session's history. Nothing was uploaded.",
         { timeout: 90000 },
