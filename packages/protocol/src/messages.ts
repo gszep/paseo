@@ -1911,6 +1911,8 @@ export const ChiSyncResponseSchema = z.object({
       destination: ChiSyncDestinationSchema.nullable(),
       pending: z.boolean(),
       error: z.string().nullable(),
+      /** Non-blocking capture warning, e.g. a secret only in omitted content. */
+      warning: z.string().nullable().optional(),
       /** False when the destination is a peer deployment that cannot deliver mentions. */
       mentionsAvailable: z.boolean().optional(),
     }),

@@ -16,12 +16,15 @@ export interface SyncDestinationResponse {
   destination: SyncDestination | null;
   pending: boolean;
   error: string | null;
+  /** Non-blocking capture warning, e.g. a secret only in omitted content. */
+  warning?: string | null;
   /** False when the destination is a peer deployment that cannot deliver mentions. */
   mentionsAvailable?: boolean;
 }
 
 export interface SyncDestinationState extends SyncDestinationResponse {
   mentionsAvailable: boolean;
+  warning: string | null;
   /** True until the first status response for a connected host. Never a local verdict. */
   loading: boolean;
   retry: () => void;
@@ -41,6 +44,7 @@ export function deriveSyncDestinationState(input: {
     destination: input.response?.destination ?? null,
     pending: input.response?.pending ?? false,
     error: input.response?.error ?? null,
+    warning: input.response?.warning ?? null,
     mentionsAvailable: input.response?.mentionsAvailable ?? false,
     loading: input.loading,
     retry: input.retry,

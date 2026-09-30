@@ -6,10 +6,11 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
-import { prepareNativeCapture } from "@henkaku-center/chi-native/capture";
+import { minimiseNativeExport, prepareNativeCapture } from "@henkaku-center/chi-native/capture";
 import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
-import { ChiConnection, type ChiAuthority } from "./connection.js";
+import { ChiConnection, type ChiAuthority, type ChiConnectionOptions } from "./connection.js";
+import type { ProvenanceRemover, ProvenanceWriter } from "./provenance.js";
 import { classifyMentionFailure } from "./mention-failure.js";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
@@ -52,7 +53,7 @@ async function fixture() {
     sessionID: "ses_source",
     boundary: { type: "through", messageID: "msg_source" },
   };
-  const payload = { text: "fixture", type: "text" };
+  const payload = { text: "fixture", type: "user" };
   const transfer = {
     info: { id: "ses_fork", location: { directory: home }, fork: nativeFork },
     messages: [{ id: "msg_fork", ...payload }],
@@ -144,7 +145,7 @@ async function fixture() {
       home,
       serverId: "server",
       authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
   return {
     home,
@@ -589,7 +590,7 @@ describe("Chi owner recovery", () => {
     f.runtime.identity = "http://new-process-after-crash";
     const first = await f.restart().continue(f.input, f.registration);
     expect(first.snapshot.id).toBe("paseo-agent");
-    f.nativeTransfer.messages.push({ id: "msg_new", type: "text", text: "later work" });
+    f.nativeTransfer.messages.push({ id: "msg_new", type: "user", text: "later work" });
     f.runtime.identity = "http://restarted-runtime-port";
     const recovered = await f.restart().continue(f.input, f.registration);
     expect(recovered.snapshot.id).toBe(first.snapshot.id);
@@ -656,7 +657,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "other",
       authority: f.authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
     await expect(otherOwner.continue(f.input, f.registration)).rejects.toThrow(
       "selection-mismatch",
@@ -729,7 +730,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
-      localScan: async () => {
+      scanCapture: async () => {
         throw new Error("capture-local-secret-rejected");
       },
     });
@@ -859,6 +860,22 @@ async function canonicalFixture() {
 }
 
 describe("canonical Chi coordination", () => {
+  it("surfaces attribution-unavailable on Continue without waiting for another turn", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      scanCapture: async () => ({ verdict: "attribution-unavailable" }),
+    });
+    const result = await connection.continue(f.input, f.registration);
+    expect(f.requests.some((request) => request.path.endsWith("/publish"))).toBe(true);
+    expect(JSON.parse(result.snapshot.labels["chi.native"]!).warning).toBe(
+      "capture-local-attribution-unavailable",
+    );
+  });
+
   it("syncs an already-visible publication before HTTP, even while its writer is paused before directory sync", async () => {
     const f = await canonicalFixture();
     await f.ready();
@@ -1011,7 +1028,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
-      localScan: async () => undefined,
+      scanCapture: async () => ({ verdict: "clean" as const }),
     });
     const b = ownerB.continue(f.input, {
       find: async () => structuredClone(bAgent),
@@ -1023,7 +1040,7 @@ describe("canonical Chi coordination", () => {
     const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
     const original = await readFile(publicationPath, "utf8");
     await f.restart().withPromptAdmission("paseo-agent", async () => {
-      native.messages.push({ id: "msg_later", type: "text", text: "later turn" });
+      native.messages.push({ id: "msg_later", type: "user", text: "later turn" });
     });
     releaseB.resolve();
     await b;
@@ -1040,6 +1057,141 @@ describe("canonical Chi coordination", () => {
     expect(f.registration.register).toHaveBeenCalledTimes(1);
     expect(f.runtime.fork).not.toHaveBeenCalled();
   });
+
+  it("refuses a legacy v1 publication receipt before transmitting it", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
+    // A pre-upgrade receipt carries a full v1 capture; it must never publish.
+    await writeFile(
+      publicationPath,
+      JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture: {
+          version: 1,
+          harness: "opencode-v2",
+          mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+          coverage: { kind: "export", reason: null },
+          native: JSON.stringify({
+            info: { id: "ses_fork" },
+            messages: [{ id: "msg", type: "user", text: "raw tool output" }],
+          }),
+        },
+      }),
+      { mode: 0o600 },
+    );
+    await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
+      "chi-conversation-capture-unminimised",
+    );
+    expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toHaveLength(0);
+  });
+
+  it("scans a valid saved publication receipt before publishing it", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    const publicationPath = f.journalPath.replace(".claim.json", ".publication.json");
+    const capture = minimiseNativeExport({
+      native: JSON.stringify({
+        info: { id: "ses_fork" },
+        messages: [{ id: "msg", type: "user", text: "x" }],
+      }),
+      mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+      coverage: { kind: "export", reason: null },
+      sessionId: "ses_fork",
+    });
+    await writeFile(
+      publicationPath,
+      JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture,
+      }),
+      { mode: 0o600 },
+    );
+    const recorded: string[] = [];
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      scanCapture: async (full, minimised) => {
+        expect(minimised).toEqual({
+          native: capture.native,
+          mapping: capture.mapping,
+          coverage: capture.coverage,
+          projection: capture.projection,
+          sessionId: "ses_fork",
+        });
+        expect(full).toEqual(minimised);
+        recorded.push("scan");
+        throw new Error("capture-local-secret-rejected");
+      },
+    });
+    await expect(connection.continue(f.input, f.registration)).rejects.toThrow(
+      "capture-local-secret-rejected",
+    );
+    expect(recorded).toEqual(["scan"]);
+    expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toHaveLength(0);
+  });
+
+  it.each(["raw-output", "mapping", "unknown-field", "unknown-version"])(
+    "refuses an unsafe saved receipt (%s) without rewriting it or transmitting it",
+    async (kind) => {
+      const f = await canonicalFixture();
+      await f.ready();
+      const path = f.journalPath.replace(".claim.json", ".publication.json");
+      const capture = minimiseNativeExport({
+        native: JSON.stringify({ info: { id: "ses_fork" }, messages: [] }),
+        mapping: f.claim.destination,
+        coverage: { kind: "export", reason: null },
+      });
+      if (kind === "raw-output")
+        capture.native = JSON.stringify({
+          info: { id: "ses_fork" },
+          messages: [
+            {
+              id: "msg",
+              type: "assistant",
+              content: [
+                {
+                  type: "tool",
+                  state: {
+                    status: "completed",
+                    input: {},
+                    content: [{ type: "text", text: "private raw output" }],
+                  },
+                },
+              ],
+            },
+          ],
+        });
+      if (kind === "mapping")
+        capture.mapping = {
+          ...capture.mapping,
+          workspace: { ...capture.mapping.workspace, path: "/unscanned/elsewhere" },
+        };
+      if (kind === "unknown-field") Object.assign(capture, { extra: "unscanned receipt bytes" });
+      if (kind === "unknown-version")
+        capture.projection = { kind: "minimised", minimiser: "min-future" };
+      const original = JSON.stringify({
+        id: "conversation",
+        revision: 3,
+        transferId: "transfer",
+        claimId: "claim",
+        capture,
+      });
+      await writeFile(path, original, { mode: 0o600 });
+      await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
+        "chi-conversation-capture-unminimised",
+      );
+      expect(f.requests.filter((r) => r.path.endsWith("/publish"))).toEqual([]);
+      expect(await readFile(path, "utf8")).toBe(original);
+    },
+  );
 
   it("merges a delayed Share capture with preparation using replaced snapshot labels", async () => {
     const f = await fixture();
@@ -1466,11 +1618,15 @@ describe("automatic sync destinations", () => {
     const evidence: Array<{ visibility: string }> = [];
     let failEvidence = false;
     let evidenceRejection: string | null = null;
+    let evidenceRejectionStatus = 422;
     let evidenceAttempts = 0;
     const sourceId = prepareNativeCapture({
-      native: JSON.stringify(f.transfer),
-      mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
-      coverage: { kind: "export", reason: null },
+      capture: minimiseNativeExport({
+        native: JSON.stringify(f.transfer),
+        mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+        coverage: { kind: "export", reason: null },
+        sessionId: "ses_fork",
+      }),
       sessionId: "ses_fork",
     }).sourceId;
     const base = f.authority.request;
@@ -1480,23 +1636,45 @@ describe("automatic sync destinations", () => {
         evidenceAttempts += 1;
         if (failEvidence) throw new Error("network down");
         if (evidenceRejection)
-          return Response.json({ ok: false, reason: evidenceRejection }, { status: 422 });
+          return Response.json(
+            { ok: false, reason: evidenceRejection },
+            { status: evidenceRejectionStatus },
+          );
         const body = JSON.parse(String(init.body)) as { visibility: string };
         evidence.push({ visibility: body.visibility });
         return Response.json({ sourceId, head: "b".repeat(64) });
       }
       return base(url, init);
     }) as typeof fetch;
+    const noopProvenance: Pick<ChiConnectionOptions, "provenance" | "provenanceRemover"> = {
+      provenance: async () => ({
+        attempted: true,
+        created: false,
+        reason: "test-skip",
+        ref: "",
+      }),
+      provenanceRemover: async () => ({ removed: true, ref: "", reason: "test-purge" }),
+    };
     const connect = (
       override = effective,
-      localScan: (input: unknown) => Promise<void> = async () => undefined,
+      scanCapture: (
+        full: unknown,
+        minimised: unknown,
+      ) => Promise<{
+        verdict: "clean" | "omitted-warning" | "attribution-unavailable";
+      }> = async () => ({ verdict: "clean" }),
+      provenance: Pick<
+        ChiConnectionOptions,
+        "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents"
+      > = noopProvenance,
     ) =>
       new ChiConnection(f.manager, {
         home: f.home,
         serverId: "server",
         authority: f.authority,
-        localScan,
+        scanCapture: scanCapture as never,
         getChiConfig: () => override ?? undefined,
+        ...provenance,
       });
     const register = (labels?: Record<string, string>) =>
       f.registration.register("ses_fork", labels ?? {});
@@ -1510,8 +1688,9 @@ describe("automatic sync destinations", () => {
       setFailEvidence: (value: boolean) => {
         failEvidence = value;
       },
-      setEvidenceRejection: (reason: string | null) => {
+      setEvidenceRejection: (reason: string | null, status = 422) => {
         evidenceRejection = reason;
+        evidenceRejectionStatus = status;
       },
     };
   }
@@ -1843,10 +2022,10 @@ describe("automatic sync destinations", () => {
   it("blocks a local secret finding before any upload and stops automatic retries", async () => {
     const f = await syncFixture();
     const agent = await f.register();
-    const localScan = vi.fn(async () => {
+    const scanCapture = vi.fn(async () => {
       throw new Error("capture-local-secret-rejected");
     });
-    const connection = f.connect(undefined, localScan);
+    const connection = f.connect(undefined, scanCapture);
     await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-secret-rejected");
     expect(f.evidenceAttempts()).toBe(0);
     expect(f.evidence).toHaveLength(0);
@@ -1854,20 +2033,20 @@ describe("automatic sync destinations", () => {
       error: "capture-local-secret-rejected",
       capturePending: false,
     });
-    const afterCapture = localScan.mock.calls.length;
+    const afterCapture = scanCapture.mock.calls.length;
     connection.afterTurn(agent.id);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(localScan.mock.calls.length).toBe(afterCapture);
+    expect(scanCapture.mock.calls.length).toBe(afterCapture);
     expect(f.evidenceAttempts()).toBe(0);
   });
 
   it("fails closed when the local scanner is unavailable and retries on the next turn", async () => {
     const f = await syncFixture();
     const agent = await f.register();
-    const localScan = vi.fn(async () => {
+    const scanCapture = vi.fn(async () => {
       throw new Error("capture-local-scanner-unavailable");
     });
-    const connection = f.connect(undefined, localScan);
+    const connection = f.connect(undefined, scanCapture);
     await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-scanner-unavailable");
     expect(f.evidenceAttempts()).toBe(0);
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
@@ -1875,12 +2054,12 @@ describe("automatic sync destinations", () => {
       capturePending: true,
     });
     // Retryable once gitleaks is installed: a settled turn retries (bounded).
-    const afterCapture = localScan.mock.calls.length;
+    const afterCapture = scanCapture.mock.calls.length;
     connection.afterTurn(agent.id);
-    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterCapture));
-    const afterTurn = localScan.mock.calls.length;
+    await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterCapture));
+    const afterTurn = scanCapture.mock.calls.length;
     await connection.reconcilePending();
-    await vi.waitFor(() => expect(localScan.mock.calls.length).toBeGreaterThan(afterTurn));
+    await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterTurn));
     expect(f.evidenceAttempts()).toBe(0);
   });
 
@@ -1901,5 +2080,585 @@ describe("automatic sync destinations", () => {
     connection.afterTurn(agent.id);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(f.evidenceAttempts()).toBe(attempts);
+  });
+
+  it("writes a hidden provenance ref only for a mapped workspace", async () => {
+    const calls: Array<{ root: string; user: string; sessionId: string; repo: string }> = [];
+    const provenance: ProvenanceWriter = async (input) => {
+      calls.push({
+        root: input.root,
+        user: input.user,
+        sessionId: input.sessionId,
+        repo: input.repo,
+      });
+      return {
+        attempted: true,
+        created: true,
+        reason: "created-pushed",
+        ref: `refs/chi/provenance/owner/${input.sessionId}`,
+      };
+    };
+    const mapped = await syncFixture();
+    const agent = await mapped.register();
+    await mapped.connect(undefined, undefined, { provenance }).capture(agent.id);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      root: mapped.home,
+      user: "github:owner",
+      sessionId: "ses_fork",
+      repo: "github:fixture/repo",
+    });
+    const association = JSON.parse(mapped.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.provenanceRef).toBe("refs/chi/provenance/owner/ses_fork");
+  });
+
+  it("records the bounded provenance failure reason on the association", async () => {
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: true,
+      created: false,
+      reason: "secret-scan-rejected",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    const f = await syncFixture();
+    const agent = await f.register();
+    await f.connect(undefined, undefined, { provenance }).capture(agent.id);
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.provenanceError).toBe("secret-scan-rejected");
+  });
+
+  it("scans the full export then uploads only the minimised projection", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    // Add a tool output so the full and minimised natives differ.
+    f.transfer.messages.push({
+      id: "msg_tool",
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          id: "call_1",
+          state: { status: "completed", content: [{ type: "text", text: "TOOL-SECRET-BYTES" }] },
+        },
+      ],
+    });
+    const order: string[] = [];
+    let posted: {
+      capture: {
+        version: number;
+        projection?: { kind: string; minimiser: string };
+        native: string;
+      };
+    } | null = null;
+    const seen: { full: string; minimised: string } = { full: "", minimised: "" };
+    const scanCapture = vi.fn(async (full: { native: string }, minimised: { native: string }) => {
+      order.push("scan");
+      seen.full = full.native;
+      seen.minimised = minimised.native;
+      return { verdict: "clean" as const };
+    });
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence" && init?.method === "POST") {
+        order.push("post");
+        posted = JSON.parse(String(init.body));
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    await f.connect(undefined, scanCapture).capture(agent.id);
+    expect(order).toEqual(["scan", "post"]);
+    expect(seen.full).toContain("TOOL-SECRET-BYTES");
+    expect(seen.minimised).not.toContain("TOOL-SECRET-BYTES");
+    expect(posted).not.toBeNull();
+    expect(posted!.capture.version).toBe(2);
+    expect(posted!.capture.projection).toEqual({ kind: "minimised", minimiser: "min-v1" });
+    expect(posted!.capture.native).not.toContain("TOOL-SECRET-BYTES");
+  });
+
+  it("records a warning and keeps syncing when a finding is only in omitted content", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const scanCapture = vi.fn(async () => ({ verdict: "omitted-warning" as const }));
+    const result = await f.connect(undefined, scanCapture).capture(agent.id);
+    expect(result.sourceId).toBe(f.sourceId);
+    expect(f.evidence).toHaveLength(1);
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.warning).toBe("capture-local-secret-omitted-content");
+  });
+
+  it("does not block other daemon work while a provenance write is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provenance = vi.fn<ProvenanceWriter>(async () => {
+      await gate;
+      return {
+        attempted: true,
+        created: true,
+        reason: "created-pushed",
+        ref: "refs/chi/provenance/owner/ses_fork",
+        pushReason: "pushed",
+      };
+    });
+    const f = await syncFixture();
+    const agent = await f.register();
+    const connection = f.connect(undefined, undefined, { provenance });
+    connection.afterTurn(agent.id);
+    await vi.waitFor(() => expect(provenance).toHaveBeenCalledOnce());
+    // Independent daemon work resolves while the write is still awaiting.
+    await expect(
+      f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home }),
+    ).resolves.toBeTruthy();
+    release();
+    await vi.waitFor(() => {
+      const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+      expect(association.provenanceRef).toBe("refs/chi/provenance/owner/ses_fork");
+    });
+  });
+
+  it("purges a stored association's ref when the backend reports its source gone", async () => {
+    const f = await syncFixture();
+    const removed: Array<{ ref?: string }> = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push({ ref: input.ref });
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    const inspectHeaders: Array<Record<string, string>> = [];
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        inspectHeaders.push(init?.headers as Record<string, string>);
+        return Response.json({ reason: "not-found" }, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const record = {
+      id: "stored-1",
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    };
+    const connection = f.connect(undefined, undefined, {
+      provenanceRemover,
+      listStoredAgents: async () => [record],
+    });
+    await connection.reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(1);
+    expect(removed[0].ref).toBe("refs/chi/provenance/owner/ses_fork");
+    expect(inspectHeaders[0]?.["x-chi-repo"]).toBe("github:fixture/repo");
+  });
+
+  it("does not purge when the inspect read is denied, failing or actor-mismatched", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    const record = (actor: string) => ({
+      id: "stored-1",
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor,
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    });
+    for (const outcome of ["status401", "status403", "status500", "network", "actor"] as const) {
+      f.authority.request = (async (url, init) => {
+        if (new URL(String(url)).pathname === "/evidence/inspect") {
+          if (outcome === "network") throw new Error("network down");
+          if (outcome === "status401") return new Response(null, { status: 401 });
+          if (outcome === "status403") return new Response(null, { status: 403 });
+          if (outcome === "actor") return new Response(null, { status: 404 });
+          return new Response(null, { status: 500 });
+        }
+        return base(url, init);
+      }) as typeof fetch;
+      const actor = outcome === "actor" ? "github:someoneelse" : "github:owner";
+      const connection = f.connect(undefined, undefined, {
+        provenanceRemover,
+        listStoredAgents: async () => [record(actor)],
+      });
+      await connection.reconcileProvenanceOrphans();
+    }
+    expect(removed).toHaveLength(0);
+  });
+
+  it("rotates the bounded sweep instead of starving the tail", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        return Response.json({ reason: "not-found" }, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const records = Array.from({ length: 60 }, (_, i) => ({
+      id: `stored-${String(i).padStart(3, "0")}`,
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: `refs/chi/provenance/owner/ses_${i}`,
+        }),
+      },
+    }));
+    const connection = f.connect(undefined, undefined, {
+      provenanceRemover,
+      listStoredAgents: async () => records,
+    });
+    await connection.reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(50);
+    const firstRun = new Set(removed);
+    await connection.reconcileProvenanceOrphans();
+    // The cursor advances, so the tail is checked first on the next run.
+    expect(removed).toHaveLength(60);
+    const nextRun = removed.slice(50);
+    expect(nextRun).toHaveLength(10);
+    expect(nextRun.slice(0, 10).every((ref) => !firstRun.has(ref))).toBe(true);
+    expect(new Set(removed).size).toBe(60);
+  });
+
+  it("persists the orphan sweep cursor across a restart", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        return Response.json({ reason: "not-found" }, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const records = Array.from({ length: 60 }, (_, i) => ({
+      id: `stored-${String(i).padStart(3, "0")}`,
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: `refs/chi/provenance/owner/ses_${i}`,
+        }),
+      },
+    }));
+    const options = { provenanceRemover, listStoredAgents: async () => records };
+    records.unshift(
+      ...Array.from({ length: 10 }, (_, i) => ({
+        ...records[0],
+        id: `a-ineligible-${i}`,
+        provider: "claude",
+      })),
+    );
+    await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(50);
+    // A fresh connection (a daemon restart) resumes at the persisted cursor.
+    await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(60);
+    expect(removed[50].endsWith("ses_50")).toBe(true);
+  });
+
+  function orphanRecord(f: Awaited<ReturnType<typeof syncFixture>>, id = "stored") {
+    return {
+      id,
+      cwd: f.home,
+      provider: "opencode",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    };
+  }
+
+  it.each(["catalog", "origin"])(
+    "orphan sweep %s access loss leaves the primary login and participants intact",
+    async (loss) => {
+      const f = await syncFixture();
+      const invalidated = vi.spyOn(f.authority, "invalidate");
+      const base = f.authority.request;
+      f.authority.request = (async (url, init) => {
+        if (loss === "catalog" && new URL(String(url)).pathname === "/repos")
+          return Response.json({ ok: true, repos: [] });
+        return base(url, init);
+      }) as typeof fetch;
+      if (loss === "origin")
+        execFileSync("git", [
+          "-C",
+          f.home,
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.com/other/repo.git",
+        ]);
+      const connection = f.connect(undefined, undefined, {
+        listStoredAgents: async () => [orphanRecord(f)],
+      });
+      await connection.reconcileProvenanceOrphans();
+      expect(invalidated).not.toHaveBeenCalled();
+    },
+  );
+
+  it("orphan sweep checks only archived or unloaded records and backs off each across restarts", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const inspected: string[] = [];
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") inspected.push(String(url));
+      return base(url, init);
+    }) as typeof fetch;
+    const records = [orphanRecord(f, agent.id), orphanRecord(f, "unloaded")];
+    const options = { listStoredAgents: async () => records };
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(1);
+      clock.mockReturnValue(1_060_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(1);
+      // A newly archived loaded record is independently eligible during the other's backoff.
+      const archived = { ...records[0], archivedAt: new Date().toISOString() };
+      const archivedOptions = { listStoredAgents: async () => [archived, records[1]] };
+      await f.connect(undefined, undefined, archivedOptions).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(2);
+      clock.mockReturnValue(1_300_000);
+      await f.connect(undefined, undefined, archivedOptions).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(3);
+      clock.mockReturnValue(1_600_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(3); // second retry now waits ten minutes
+      clock.mockReturnValue(1_900_000);
+      await f.connect(undefined, undefined, options).reconcileProvenanceOrphans();
+      expect(inspected).toHaveLength(4);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it.each(["", "<html>Not found</html>", "{}", '{"reason":"repository-denied"}'])(
+    "orphan sweep never purges an ambiguous 404 body: %s",
+    async (body) => {
+      const f = await syncFixture();
+      const base = f.authority.request;
+      f.authority.request = (async (url, init) =>
+        new URL(String(url)).pathname === "/evidence/inspect"
+          ? new Response(body, { status: 404 })
+          : base(url, init)) as typeof fetch;
+      const provenanceRemover = vi.fn<ProvenanceRemover>();
+      await f
+        .connect(undefined, undefined, {
+          provenanceRemover,
+          listStoredAgents: async () => [orphanRecord(f)],
+        })
+        .reconcileProvenanceOrphans();
+      expect(provenanceRemover).not.toHaveBeenCalled();
+    },
+  );
+
+  it("surfaces attribution-unavailable while uploading a clean minimised capture", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const connection = f.connect(undefined, async () => ({ verdict: "attribution-unavailable" }));
+    await connection.capture(agent.id);
+    expect(f.evidence).toHaveLength(1);
+    expect((await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).warning).toBe(
+      "capture-local-attribution-unavailable",
+    );
+  });
+
+  it("retries orphan sweeps while running, serializes slow sweeps, and stops on shutdown", async () => {
+    const f = await syncFixture();
+    const connection = f.connect();
+    const pending = barrier();
+    const sweep = vi
+      .spyOn(connection, "reconcileProvenanceOrphans")
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue(undefined);
+    vi.useFakeTimers();
+    try {
+      connection.startProvenanceSweep();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sweep).toHaveBeenCalledTimes(1);
+      pending.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+      connection.stopProvenanceSweep();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(sweep).toHaveBeenCalledTimes(2);
+    } finally {
+      connection.stopProvenanceSweep();
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes provenance even when the upload fails, without blocking the retry", async () => {
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: true,
+      created: true,
+      reason: "created-push-pending",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    const f = await syncFixture();
+    const agent = await f.register();
+    f.setFailEvidence(true);
+    await expect(
+      f.connect(undefined, undefined, { provenance }).capture(agent.id),
+    ).rejects.toThrow();
+    expect(provenance).toHaveBeenCalledOnce();
+  });
+
+  it("never writes provenance for an unmapped workspace", async () => {
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: true,
+      created: false,
+      reason: "unused",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const agent = await f.register();
+    await expect(f.connect(undefined, undefined, { provenance }).capture(agent.id)).rejects.toThrow(
+      "chi-share-required",
+    );
+    expect(provenance).not.toHaveBeenCalled();
+  });
+
+  it("creates a real hidden ref, pushes it, and leaves HEAD and the index untouched", async () => {
+    const f = await syncFixture();
+    execFileSync("git", ["-C", f.home, "config", "user.email", "chi@example.com"]);
+    execFileSync("git", ["-C", f.home, "config", "user.name", "Chi Test"]);
+    await writeFile(join(f.home, "app.ts"), "const stable = 1;\n");
+    execFileSync("git", ["-C", f.home, "add", "app.ts"]);
+    execFileSync("git", ["-C", f.home, "commit", "-m", "initial"]);
+    const head = execFileSync("git", ["-C", f.home, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+
+    // A staged change must survive the temp-index snapshot.
+    await writeFile(join(f.home, "staged.ts"), "staged\n");
+    execFileSync("git", ["-C", f.home, "add", "staged.ts"]);
+    const staged = execFileSync("git", ["-C", f.home, "diff", "--cached", "--name-only"], {
+      encoding: "utf8",
+    }).trim();
+
+    // Keep the GitHub fetch URL for authorization but push to a local bare remote.
+    const remote = await realpath(await mkdtemp(join(tmpdir(), "chi-provenance-remote-")));
+    homes.push(remote);
+    execFileSync("git", ["init", "--bare", "--quiet", remote]);
+    execFileSync("git", ["-C", f.home, "config", "remote.origin.pushurl", remote]);
+
+    await writeFile(join(f.home, "work.ts"), "work\n");
+    const scanner = join(f.home, "fake-gitleaks.sh");
+    await writeFile(scanner, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+    const agent = await f.register();
+    await f.connect(undefined, undefined, { provenanceScanner: scanner }).capture(agent.id);
+
+    const ref = "refs/chi/provenance/owner/ses_fork";
+    expect(
+      execFileSync("git", ["-C", f.home, "for-each-ref", "--format=%(refname)", ref], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(ref);
+    expect(
+      execFileSync("git", ["-C", remote, "for-each-ref", "--format=%(refname)", ref], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(ref);
+    expect(
+      execFileSync("git", ["-C", f.home, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    ).toBe(head);
+    expect(
+      execFileSync("git", ["-C", f.home, "diff", "--cached", "--name-only"], {
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(staged);
+  });
+
+  it("purges the hidden ref when the backend fences a deleted source", async () => {
+    const removed: Array<{ user: string; sessionId: string; ref?: string }> = [];
+    const provenance: ProvenanceWriter = async (input) => ({
+      attempted: true,
+      created: true,
+      reason: "created-pushed",
+      ref: `refs/chi/provenance/owner/${input.sessionId}`,
+    });
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push({ user: input.user, sessionId: input.sessionId, ref: input.ref });
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const f = await syncFixture();
+    const agent = await f.register();
+    await f.connect(undefined, undefined, { provenance, provenanceRemover }).capture(agent.id);
+    f.setEvidenceRejection("object-deleted", 409);
+    const deletedProvenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: true,
+      created: true,
+      reason: "created-pushed",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    await expect(
+      f
+        .connect(undefined, undefined, { provenance: deletedProvenance, provenanceRemover })
+        .capture(agent.id),
+    ).rejects.toThrow("object-deleted");
+    expect(deletedProvenance).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(removed).toHaveLength(1));
+    expect(removed[0]).toMatchObject({
+      user: "github:owner",
+      sessionId: "ses_fork",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    });
+    await vi.waitFor(() => {
+      const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+      expect(association.provenanceRemoved).toBe(true);
+    });
   });
 });

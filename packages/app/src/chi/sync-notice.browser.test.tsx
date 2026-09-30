@@ -7,7 +7,13 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 });
 
-import { SyncNoticeView, useSyncNoticeDismissal, syncNoticeReason } from "./sync-notice-view";
+import {
+  SyncNoticeView,
+  SyncWarningView,
+  useSyncNoticeDismissal,
+  syncNoticeReason,
+  OMITTED_CONTENT_WARNING,
+} from "./sync-notice-view";
 
 const errorRef = { current: null as string | null };
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
@@ -101,6 +107,16 @@ describe("SyncNoticeView", () => {
     );
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
     expect(container.textContent).toContain("The secret scanner is unavailable on this host");
+  });
+  it("renders the non-blocking omitted-content warning with Dismiss only", () => {
+    const { container } = mount(
+      <SyncWarningView warning="capture-local-secret-omitted-content" onDismiss={vi.fn()} />,
+    );
+    const element = container.querySelector('[data-testid="chi-sync-warning"]');
+    expect(element).not.toBeNull();
+    expect(container.textContent).toContain(OMITTED_CONTENT_WARNING);
+    expect(button(container, "Dismiss")).toBeInstanceOf(HTMLElement);
+    expect(button(container, "Retry")).toBeUndefined();
   });
 });
 

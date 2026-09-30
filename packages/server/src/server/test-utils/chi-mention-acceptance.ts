@@ -361,6 +361,19 @@ const chiConfig = chiConfigJson
       .parse(JSON.parse(chiConfigJson))
   : undefined;
 const instance = await startMentionActor(actor, origin, runId, { chi: chiConfig });
+// Surface a mid-run crash with its stack/exit signal; the parent only logs the
+// diagnostics buffer on startup failure otherwise.
+process.on("uncaughtException", (error) => {
+  console.error("[chi-mention-acceptance] uncaughtException", error);
+  process.exit(70);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[chi-mention-acceptance] unhandledRejection", reason);
+  process.exit(70);
+});
+process.on("exit", (code) => {
+  console.error(`[chi-mention-acceptance] exit code=${code}`);
+});
 process.send?.({
   type: "ready",
   serverId: instance.serverId,

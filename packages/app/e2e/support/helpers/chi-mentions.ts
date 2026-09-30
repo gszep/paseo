@@ -81,6 +81,18 @@ export async function startMentionActor(
     throw error;
   });
   let port = ready.port;
+  let closing = false;
+  // A crash after the ready handshake must not be silent: surface the captured
+  // stderr and the exit code/signal to the test log.
+  child.on("exit", (code, signal) => {
+    if (closing) return;
+    console.error(
+      `[chi-mentions] fixture ${actor} exited unexpectedly code=${code} signal=${signal}\n${diagnostics}`,
+    );
+  });
+  child.on("error", (error) => {
+    console.error(`[chi-mentions] fixture ${actor} error`, error);
+  });
   function request(action: Action) {
     const id = randomUUID();
     return new Promise<Extract<z.infer<typeof responseSchema>, { ok: true }>>((resolve, reject) => {
@@ -138,6 +150,7 @@ export async function startMentionActor(
       }, host);
     },
     async close() {
+      closing = true;
       try {
         await request("close");
       } finally {
