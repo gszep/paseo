@@ -316,6 +316,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
               request,
               login: async () => ({ chiUserId: identity.actor, sessionToken: "synthetic" }),
             },
+            // Recovery is the subject here; the real gitleaks binary is not
+            // part of the unit environment.
+            localScan: async () => {},
           },
         });
         const runtime: NativeRuntime = {
