@@ -244,7 +244,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
           sessionID: "ses_replica",
           boundary: { type: "through", messageID: "msg_source" },
         };
-        const payload = { text: "synthetic", type: "text" };
+        const payload = { text: "synthetic", type: "user" };
         const ready = {
           ...receipt,
           destination: { ...receipt.destination, nativeFork },
