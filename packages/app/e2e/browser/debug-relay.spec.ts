@@ -1,7 +1,7 @@
 import { test } from "@playwright/test";
-import { loadDaemonClientConstructor } from "./support/helpers/daemon-client-loader";
+import { loadDaemonClientConstructor } from "../support/helpers/daemon-client-loader";
 
-test("debug relay import in a Playwright worker", async () => {
+test("debug relay import under the real config", async () => {
   try {
     const Ctor = await loadDaemonClientConstructor();
     console.log("DEBUG_LOADED", typeof Ctor);

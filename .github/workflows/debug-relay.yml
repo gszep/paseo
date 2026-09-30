@@ -23,9 +23,9 @@ jobs:
           ls -la packages/relay/dist/e2ee.js
           grep -c createClientChannel packages/relay/dist/e2ee.js
       - run: npx playwright install chromium
-      - name: Run Playwright worker import diagnostic
+      - name: Run Playwright worker import diagnostic (real config)
         working-directory: packages/app
-        run: npx playwright test -c playwright.debug.config.ts
+        run: npx playwright test --project=browser e2e/browser/debug-relay.spec.ts
       - name: Inspect relay dist and resolution
         run: |
           set -x
