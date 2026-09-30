@@ -1492,13 +1492,25 @@ describe("automatic sync destinations", () => {
       }
       return base(url, init);
     }) as typeof fetch;
+    const noopProvenance: Pick<
+      ChiConnectionOptions,
+      "provenance" | "provenanceRemover"
+    > = {
+      provenance: async () => ({
+        attempted: true,
+        created: false,
+        reason: "test-skip",
+        ref: "",
+      }),
+      provenanceRemover: async () => ({ removed: true, ref: "", reason: "test-purge" }),
+    };
     const connect = (
       override = effective,
       localScan: (input: unknown) => Promise<void> = async () => undefined,
       provenance: Pick<
         ChiConnectionOptions,
-        "provenance" | "provenanceRemover" | "provenanceScanner"
-      > = {},
+        "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents"
+      > = noopProvenance,
     ) =>
       new ChiConnection(f.manager, {
         home: f.home,
@@ -1916,7 +1928,7 @@ describe("automatic sync destinations", () => {
 
   it("writes a hidden provenance ref only for a mapped workspace", async () => {
     const calls: Array<{ root: string; user: string; sessionId: string; repo: string }> = [];
-    const provenance: ProvenanceWriter = (input) => {
+    const provenance: ProvenanceWriter = async (input) => {
       calls.push({
         root: input.root,
         user: input.user,
@@ -1944,8 +1956,93 @@ describe("automatic sync destinations", () => {
     expect(association.provenanceRef).toBe("refs/chi/provenance/owner/ses_fork");
   });
 
+  it("records the bounded provenance failure reason on the association", async () => {
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: true,
+      created: false,
+      reason: "secret-scan-rejected",
+      ref: "refs/chi/provenance/owner/ses_fork",
+    }));
+    const f = await syncFixture();
+    const agent = await f.register();
+    await f.connect(undefined, undefined, { provenance }).capture(agent.id);
+    const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    expect(association.provenanceError).toBe("secret-scan-rejected");
+  });
+
+  it("does not block other daemon work while a provenance write is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provenance = vi.fn<ProvenanceWriter>(async () => {
+      await gate;
+      return {
+        attempted: true,
+        created: true,
+        reason: "created-pushed",
+        ref: "refs/chi/provenance/owner/ses_fork",
+        pushReason: "pushed",
+      };
+    });
+    const f = await syncFixture();
+    const agent = await f.register();
+    const connection = f.connect(undefined, undefined, { provenance });
+    connection.afterTurn(agent.id);
+    await vi.waitFor(() => expect(provenance).toHaveBeenCalledOnce());
+    // Independent daemon work resolves while the write is still awaiting.
+    await expect(
+      f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home }),
+    ).resolves.toBeTruthy();
+    release();
+    await vi.waitFor(() => {
+      const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+      expect(association.provenanceRef).toBe("refs/chi/provenance/owner/ses_fork");
+    });
+  });
+
+  it("purges a stored association's ref when the backend reports its source gone", async () => {
+    const f = await syncFixture();
+    const removed: Array<{ ref?: string }> = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push({ ref: input.ref });
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        return new Response(null, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const record = {
+      id: "stored-1",
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    };
+    const connection = f.connect(undefined, undefined, {
+      provenanceRemover,
+      listStoredAgents: async () => [record],
+    });
+    await connection.reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(1);
+    expect(removed[0].ref).toBe("refs/chi/provenance/owner/ses_fork");
+  });
+
   it("writes provenance even when the upload fails, without blocking the retry", async () => {
-    const provenance = vi.fn<ProvenanceWriter>(() => ({
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
       attempted: true,
       created: true,
       reason: "created-push-pending",
@@ -1961,7 +2058,7 @@ describe("automatic sync destinations", () => {
   });
 
   it("never writes provenance for an unmapped workspace", async () => {
-    const provenance = vi.fn<ProvenanceWriter>(() => ({
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
       attempted: true,
       created: false,
       reason: "unused",
@@ -2027,13 +2124,13 @@ describe("automatic sync destinations", () => {
 
   it("purges the hidden ref when the backend fences a deleted source", async () => {
     const removed: Array<{ user: string; sessionId: string; ref?: string }> = [];
-    const provenance: ProvenanceWriter = (input) => ({
+    const provenance: ProvenanceWriter = async (input) => ({
       attempted: true,
       created: true,
       reason: "created-pushed",
       ref: `refs/chi/provenance/owner/${input.sessionId}`,
     });
-    const provenanceRemover: ProvenanceRemover = (input) => {
+    const provenanceRemover: ProvenanceRemover = async (input) => {
       removed.push({ user: input.user, sessionId: input.sessionId, ref: input.ref });
       return { removed: true, ref: input.ref ?? "", reason: "purged" };
     };
@@ -2043,7 +2140,7 @@ describe("automatic sync destinations", () => {
       .connect(undefined, undefined, { provenance, provenanceRemover })
       .capture(agent.id);
     f.setEvidenceRejection("object-deleted", 409);
-    const deletedProvenance = vi.fn<ProvenanceWriter>(() => ({
+    const deletedProvenance = vi.fn<ProvenanceWriter>(async () => ({
       attempted: true,
       created: true,
       reason: "created-pushed",
