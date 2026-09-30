@@ -2041,6 +2041,99 @@ describe("automatic sync destinations", () => {
     expect(removed[0].ref).toBe("refs/chi/provenance/owner/ses_fork");
   });
 
+  it("does not purge when the inspect read is denied, failing or actor-mismatched", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    const record = (actor: string) => ({
+      id: "stored-1",
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor,
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: "refs/chi/provenance/owner/ses_fork",
+        }),
+      },
+    });
+    for (const outcome of ["status401", "status403", "status500", "network", "actor"] as const) {
+      f.authority.request = (async (url, init) => {
+        if (new URL(String(url)).pathname === "/evidence/inspect") {
+          if (outcome === "network") throw new Error("network down");
+          if (outcome === "status401") return new Response(null, { status: 401 });
+          if (outcome === "status403") return new Response(null, { status: 403 });
+          if (outcome === "actor") return new Response(null, { status: 404 });
+          return new Response(null, { status: 500 });
+        }
+        return base(url, init);
+      }) as typeof fetch;
+      const actor = outcome === "actor" ? "github:someoneelse" : "github:owner";
+      const connection = f.connect(undefined, undefined, {
+        provenanceRemover,
+        listStoredAgents: async () => [record(actor)],
+      });
+      await connection.reconcileProvenanceOrphans();
+    }
+    expect(removed).toHaveLength(0);
+  });
+
+  it("rotates the bounded sweep instead of starving the tail", async () => {
+    const f = await syncFixture();
+    const removed: string[] = [];
+    const provenanceRemover: ProvenanceRemover = async (input) => {
+      removed.push(input.ref ?? "");
+      return { removed: true, ref: input.ref ?? "", reason: "purged" };
+    };
+    const base = f.authority.request;
+    f.authority.request = (async (url, init) => {
+      if (new URL(String(url)).pathname === "/evidence/inspect") {
+        return new Response(null, { status: 404 });
+      }
+      return base(url, init);
+    }) as typeof fetch;
+    const records = Array.from({ length: 60 }, (_, i) => ({
+      id: `stored-${i}`,
+      cwd: f.home,
+      provider: "opencode",
+      workspaceId: "workspace",
+      persistence: { sessionId: "ses_fork" },
+      labels: {
+        "chi.native": JSON.stringify({
+          repo: "github:fixture/repo",
+          actor: "github:owner",
+          sourceId: f.sourceId,
+          head: "b".repeat(64),
+          error: null,
+          provenanceRef: `refs/chi/provenance/owner/ses_${i}`,
+        }),
+      },
+    }));
+    const connection = f.connect(undefined, undefined, {
+      provenanceRemover,
+      listStoredAgents: async () => records,
+    });
+    await connection.reconcileProvenanceOrphans();
+    expect(removed).toHaveLength(50);
+    const firstRun = new Set(removed);
+    await connection.reconcileProvenanceOrphans();
+    // The cursor advances, so the tail is checked first on the next run.
+    expect(removed).toHaveLength(100);
+    const nextRun = removed.slice(50);
+    expect(nextRun).toHaveLength(50);
+    expect(nextRun.slice(0, 10).every((ref) => !firstRun.has(ref))).toBe(true);
+    expect(new Set(removed).size).toBe(60);
+  });
+
   it("writes provenance even when the upload fails, without blocking the retry", async () => {
     const provenance = vi.fn<ProvenanceWriter>(async () => ({
       attempted: true,
