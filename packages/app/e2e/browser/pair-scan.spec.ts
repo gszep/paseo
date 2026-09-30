@@ -1,11 +1,48 @@
 import { test, expect, chromium } from "@playwright/test";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import QRCode from "qrcode";
 import { startLocalWorkerRelay } from "../support/helpers/local-worker-relay";
 import { startIsolatedHostDaemon } from "../support/helpers/isolated-host-daemon";
-import { generateLocalPairingOffer } from "../../../server/src/server/pairing-offer";
+import { spawnTsx } from "../support/helpers/spawn-node";
+
+interface LocalPairingOffer {
+  url: string | null;
+  qr: string | null;
+  relayEnabled: boolean;
+}
+
+// The server module graph must stay out of the Playwright worker: importing
+// `pairing-offer` there pulls `@getpaseo/relay/e2ee` into the test process and
+// poisons the client's later dynamic import. Generate the offer in a child.
+async function generateLocalPairingOffer(args: {
+  paseoHome: string;
+  relayEndpoint?: string;
+  relayUseTls?: boolean;
+  includeQr?: boolean;
+}): Promise<LocalPairingOffer> {
+  const root = path.resolve(__dirname, "../../../..");
+  const child = spawnTsx(
+    path.join(root, "packages/server/src/server/test-utils/pairing-offer-cli.ts"),
+    [JSON.stringify(args)],
+    {
+      cwd: root,
+      env: { ...process.env, PASEO_SUPERVISED: "0" },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr?.on("data", (chunk) => (stderr += String(chunk)));
+  const [code] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
+  if (code !== 0) {
+    throw new Error(`pairing-offer-cli exited ${String(code)}: ${stderr}`);
+  }
+  return JSON.parse(stdout) as LocalPairingOffer;
+}
 
 // A real Y4M camera frame, generated without ffmpeg or checked-in binary fixtures.
 function qrFrame(text: string): Buffer {
