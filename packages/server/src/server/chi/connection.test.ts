@@ -1470,9 +1470,13 @@ describe("automatic sync destinations", () => {
     let evidenceRejectionStatus = 422;
     let evidenceAttempts = 0;
     const sourceId = prepareNativeCapture({
-      native: JSON.stringify(f.transfer),
-      mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
-      coverage: { kind: "export", reason: null },
+      capture: {
+        version: 1,
+        harness: "opencode-v2",
+        native: JSON.stringify(f.transfer),
+        mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+        coverage: { kind: "export", reason: null },
+      },
       sessionId: "ses_fork",
     }).sourceId;
     const base = f.authority.request;
