@@ -137,6 +137,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
       },
     };
     writeFileSync(join(directory, `${key}.json`), JSON.stringify(receipt), { mode: 0o600 });
+    // One timestamp: the manager sorts by lastActivityAt descending, and letting
+    // `new Date()` tick between rows makes the order depend on wall-clock timing.
+    const listedAt = new Date();
     const rows = [
       "ses_replica",
       ...(receipt.destination.sessionId ? ["ses_fork"] : []),
@@ -148,7 +151,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
       title: null,
       firstPromptPreview: null,
       lastPromptPreview: null,
-      lastActivityAt: new Date(),
+      lastActivityAt: listedAt,
     }));
     class NativeClient extends TestAgentClient {
       override readonly capabilities = { ...TEST_CAPABILITIES, supportsSessionListing: true };
