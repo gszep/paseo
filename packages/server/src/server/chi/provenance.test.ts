@@ -35,14 +35,14 @@ function initRepo() {
 describe("daemon provenance writer", () => {
   it("normalizes the ref namespace", () => {
     expect(provenanceRefForSession("github:Alice Smith", "ses_1")).toBe(
-      "refs/chi/provenance/Alice-Smith/ses_1",
+      "refs/chi/provenance/alice-smith/ses_1",
     );
   });
 
-  it("records delegation origin and native turn coordinates, then purges locally", () => {
+  it("records delegation origin and native turn coordinates, then purges locally", async () => {
     const { root, git, scanner } = initRepo();
     writeFileSync(join(root, "app.ts"), "const a = 1;\nconst b = 2;\n");
-    const outcome = writeProvenance({
+    const outcome = await writeProvenance({
       root,
       user: "github:alice",
       sessionId: "ses_child",
@@ -70,21 +70,21 @@ describe("daemon provenance writer", () => {
     expect(message).toMatch(/^parent-turn-id: u1$/m);
     expect(message).toMatch(/^user-request-id: u1$/m);
 
-    const blame = blameProvenance({ root, ref: outcome.ref, file: "app.ts" });
+    const blame = await blameProvenance({ root, ref: outcome.ref, file: "app.ts" });
     const changed = blame.rows.find((row) => row.content === "const b = 2;");
     expect(changed?.origin).toBe("delegation");
     expect(changed?.userRequestId).toBe("u1");
     expect(blame.rendered).toContain("delegation");
 
-    const removal = removeProvenance({ root, user: "github:alice", sessionId: "ses_child" });
+    const removal = await removeProvenance({ root, user: "github:alice", sessionId: "ses_child" });
     expect(removal.ref).toBe(outcome.ref);
     expect(git("for-each-ref", "--format=%(refname)", "refs/chi/provenance/")).toBe("");
   });
 
-  it("marks a continued session against its predecessor", () => {
+  it("marks a continued session against its predecessor", async () => {
     const { root, git, scanner } = initRepo();
     writeFileSync(join(root, "app.ts"), "const a = 1;\nconst c = 3;\n");
-    const outcome = writeProvenance({
+    const outcome = await writeProvenance({
       root,
       user: "bob",
       sessionId: "ses_cont",
