@@ -73,10 +73,11 @@ test("packed server carries the private Chi closure outside the checkout", async
   npm(["pack", "--offline", "--ignore-scripts", "--pack-destination", root], server);
   await rm(source, { recursive: true, force: true });
   await writeFile(join(installed, "package.json"), JSON.stringify({ private: true }));
+  // The private chi-native bundle travels in the tarball; its public runtime
+  // dependency (zod) resolves from the registry like any other server dep.
   npm(
     [
       "install",
-      "--offline",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
