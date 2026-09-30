@@ -1,0 +1,27 @@
+name: Debug relay import
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: node scripts/npm-retry.mjs ci
+      - run: npm run build:server
+      - name: Inspect relay dist and resolution
+        run: |
+          set -x
+          ls -la packages/relay/dist/e2ee.js packages/relay/dist/encrypted-channel.js
+          cat packages/relay/dist/e2ee.js
+          node -e "console.log(require.resolve('@getpaseo/relay/e2ee'))" 2>&1 || true
+          node --input-type=module -e "const m = await import('@getpaseo/relay/e2ee'); console.log('relay keys', Object.keys(m).filter(k=>k.includes('Channel')||k.includes('Key')));" 2>&1 || true
+          node --input-type=module -e "const m = await import('./packages/client/dist/daemon-client.js'); console.log('client ok', typeof m.DaemonClient);" 2>&1 || true
+          node -p "JSON.stringify(require('./packages/client/dist/daemon-client-relay-e2ee-transport.js'), null, 0)" 2>&1 | head -c 200 || true
