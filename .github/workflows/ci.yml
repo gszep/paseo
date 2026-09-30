@@ -90,7 +90,11 @@ jobs:
         run: node scripts/npm-retry.mjs ci
 
       - name: Lint lockfile
-        run: npx --yes lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --validate-https --validate-integrity
+        # The private `@henkaku-center/chi-native` dependency is a vendored
+        # `file:` tarball, so HTTPS validation is replaced by an explicit scheme
+        # allowlist: every other resolved resource must be `https:`, and only
+        # that vendored tarball may use `file:`. Integrity is still enforced.
+        run: "npx --yes lockfile-lint --path package-lock.json --type npm --allowed-hosts npm --allowed-schemes https: file: --validate-integrity"
 
       - name: Verify dependency signatures
         run: npm audit signatures

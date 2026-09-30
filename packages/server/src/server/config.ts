@@ -19,7 +19,6 @@ import type {
   ProviderOverride,
 } from "./agent/provider-launch-config.js";
 import { ProviderOverrideSchema } from "./agent/provider-launch-config.js";
-import { AgentProviderSchema } from "@getpaseo/protocol/provider-manifest";
 import { hashDaemonPassword } from "./auth.js";
 import { resolveSpeechConfig } from "./speech/speech-config-resolver.js";
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
@@ -202,6 +201,10 @@ function parsePositiveIntegerEnv(value: string | undefined): number | undefined 
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
+
+// Kept local so the daemon configuration entry stays free of the protocol
+// runtime (see exports.test.ts). The protocol's schema is the same open string.
+const AgentProviderSchema = z.string();
 
 const OptionalVoiceLlmProviderSchema = z
   .union([z.string(), z.null(), z.undefined()])

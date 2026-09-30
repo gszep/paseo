@@ -176,6 +176,9 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
             login: vi.fn(),
             invalidate: vi.fn(),
           },
+          // Quarantine recovery is the subject here; the real gitleaks binary
+          // is not part of the unit environment.
+          localScan: async () => {},
         },
       });
     try {

@@ -33,6 +33,13 @@ test("packed server carries the private Chi closure outside the checkout", async
   const manifest = JSON.parse(
     await readFile(join(repoRoot, "packages/server/package.json"), "utf8"),
   );
+  const nativeManifest = JSON.parse(await readFile(join(native, "package.json"), "utf8"));
+  const carriedDependencies = Object.fromEntries(
+    Object.keys(nativeManifest.dependencies ?? {}).map((name) => [
+      name,
+      manifest.dependencies[name],
+    ]),
+  );
   await writeFile(
     join(source, "package.json"),
     JSON.stringify({ private: true, workspaces: ["packages/server"] }),
@@ -46,6 +53,7 @@ test("packed server carries the private Chi closure outside the checkout", async
       files: ["entry.mjs"],
       dependencies: {
         "@henkaku-center/chi-native": manifest.dependencies["@henkaku-center/chi-native"],
+        ...carriedDependencies,
       },
       bundleDependencies: manifest.bundleDependencies,
     }),
