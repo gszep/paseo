@@ -20,6 +20,7 @@ import { execCommand } from "../../../../utils/spawn.js";
 import { OpenCodeAgentClient } from "../opencode-agent.js";
 import { OpenCodeV2AgentClient } from "./v2/agent.js";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
+import { assertWriteConfinementAvailable } from "../../confinement/admission.js";
 
 // Keep the minimum aligned with the SDK and binary exercised by CI.
 const MINIMUM_V2: readonly [number, number] = [0, 10];
@@ -104,6 +105,7 @@ export class OpenCodeRuntimeClient implements AgentClient {
     launch?: AgentLaunchContext,
     options?: AgentCreateSessionOptions,
   ) {
+    await assertWriteConfinementAvailable({ config, launch, logger: this.logger });
     return (await this.client()).createSession(config, launch, options);
   }
   async resumeSession(
@@ -111,6 +113,28 @@ export class OpenCodeRuntimeClient implements AgentClient {
     config?: Partial<AgentSessionConfig>,
     launch?: AgentLaunchContext,
   ) {
+    const persistedFeatures = handle.metadata?.featureValues;
+    const persistedConfinement =
+      typeof persistedFeatures === "object" &&
+      persistedFeatures !== null &&
+      "writeConfinement" in persistedFeatures
+        ? persistedFeatures.writeConfinement
+        : undefined;
+    // Updating an unrelated feature must not discard a persisted opt-in.
+    const requestedConfinement = config?.featureValues?.writeConfinement;
+    const writeConfinement =
+      requestedConfinement === undefined ? persistedConfinement : requestedConfinement;
+    if (writeConfinement !== undefined) {
+      const cwd = config?.cwd ?? handle.metadata?.cwd;
+      await assertWriteConfinementAvailable({
+        config: {
+          cwd: typeof cwd === "string" ? cwd : "",
+          featureValues: { writeConfinement },
+        },
+        launch,
+        logger: this.logger,
+      });
+    }
     return (await this.client()).resumeSession(handle, config, launch);
   }
   async fetchCatalog(options: FetchCatalogOptions, context?: ProviderRefreshContext) {
@@ -126,6 +150,11 @@ export class OpenCodeRuntimeClient implements AgentClient {
     return (await this.client()).listImportableSessions(options);
   }
   async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
+    await assertWriteConfinementAvailable({
+      config: context.config,
+      launch: context.launchContext,
+      logger: this.logger,
+    });
     return (await this.client()).importSession(input, context);
   }
   async archiveNativeSession(handle: AgentPersistenceHandle) {
