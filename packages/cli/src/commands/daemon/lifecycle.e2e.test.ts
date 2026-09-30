@@ -337,14 +337,28 @@ test.skipIf(process.platform === "win32").each([["start"], ["daemon", "run"]])(
         stdio: "ignore",
       });
       const exited = new Promise((resolve) => child!.once("exit", resolve));
+      let lock: { pid: number } | undefined;
       await expect
-        .poll(async () => existsSync(path.join(home, "paseo.pid")), { timeout: 10_000 })
+        .poll(
+          async () => {
+            // Exclusive creation reserves the lock before its JSON write finishes.
+            // Wait for the published identity, not merely the directory entry.
+            try {
+              const parsed = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
+              if (!Number.isSafeInteger(parsed.pid) || parsed.pid <= 0) return false;
+              lock = parsed;
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          { timeout: 10_000 },
+        )
         .toBe(true);
-      const lock = JSON.parse(await readFile(path.join(home, "paseo.pid"), "utf8"));
       await f.ok(["status", "--home", home]);
       child.kill("SIGINT");
       await exited;
-      expect(() => process.kill(lock.pid, 0)).toThrow();
+      expect(() => process.kill(lock!.pid, 0)).toThrow();
       expect((await f.ok(["status", "--home", home])).localDaemon).toBe("stopped");
     } finally {
       child?.kill("SIGTERM");
