@@ -29,7 +29,9 @@ export function classify(env = process.env, cwd = process.cwd()) {
       if (!["A", "M"].includes(rows[i])) throw new Error("deleted/renamed/type-changed path");
       files.push(rows[i + 1]);
     }
-    return { skip: docsOnly(files), full: files.some(testedDoc) || files.length === 0 };
+    const mixed =
+      files.some((file) => file.endsWith(".md")) && files.some((file) => !file.endsWith(".md"));
+    return { skip: docsOnly(files), full: files.some(testedDoc) || files.length === 0 || mixed };
   } catch (error) {
     console.warn(`Docs classification uncertain; run everything: ${error.message}`);
     return { skip: false, full: true };

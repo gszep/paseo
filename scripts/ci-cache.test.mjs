@@ -51,6 +51,10 @@ test("classification uses tested merge tree and fails open on diff errors", (t) 
   put("event.json", JSON.stringify({ pull_request: { base: { sha: base } } }));
   const env = { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: join(cwd, "event.json") };
   assert.deepEqual(classify(env, cwd), { skip: true, full: false });
+  put("src/code.ts", "export const changed = true;");
+  git("add", "src/code.ts");
+  git("commit", "-m", "mixed docs and code");
+  assert.deepEqual(classify(env, cwd), { skip: false, full: true });
   put("CHANGELOG.md", "tested");
   git("add", "CHANGELOG.md");
   git("commit", "-m", "tested doc");
@@ -79,6 +83,8 @@ test("install keys include vendored bytes, nested manifests, patches and lifecyc
     "patches/sdk.patch",
     "scripts/postinstall-patches.mjs",
     "packages/protocol/scripts/generate.mjs",
+    ".github/workflows/ci.yml",
+    ".github/actions/ci-restore/action.yml",
   ];
   for (const file of files) put(file, "one");
   assert.deepEqual(installInputs([...files, "docs/guide.md"]), files);

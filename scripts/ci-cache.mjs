@@ -51,6 +51,8 @@ export function installInputs(files) {
   return files.filter(
     (file) =>
       /(^|\/)(package(-lock)?\.json|\.npmrc)$/.test(file) ||
+      file === ".github/workflows/ci.yml" ||
+      file.startsWith(".github/actions/") ||
       /^(scripts|patches|vendor)\//.test(file) ||
       /^packages\/[^/]+\/scripts\//.test(file),
   );
