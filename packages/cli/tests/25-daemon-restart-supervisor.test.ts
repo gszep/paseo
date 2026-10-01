@@ -147,6 +147,10 @@ import('node:fs').then(({appendFileSync}) => {
     url: `ws://${supervisor.listen}/ws`,
     clientId: "supervisor-restart-test",
     connectTimeoutMs: 5000,
+    // Observe worker readiness at the polling cadence. The default exponential
+    // reconnect delay can outlast this test's deadline after a slow cold start,
+    // even though the supervisor has already replaced the worker successfully.
+    reconnect: { baseDelayMs: pollIntervalMs, maxDelayMs: pollIntervalMs },
     webSocketFactory: (url) => new WebSocket(url) as unknown as WebSocketLike,
   });
   await client.connect();

@@ -35,7 +35,7 @@ runs:
           packages/*/node_modules
         key: deps-${{ inputs.key }}-${{ github.sha }}
     - uses: actions/cache/save@v4
-      if: github.ref == 'refs/heads/main'
+      if: github.ref == 'refs/heads/main' && github.job != 'format' && github.job != 'lint'
       with:
         path: |
           .ci-build

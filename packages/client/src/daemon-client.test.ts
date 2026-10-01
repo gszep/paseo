@@ -1244,6 +1244,52 @@ test("does not reconnect after close when ensureConnected is called", async () =
   expect(client.getConnectionState().status).toBe("disposed");
 });
 
+test.each([
+  ["error", "close"],
+  ["close", "error"],
+  ["close", "close"],
+  ["error", "error"],
+] as const)(
+  "one failed transport consumes one reconnect attempt (%s then %s)",
+  async (firstEvent, secondEvent) => {
+    const first = createMockTransport();
+    const second = createMockTransport();
+    const third = createMockTransport();
+    const transports = [first, second, third];
+    let transportIndex = 0;
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "clsk_reconnect_event_pair",
+      reconnect: { enabled: true, baseDelayMs: 60_000, maxDelayMs: 60_000 },
+      transportFactory: () => transports[transportIndex++].transport,
+    });
+    clients.push(client);
+    const connected = client.connect();
+    first.triggerOpen();
+    await connected;
+
+    const events = {
+      error: () => first.triggerError(new Error("connect ECONNREFUSED")),
+      close: () => first.triggerClose({ code: 1006 }),
+    };
+    events[firstEvent]();
+    events[secondEvent]();
+    // Observe the scheduled retry's ordinal through the public connection state,
+    // without sleeping or replacing the clock. An explicit reconnect consumes
+    // that retry immediately and must cancel its timer.
+    client.ensureConnected();
+    expect(client.getConnectionState()).toEqual({ status: "connecting", attempt: 1 });
+    expect(transportIndex).toBe(2);
+
+    second.triggerError(new Error("connect ECONNREFUSED"));
+    second.triggerClose({ code: 1006 });
+    client.ensureConnected();
+    expect(client.getConnectionState()).toEqual({ status: "connecting", attempt: 2 });
+    third.triggerOpen();
+    expect(client.getConnectionState()).toEqual({ status: "connected" });
+  },
+);
+
 test("ensureConnected reconnects immediately without leaving the scheduled retry armed", async () => {
   useHeartbeatClock();
   try {

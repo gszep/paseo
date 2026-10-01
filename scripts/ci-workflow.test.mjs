@@ -160,6 +160,40 @@ test("change gating allows superseded workflow runs to cancel", () => {
   }
 });
 
+test("the browser cache writer explicitly installs browsers before saving", () => {
+  const save = readFileSync(new URL(".github/actions/ci-save/action.yml", repoRoot), "utf8");
+  const browserSave = save.split(/    - /).find((step) => /key: browsers-/.test(step));
+  assert.ok(browserSave, "browser cache save step must exist");
+  assert.match(
+    browserSave,
+    /if: github\.ref == 'refs\/heads\/main' && github\.job == '[a-z0-9-]+'\n/,
+  );
+  const writer = /github\.job == '([a-z0-9-]+)'/.exec(browserSave)[1];
+  const job = jobBlocks(readFileSync(ciWorkflowPath, "utf8")).get(writer)?.join("\n");
+  assert.ok(job, `missing browser writer job ${writer}`);
+  const steps = job.split(/      - /);
+  const install = steps.findIndex((step) =>
+    /run: npx playwright install (?:--with-deps )?chromium\b/.test(step),
+  );
+  const saveIndex = steps.findIndex((step) => /uses: \.\/\.github\/actions\/ci-save/.test(step));
+  assert.ok(install >= 0 && saveIndex > install, "writer must install Chromium before saving");
+  assert.doesNotMatch(
+    steps[install],
+    /\bif:|continue-on-error:/,
+    "browser installation must succeed unconditionally",
+  );
+});
+
+test("format and lint cannot save build snapshots", () => {
+  const save = readFileSync(new URL(".github/actions/ci-save/action.yml", repoRoot), "utf8");
+  const buildSave = save.split(/    - /).find((step) => /key: build-/.test(step));
+  assert.ok(buildSave, "build cache save step must exist");
+  assert.match(
+    buildSave,
+    /if: github\.ref == 'refs\/heads\/main' && github\.job != 'format' && github\.job != 'lint'\n/,
+  );
+});
+
 test("focused contracts stay inside existing required checks", () => {
   const jobs = jobBlocks(readFileSync(ciWorkflowPath, "utf8"));
   const changes = jobs.get("changes")?.join("\n") ?? "";
