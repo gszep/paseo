@@ -106,6 +106,57 @@ async function fixture() {
 }
 
 describe("human prompt delivery receipts", () => {
+  it("serializes explicit answer corrections behind an older automatic read without blocking additions", async () => {
+    const f = await fixture();
+    await f.add("q");
+    await f.flush();
+    const h = [...f.remote.values()][0]!;
+    const answer = (text: string) => [
+      {
+        id: randomUUID(),
+        actor: h.recipient,
+        at: "now",
+        revision: 2,
+        text: encodeHumanAnswers([{ id: readHumanPrompts(h.text)!.items[0]!.id, text }]),
+      },
+    ];
+    h.replies = answer("old answer");
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let reads = 0;
+    const transport = {
+      ...f.transport,
+      read: async (id: string) => {
+        const snapshot = structuredClone(await f.transport.read(id));
+        if (++reads === 1) {
+          entered();
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        return snapshot;
+      },
+    };
+    const automatic = f.service["refresh"](f.scope, transport);
+    await started;
+    h.replies = answer("corrected answer");
+    const explicit = f.restart().operate(f.scope, { action: "list" }, transport);
+    try {
+      await f.add("while-reading");
+      expect(reads).toBe(1);
+    } finally {
+      release();
+    }
+    await automatic;
+    const result = await explicit;
+    expect(result.items[0]!.answer?.text).toBe("corrected answer");
+    expect((await f.restart()["load"](f.scope)).items[0]!.answer?.text).toBe("corrected answer");
+    expect(reads).toBe(2);
+  });
+
   it("slow reads preserve progress across deadlines and never hold up new sends", async () => {
     const f = await fixture();
     for (let n = 0; n < 10; n++) {

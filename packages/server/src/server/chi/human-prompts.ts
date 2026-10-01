@@ -106,6 +106,7 @@ const quotaSchema = z
   .max(10000);
 const lanes = new Map<string, Promise<unknown>>();
 const refreshes = new Map<string, Promise<void>>();
+const readers = new Map<string, Promise<void>>();
 
 export function quoteHumanAnswer(text: string): string {
   return text
@@ -252,6 +253,21 @@ export class HumanPrompts {
     };
   }
   private async reconcile(scope: HumanPromptScope, transport: Transport, explicitRead = false) {
+    // Serialize snapshots for this agent without holding the send/quota lane.
+    // A delayed automatic read must not overwrite a newer explicit correction.
+    const key = this.path(scope.agentId);
+    const previous = readers.get(key) ?? Promise.resolve();
+    const work = previous
+      .catch(() => undefined)
+      .then(() => this.readBatches(scope, transport, explicitRead));
+    readers.set(key, work);
+    try {
+      await work;
+    } finally {
+      if (readers.get(key) === work) readers.delete(key);
+    }
+  }
+  private async readBatches(scope: HumanPromptScope, transport: Transport, explicitRead: boolean) {
     const selected = await this.exclusive(async () => {
       const state = await this.load(scope, false);
       const start = state.cursor % Math.max(1, state.batches.length);

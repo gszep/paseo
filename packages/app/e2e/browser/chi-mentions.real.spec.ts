@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { startMentionActor } from "../support/helpers/chi-mentions";
 import { composerLocator } from "../support/helpers/composer";
@@ -45,13 +45,14 @@ async function plainChat(page: Page) {
   await expect(page.locator('[data-testid^="worktree-setup-callout-"]')).toHaveCount(0);
 }
 
-async function inboxRevision(page: Page, revision: number) {
+async function waitForInbox(page: Page, target: Locator) {
   // Live catalog reads can transiently fail while another settled capture
   // changes the repository fence. Exercise the rendered recovery action.
   await expect(async () => {
     const retry = page.getByRole("button", { name: "Retry", exact: true });
-    if (await retry.isVisible()) await retry.click();
-    await expect(page.getByText(`open · revision ${revision}`, { exact: true })).toBeVisible({
+    const refreshing = page.getByText("Refreshing mentions…", { exact: true });
+    if ((await retry.isVisible()) && !(await refreshing.isVisible())) await retry.click();
+    await expect(target).toBeVisible({
       timeout: 1000,
     });
   }).toPass({ timeout: 60000, intervals: [1000, 2000, 5000] });
@@ -73,14 +74,25 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     await page.goto(session);
     await composerLocator(page).fill("Establish the settled synthetic evidence pin");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    await expect.poll(async () => (await actor.sources()).length, { timeout: 90000 }).toBe(1);
+    await expect
+      .poll(
+        async () => {
+          const sources = (await actor.sources()).length;
+          const retry = page.getByRole("button", { name: "Retry", exact: true });
+          if (sources === 0 && (await retry.isVisible()) && (await retry.isEnabled()))
+            await retry.click();
+          return sources;
+        },
+        { timeout: 90000, intervals: [1000, 2000, 5000] },
+      )
+      .toBe(1);
     await composerLocator(page).fill("Ask an inbox question");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.goto(`${origin}/chi?view=inbox`);
     const mention = page.getByRole("button", {
       name: new RegExp(`Discuss mention Agent-initiated.*${runId}`),
     });
-    await expect(mention).toBeVisible({ timeout: 90000 });
+    await waitForInbox(page, mention);
     await mention.click();
     await expect(page.getByText("open · revision 2", { exact: true })).toBeVisible();
     await page.getByLabel("Reply to mention", { exact: true }).fill("Blue");
@@ -109,6 +121,7 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     expect(sent.text).toContain("Synthetic human prompt");
     expect(sent.text).not.toContain("Establish the settled");
     await page.goto(`${origin}/chi?view=inbox`);
+    await waitForInbox(page, mention);
     await mention.click();
     const mute = page.getByRole("button", { name: "Mute prompts from this session", exact: true });
     page.once("dialog", (dialog) => dialog.dismiss());
@@ -116,14 +129,14 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     expect((await actor.attempts()).replyAttempts).toHaveLength(1);
     await page.getByRole("button", { name: "Snooze prompts for 1 hour", exact: true }).click();
     await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(2);
-    await inboxRevision(page, 4);
+    await waitForInbox(page, page.getByText("open · revision 4", { exact: true }));
     page.once("dialog", (dialog) => {
       expect(dialog.message()).toContain("permanently");
       return dialog.accept();
     });
     await mute.click();
     await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(3);
-    await inboxRevision(page, 5);
+    await waitForInbox(page, page.getByText("open · revision 5", { exact: true }));
     const controls = (await actor.attempts()).replyAttempts.slice(1).map((raw) => JSON.parse(raw));
     expect(controls.map((op) => JSON.parse(op.text.split("\n")[1]).action)).toEqual([
       "snooze",
