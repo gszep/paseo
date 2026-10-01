@@ -32,6 +32,10 @@ test("mention intent is created only inside admitted message receipts, and trans
     loggedOut = false;
   const host = await createTestPaseoDaemon({
     mcpEnabled: false,
+    chi: {
+      destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
+      mappings: [{ repo, destination: "fixture", audience: "shared" }],
+    },
     agentClients: {
       opencode: createTestAgentClient("opencode", {
         onStartTurn(_prompt, options) {
@@ -77,7 +81,15 @@ test("mention intent is created only inside admitted message receipts, and trans
       cwd,
       workspaceId: workspace.id,
       labels: {
-        "chi.native": JSON.stringify({ repo, actor, sourceId: null, head: null, error: null }),
+        "chi.native": JSON.stringify({
+          repo,
+          actor,
+          sourceId: null,
+          head: null,
+          error: null,
+          endpoint: "https://chi.invalid",
+          destination: "fixture",
+        }),
       },
     });
     const scope = await client.chiMentions({
