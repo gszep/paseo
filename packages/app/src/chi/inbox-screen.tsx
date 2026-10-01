@@ -141,9 +141,8 @@ function Inbox({
   const [repository, setRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
   const [openSession, setOpenSession] = useState(true);
-  // A unified list: the backend returns every handoff this principal can read
-  // (received and authored), which is what the flat History-style view shows.
-  const query = useInbox(transport, false);
+  // The recipient inbox shares its first page with the sidebar badge.
+  const query = useInbox(transport);
   const loaded = useMemo(
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
     [query.data],
@@ -154,17 +153,10 @@ function Inbox({
     [loaded, searchInput, repository],
   );
   const rows = useMemo(() => buildInboxRows(filtered), [filtered]);
-  const { fetchNextPage, hasNextPage, isFetching, refetch } = query;
+  const { fetchNextPage, hasNextPage, isFetching } = query;
   const refresh = useCallback(
     () => void cache.invalidateQueries({ queryKey: context.queryKey }),
     [cache, context.queryKey],
-  );
-  // Open/route focus refresh. Window focus and reconnect are handled by the
-  // query's own refetch options; this covers returning from a detail view.
-  useFocusEffect(
-    useCallback(() => {
-      void refetch();
-    }, [refetch]),
   );
   const more = useCallback(() => {
     if (hasNextPage && !isFetching) void fetchNextPage();
@@ -233,10 +225,8 @@ function Inbox({
           <Button onPress={refresh}>Retry</Button>
         </Alert>
       ) : null}
-      {refreshing ? <Text style={styles.empty}>Refreshing mentions…</Text> : null}
-      {!query.isError ? (
-        <InboxCoverageNotice unavailableRepos={query.data?.pages[0]?.unavailableRepos} />
-      ) : null}
+      {refreshing && !query.data ? <Text style={styles.empty}>Refreshing mentions…</Text> : null}
+      {!query.isError ? <InboxCoverageNotice unavailableRepos={query.unavailableRepos} /> : null}
       {query.data && !query.isError ? (
         <View style={compact ? styles.screen : styles.split}>
           {!compact || !selected ? (

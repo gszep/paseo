@@ -484,6 +484,7 @@ export class ChiMentions {
         handoffs: z.array(ChiHandoffSchema),
         nextCursor: z.string().nullable(),
         unreadCount: z.number().int().nonnegative(),
+        unreadCountIsLowerBound: z.boolean().optional(),
         unavailableRepos: z.array(z.string()).optional(),
       })
       .parse(
@@ -503,6 +504,7 @@ export class ChiMentions {
       handoffs: result.handoffs,
       nextCursor: result.nextCursor,
       unreadCount: result.unreadCount,
+      ...(result.unreadCountIsLowerBound ? { unreadCountIsLowerBound: true } : {}),
       ...(result.unavailableRepos ? { unavailableRepos: result.unavailableRepos } : {}),
     };
   }

@@ -191,7 +191,8 @@ function SidebarMentionsRow({ onBeforeNavigate }: SidebarNavRowProps) {
       label="Mentions"
       badge={unread}
       badgeIncomplete={
-        unread !== undefined && Boolean(inbox.data?.pages[0]?.unavailableRepos?.length)
+        unread !== undefined &&
+        Boolean(inbox.data?.pages[0]?.unreadCountIsLowerBound || inbox.unavailableRepos.length)
       }
       onPress={press}
       testID="sidebar-mentions"
