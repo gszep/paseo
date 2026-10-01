@@ -14,6 +14,8 @@ import { mkdtemp, readdir, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join, dirname, delimiter } from "path";
 import { fileURLToPath } from "url";
+import { selection } from "../../../scripts/ci-selection.mjs";
+import { cliFiles, partition } from "../../../scripts/ci-partition.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..", "..", "..");
@@ -128,6 +130,7 @@ console.log("=".repeat(50));
 // Discover all test files
 const files = await readdir(__dirname);
 const allTestFiles = files.filter((f) => f.match(/^\d{2}-.*\.test\.ts$/)).sort();
+const selectedTestFiles = cliFiles(allTestFiles, await selection(repoRoot));
 
 // Naive `index % shardTotal` round-robin clusters slow tests by accident
 // because their numeric prefixes (05, 06, 11, 13, 14) align with the stride.
@@ -142,15 +145,7 @@ const KNOWN_HEAVY_TESTS = new Set([
   "13-permit-allow-deny.test.ts",
   "14-worktree.test.ts",
 ]);
-const heavyFiles = allTestFiles.filter((f) => KNOWN_HEAVY_TESTS.has(f));
-const otherFiles = allTestFiles.filter((f) => !KNOWN_HEAVY_TESTS.has(f));
-const shardBuckets: string[][] = Array.from({ length: shardTotal }, () => []);
-heavyFiles.forEach((f, i) => {
-  shardBuckets[i % shardTotal].push(f);
-});
-otherFiles.forEach((f, i) => {
-  shardBuckets[shardTotal - 1 - (i % shardTotal)].push(f);
-});
+const shardBuckets: string[][] = partition(selectedTestFiles, shardTotal, [...KNOWN_HEAVY_TESTS]);
 const testFiles = shardBuckets[shardIndex];
 
 if (allTestFiles.length === 0) {
@@ -160,9 +155,9 @@ if (allTestFiles.length === 0) {
 }
 
 if (testFiles.length === 0) {
-  console.log(`❌ No test files for shard ${shardIndex + 1}/${shardTotal}`);
+  console.log(`No selected test files for shard ${shardIndex + 1}/${shardTotal}`);
   await writeJsonSummary({ passed: 0, failed: 0, failures: [] });
-  process.exit(1);
+  process.exit(0);
 }
 
 console.log(

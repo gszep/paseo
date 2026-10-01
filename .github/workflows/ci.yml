@@ -4,10 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +31,6 @@ jobs:
       full: ${{ steps.classified.outputs.full }}
       format: ${{ steps.filter.outputs.format }}
       quality: ${{ steps.filter.outputs.quality }}
-      hub: ${{ steps.filter.outputs.hub }}
       server: ${{ steps.filter.outputs.server }}
       desktop: ${{ steps.filter.outputs.desktop }}
       app: ${{ steps.filter.outputs.app }}
@@ -47,13 +47,6 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Detect affected CI contracts
-        id: filter
-        continue-on-error: true
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
-        with:
-          filters: .github/ci-paths.yml
-
       - name: Classify Markdown-only changes
         id: docs
         continue-on-error: true
@@ -62,13 +55,25 @@ jobs:
       - name: Validate CI contracts
         run: node --test scripts/ci-workflow.test.mjs scripts/ci-cache.test.mjs scripts/daemon-launch-contract.test.mjs scripts/sync-fdroid-changelogs.test.mjs scripts/upload-release-assets.test.mjs scripts/lockfile-file-deps.test.mjs
 
+      - uses: ./.github/actions/ci-restore
+        if: steps.docs.outputs.skip != 'true'
+
+      - name: Derive dependency and related-test graph
+        id: filter
+        continue-on-error: true
+        run: node scripts/ci-selection.mjs
+
+      - name: Verify selection soundness
+        if: steps.docs.outputs.skip != 'true'
+        run: node --test scripts/ci-selection.test.mjs
+
       # Publish skip authority only after classification AND its contracts pass.
       # Missing outputs keep every downstream job on its fail-open path.
       - name: Publish verified classification
         id: classified
         env:
           SKIP: ${{ steps.docs.outcome == 'success' && steps.filter.outcome == 'success' && steps.docs.outputs.skip == 'true' }}
-          FULL: ${{ github.event_name != 'pull_request' || steps.docs.outcome != 'success' || steps.filter.outcome != 'success' || steps.docs.outputs.full != 'false' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
+          FULL: ${{ github.event_name != 'pull_request' || steps.docs.outcome != 'success' || steps.filter.outcome != 'success' || steps.docs.outputs.full != 'false' || steps.filter.outputs.full != 'false' }}
         run: |
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
           echo "full=$FULL" >> "$GITHUB_OUTPUT"
@@ -135,6 +140,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/ci-restore
         id: cache
@@ -144,6 +151,12 @@ jobs:
 
       - name: Typecheck all packages
         run: npm run typecheck
+
+      - name: Run website unit contracts
+        # These were previously absent from the package's test:e2e command.
+        run: node scripts/ci-run-tests.mjs website
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - name: Install website test browsers
         run: npx playwright install --with-deps chromium webkit
@@ -166,7 +179,7 @@ jobs:
   server-tests-ubuntu:
     name: server-tests (ubuntu-latest, opencode-ai@1.14.46)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     # Static names also exist when job-level draft/docs gating skips execution.
     env:
@@ -192,15 +205,12 @@ jobs:
 
       - name: Run server tests
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
-        run: npm run test --workspace=@getpaseo/server
+        run: node scripts/ci-run-tests.mjs server
         env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-
-      - name: Run Hub CLI/daemon contract
-        if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.hub != 'false' }}
-        run: npm run test:hub-cli-contract --workspace=@getpaseo/server
 
       - uses: ./.github/actions/ci-save
         if: github.ref == 'refs/heads/main'
@@ -211,7 +221,7 @@ jobs:
   server-tests-ubuntu-v2:
     name: server-tests (ubuntu-latest, @opencode/cli@2.0.10)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     env:
       OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
@@ -220,7 +230,7 @@ jobs:
   server-tests-windows:
     name: server-tests (windows-latest, opencode-ai@1.14.46)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
       OPENCODE_PACKAGE: "opencode-ai@1.14.46"
@@ -231,7 +241,7 @@ jobs:
   server-tests-windows-v2:
     name: server-tests (windows-latest, @opencode/cli@2.0.10)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
       OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
@@ -327,13 +337,16 @@ jobs:
   app-tests:
     name: app-tests
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/ci-restore
         id: cache
+
+      - name: Fetch selection base
+        run: git fetch --no-tags --unshallow
 
       - name: Install Playwright browsers
         timeout-minutes: 10
@@ -343,7 +356,9 @@ jobs:
         run: node scripts/ci-build.mjs build:app-deps
 
       - name: Run app unit tests
-        run: npm run test --workspace=@getpaseo/app
+        run: node scripts/ci-run-tests.mjs app
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - uses: ./.github/actions/ci-save
         if: github.ref == 'refs/heads/main'
@@ -354,13 +369,16 @@ jobs:
   sdk-tests:
     name: sdk-tests
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/ci-restore
         id: cache
+
+      - name: Fetch selection base
+        run: git fetch --no-tags --unshallow
 
       - name: Build client dependencies
         run: node scripts/ci-build.mjs build:relay && node scripts/ci-build.mjs build:client
@@ -369,16 +387,24 @@ jobs:
         run: node scripts/ci-build.mjs build:plugin
 
       - name: Run plugin SDK tests
-        run: npm run test --workspace=@getpaseo/plugin
+        run: node scripts/ci-run-tests.mjs plugin
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - name: Run protocol tests
-        run: npm run test --workspace=@getpaseo/protocol
+        run: node scripts/ci-run-tests.mjs protocol
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - name: Run client tests
-        run: npm run test --workspace=@getpaseo/client
+        run: node scripts/ci-run-tests.mjs client
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - name: Run highlight tests
-        run: npm run test --workspace=@getpaseo/highlight
+        run: node scripts/ci-run-tests.mjs highlight
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - name: Typecheck client examples
         run: npm run typecheck:examples --workspace=@getpaseo/client
@@ -481,11 +507,16 @@ jobs:
       - uses: ./.github/actions/ci-restore
         id: cache
 
+      - name: Fetch selection base
+        run: git fetch --no-tags --unshallow
+
       - name: Build relay
         run: node scripts/ci-build.mjs build:relay
 
       - name: Run relay tests
-        run: npm run test --workspace=@getpaseo/relay
+        run: node scripts/ci-run-tests.mjs relay
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - uses: ./.github/actions/ci-save
         if: github.ref == 'refs/heads/main'
@@ -496,7 +527,7 @@ jobs:
   cli-tests-1:
     name: cli-tests (shard 1/3)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -510,18 +541,25 @@ jobs:
       - uses: ./.github/actions/ci-restore
         id: cache
 
+      - name: Fetch selection base
+        run: git fetch --no-tags --unshallow
+
       - name: Install agent CLIs for provider tests
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai@1.14.46
 
       # The local runner builds its dependencies and shards its own E2E files.
       - name: Run CLI E2E tests
         run: npm run test:local --workspace=@getpaseo/cli
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       # Source tests do not read PASEO_CLI_TEST_SHARD. Run them once, on the
       # shortest E2E shard, after its runner has built the server stack.
       - name: Run CLI source tests
         if: ${{ env.PASEO_CLI_TEST_SHARD == '3' }}
-        run: npm run test:unit --workspace=@getpaseo/cli
+        run: node scripts/ci-run-tests.mjs cli
+        env:
+          CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}
 
       - uses: ./.github/actions/ci-save
         if: github.ref == 'refs/heads/main'
@@ -532,7 +570,7 @@ jobs:
   cli-tests-2:
     name: cli-tests (shard 2/3)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -545,7 +583,7 @@ jobs:
   cli-tests-3:
     name: cli-tests (shard 3/3)
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
