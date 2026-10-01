@@ -19,8 +19,8 @@ export interface ResolvedChiDestination {
 
 /**
  * A chi section with neither destinations nor mappings means "local everywhere":
- * the daemon keeps its legacy single-deployment behavior and no workspace is
- * retargeted. Only a populated section turns mapping resolution on.
+ * no upload or credential exchange is authorized. Existing labels pause until
+ * their pinned endpoint is explicitly configured again.
  */
 export function parseChiDestinations(
   config: MutableChiConfig | undefined,

@@ -41,6 +41,15 @@ fail closed; the Chi browser has no runtime pairing authority or continuation
 action. Independent branching uses OpenCode's native Fork. Share to Chi
 associates one agent explicitly; configured repository mappings associate agents
 automatically under the mapping's pinned audience. Unmapped agents stay local.
+Chi network operations require an explicitly configured destination; new Share,
+Continue intake and workspace mentions also require a repository mapping. Legacy
+destination-less labels bind only to a destination with the exact former endpoint,
+retaining their audience, or pause before auth/export. Removing all configuration
+pauses existing associations. Receipt quarantine covers every deployment on the
+owning host, even after its destination is removed. The initial inbox/mention
+transport binds to the sole configured endpoint at startup; restart after changing
+it. Multiple capture destinations do not implicitly choose an inbox deployment.
+
 Chi credentials come from an in-memory GitHub CLI exchange, independent of native
 runtime credentials. `chiCanonical` gates the single Continue/Resume transfer
 flow; `chiNative` remains the sharing capability. Older wire requests still parse

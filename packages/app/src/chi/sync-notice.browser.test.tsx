@@ -55,6 +55,14 @@ afterEach(() => {
 });
 
 describe("SyncNoticeView", () => {
+  it("explains destination setup and paused history without exposing diagnostics", () => {
+    const { container } = mount(
+      <SyncNoticeView error="chi-destination-required" onDismiss={vi.fn()} onRetry={vi.fn()} />,
+    );
+    expect(container.textContent).toContain("Configure a Chi destination and repository mapping");
+    expect(container.textContent).toContain("original endpoint");
+    expect(container.textContent).not.toContain("chi-destination-required");
+  });
   it("renders the required copy, a safe reason and both actions", () => {
     const { container } = mount(
       <SyncNoticeView error="evidence-http-503" onDismiss={vi.fn()} onRetry={vi.fn()} />,

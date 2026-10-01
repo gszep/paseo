@@ -1,6 +1,10 @@
 export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
   const copy: Record<string, string> = {
+    "chi-destination-required":
+      "Configure a Chi destination and repository mapping on this host before Share, Continue or mentions. Inbox and mentions require one configured deployment; restart the daemon after changing it.",
+    "chi-destination-changed":
+      "This session's Chi destination was removed or changed. Restore its original destination to resume; history is never retargeted.",
     "chi-reply-storage-unavailable":
       "Unable to update saved reply storage. The original operation is retained. Try again after storage is available.",
     "chi-mention-text-too-long":

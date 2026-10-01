@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DaemonClient } from "./daemon-client.js";
-import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
 import { append, endpointUrl } from "@henkaku-center/chi-native/http";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { createTestPaseoDaemon } from "./paseo-daemon.js";
@@ -14,6 +13,7 @@ import { mentionFixtureTitle, purgeMentionFixtureSources } from "./chi-mention-f
 import type { MutableChiConfig } from "@getpaseo/protocol/messages";
 
 const repo = "github:gszep/chi-synthetic-two-actor-20260925";
+const fixtureEndpoint = "https://chi-backend-vadmp23swa-an.a.run.app";
 interface NativeMessage {
   id: string;
   type: "user";
@@ -61,7 +61,7 @@ export async function startMentionActor(
   // The live repository catalog can be cold after deployment. Establish its
   // readiness before the rendered scenario; real capture still reauthorizes it.
   for (let attempt = 0; ; attempt++) {
-    const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), "repos"), {
+    const response = await fetch(append(endpointUrl(fixtureEndpoint), "repos"), {
       redirect: "error",
       signal: AbortSignal.timeout(20000),
       headers: { authorization: `Bearer ${token}` },
@@ -73,7 +73,7 @@ export async function startMentionActor(
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   async function removeSource(sourceId: string) {
-    const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+    const url = append(endpointUrl(fixtureEndpoint), "evidence");
     url.searchParams.set("sourceId", sourceId);
     const response = await fetch(url, {
       method: "DELETE",
@@ -87,7 +87,7 @@ export async function startMentionActor(
     actor,
     remove: removeSource,
     list: async (cursor) => {
-      const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
+      const url = append(endpointUrl(fixtureEndpoint), "evidence");
       url.searchParams.set("limit", "100");
       if (cursor) url.searchParams.set("cursor", cursor);
       const response = await fetch(url, {
@@ -150,7 +150,7 @@ export async function startMentionActor(
   const createAttempts: string[] = [];
   const replyAttempts: string[] = [];
   const authority = {
-    endpoint: DEFAULT_BACKEND_URL,
+    endpoint: fixtureEndpoint,
     login: async () => ({
       schemaVersion: 1 as const,
       identityProvider: "github",
@@ -282,7 +282,7 @@ export async function startMentionActor(
     modeId: "default",
   });
   async function sourceRequest(path: string, method: string, body?: unknown) {
-    const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), path), {
+    const response = await fetch(append(endpointUrl(fixtureEndpoint), path), {
       method,
       redirect: "error",
       headers: {

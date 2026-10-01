@@ -7,7 +7,6 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { minimiseNativeExport, prepareNativeCapture } from "@henkaku-center/chi-native/capture";
-import { DEFAULT_BACKEND_URL } from "@henkaku-center/chi-native/repository";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority, type ChiConnectionOptions } from "./connection.js";
 import type { ProvenanceRemover, ProvenanceWriter } from "./provenance.js";
@@ -22,6 +21,15 @@ import {
 } from "@getpaseo/protocol/chi-mentions";
 
 const homes: string[] = [];
+const LEGACY_ENDPOINT = "https://chi-backend-vadmp23swa-an.a.run.app";
+function fixtureConfig(endpoint = LEGACY_ENDPOINT) {
+  return {
+    destinations: { fixture: { name: "Fixture", endpoint } },
+    mappings: [
+      { repo: "github:fixture/repo", destination: "fixture", audience: "shared" as const },
+    ],
+  };
+}
 function barrier() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
@@ -83,7 +91,7 @@ async function fixture() {
   });
   const authority: ChiAuthority = {
     invalidate: () => undefined,
-    endpoint: "https://chi.invalid",
+    endpoint: LEGACY_ENDPOINT,
     request,
     login: async () => ({ sessionToken: "fixture", chiUserId: "github:owner" }),
   };
@@ -150,6 +158,7 @@ async function fixture() {
       home,
       serverId: "server",
       authority,
+      getChiConfig: () => fixtureConfig(authority.endpoint),
       scanCapture: async () => ({ verdict: "clean" as const }),
     });
   return {
@@ -499,7 +508,7 @@ describe("Chi owner recovery", () => {
     ]);
     await expect(
       owner.mentionOperation(f.home, "workspace", mutation, scope.context),
-    ).rejects.toThrow("chi-mention-context-changed");
+    ).rejects.toThrow("chi-destination-required");
     expect(operations).toEqual([]);
     repo = f.input.repo;
     execFileSync("git", [
@@ -589,6 +598,27 @@ describe("Chi owner recovery", () => {
     expect(f.runtime.fork).not.toHaveBeenCalled();
   });
 
+  it("keeps receipt-owned forks quarantined after removing or replacing their destination", async () => {
+    const f = await canonicalFixture();
+    await f.ready();
+    for (const config of [undefined, fixtureConfig("https://replacement.invalid")]) {
+      const connection = new ChiConnection(f.manager, {
+        home: f.home,
+        serverId: "server",
+        getChiConfig: () => config,
+      });
+      await expect(
+        connection.assertImportAllowed({
+          provider: "opencode",
+          providerHandleId: "ses_fork",
+          cwd: f.home,
+          workspaceId: "workspace",
+        }),
+      ).rejects.toThrow("chi-conversation-recovery-required");
+    }
+    expect(f.runtime.import).not.toHaveBeenCalled();
+  });
+
   it("registers a ready fork after a crash, then returns the advanced registered agent after restart/lost reply", async () => {
     const f = await canonicalFixture();
     await f.ready();
@@ -662,6 +692,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "other",
       authority: f.authority,
+      getChiConfig: () => fixtureConfig(f.authority.endpoint),
       scanCapture: async () => ({ verdict: "clean" as const }),
     });
     await expect(otherOwner.continue(f.input, f.registration)).rejects.toThrow(
@@ -735,6 +766,7 @@ describe("Chi owner recovery", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
+      getChiConfig: () => fixtureConfig(f.authority.endpoint),
       scanCapture: async () => {
         throw new Error("capture-local-secret-rejected");
       },
@@ -872,6 +904,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
+      getChiConfig: () => fixtureConfig(f.authority.endpoint),
       scanCapture: async () => ({ verdict: "attribution-unavailable" }),
     });
     const result = await connection.continue(f.input, f.registration);
@@ -1033,6 +1066,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
+      getChiConfig: () => fixtureConfig(f.authority.endpoint),
       scanCapture: async () => ({ verdict: "clean" as const }),
     });
     const b = ownerB.continue(f.input, {
@@ -1123,6 +1157,7 @@ describe("canonical Chi coordination", () => {
       home: f.home,
       serverId: "server",
       authority: f.authority,
+      getChiConfig: () => fixtureConfig(f.authority.endpoint),
       scanCapture: async (full, minimised) => {
         expect(minimised).toEqual({
           native: capture.native,
@@ -1607,7 +1642,7 @@ describe("canonical Chi coordination", () => {
 
 describe("automatic sync destinations", () => {
   const destinationConfig = (
-    endpoint = DEFAULT_BACKEND_URL,
+    endpoint = LEGACY_ENDPOINT,
     audience: "private" | "shared" = "shared",
     mappings: Array<{ repo: string; destination: string; audience?: "private" | "shared" }> = [
       { repo: "github:fixture/repo", destination: "henkaku", audience },
@@ -1714,6 +1749,110 @@ describe("automatic sync destinations", () => {
       capturePending: false,
     });
     expect(f.evidence.at(-1)?.visibility).toBe("shared");
+  });
+
+  it.each([
+    null,
+    { destinations: {}, mappings: [] },
+    destinationConfig(LEGACY_ENDPOINT, "private", []),
+  ])(
+    "refuses Share, Continue and mentions without a mapping before auth or mutation (%j)",
+    async (config) => {
+      const f = await syncFixture(config);
+      const agent = await f.register();
+      const login = vi.spyOn(f.authority, "login");
+      const connection = f.connect();
+      await expect(connection.share(agent.id)).rejects.toThrow("chi-destination-required");
+      await expect(
+        connection.continue(
+          { ...f.input, canonical: { conversationId: "c", transferId: "t" } },
+          f.registration,
+        ),
+      ).rejects.toThrow("chi-destination-required");
+      await expect(
+        connection.mentionOperation(f.home, "workspace", { action: "scope" }),
+      ).rejects.toThrow("chi-destination-required");
+      await expect(
+        connection.prepareMentions(agent.id, "m", "hello", ["github:owner"]),
+      ).rejects.toThrow("chi-destination-required");
+      expect(login).not.toHaveBeenCalled();
+      expect(f.runtime.export).not.toHaveBeenCalled();
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.manager.getAgent(agent.id)!.labels).toEqual({});
+      expect(f.evidence).toEqual([]);
+    },
+  );
+
+  it("can construct an unconfigured daemon and keep ordinary local imports available", async () => {
+    const f = await fixture();
+    const request = vi.spyOn(globalThis, "fetch");
+    const connection = new ChiConnection(f.manager, { home: f.home, serverId: "server" });
+    expect(await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).toMatchObject({
+      destination: null,
+      mentionsAvailable: false,
+    });
+    await expect(
+      connection.assertImportAllowed({
+        provider: "opencode",
+        providerHandleId: "ses_local",
+        cwd: f.home,
+        workspaceId: "workspace",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(connection.inboxOperation({ action: "scope" })).rejects.toThrow(
+      "chi-destination-required",
+    );
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "migrates legacy explicit=%s by exact endpoint without following a new mapping or widening audience",
+    async (explicit) => {
+      const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
+      const agent = await f.register({
+        "chi.native": JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: null,
+          head: null,
+          error: null,
+          explicit,
+          audience: "private",
+        }),
+      });
+      expect(await f.connect().capture(agent.id)).toMatchObject({
+        destination: "henkaku",
+        endpoint: LEGACY_ENDPOINT,
+        audience: "private",
+      });
+      expect(f.evidence).toEqual([{ visibility: "private" }]);
+      const login = vi.spyOn(f.authority, "login");
+      await expect(f.connect(null).capture(agent.id)).rejects.toThrow("chi-destination-changed");
+      expect(login).not.toHaveBeenCalled();
+      expect(f.evidence).toHaveLength(1);
+    },
+  );
+
+  it("blocks a late upload after config removal and never sends its bearer to a replacement endpoint", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    let config: ReturnType<typeof destinationConfig> | undefined = destinationConfig(
+      f.authority.endpoint,
+    );
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      getChiConfig: () => config,
+      scanCapture: async () => {
+        config = destinationConfig("https://replacement.invalid");
+        return { verdict: "clean" };
+      },
+      provenance: async () => ({ attempted: false, created: false, reason: "test", ref: "" }),
+    });
+    await expect(connection.capture(agent.id)).rejects.toThrow("chi-destination-required");
+    expect(f.evidenceAttempts()).toBe(0);
+    expect(f.evidence).toEqual([]);
   });
 
   async function humanFixture() {
@@ -2164,7 +2303,7 @@ describe("automatic sync destinations", () => {
   });
 
   it("leaves an unmapped workspace local with no association and no upload", async () => {
-    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
     const agent = await f.register();
     await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-share-required");
     expect(f.manager.getAgent(agent.id)!.labels["chi.native"]).toBeUndefined();
@@ -2191,7 +2330,7 @@ describe("automatic sync destinations", () => {
   });
 
   it("binds a legacy association to the configured default destination", async () => {
-    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared"));
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared"));
     const agent = await f.register({
       "chi.native": JSON.stringify({
         repo: "github:fixture/repo",
@@ -2204,7 +2343,7 @@ describe("automatic sync destinations", () => {
     const result = await f.connect().capture(agent.id);
     expect(result).toMatchObject({
       destination: "henkaku",
-      endpoint: DEFAULT_BACKEND_URL,
+      endpoint: LEGACY_ENDPOINT,
       audience: "shared",
     });
     expect(f.evidence).toHaveLength(1);
@@ -2221,9 +2360,9 @@ describe("automatic sync destinations", () => {
         error: null,
       }),
     });
-    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-mismatch");
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-required");
     const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
-    expect(association).toMatchObject({ paused: true, error: "chi-destination-mismatch" });
+    expect(association).toMatchObject({ paused: true, error: "chi-destination-required" });
     expect(f.evidence).toHaveLength(0);
   });
 
@@ -2244,13 +2383,13 @@ describe("automatic sync destinations", () => {
   });
 
   it("reports a local destination for an unmapped workspace", async () => {
-    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
     await f.register();
     const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
     expect(status.destination).toBeNull();
   });
 
-  it("keeps a legacy association shared when no chi section is configured", async () => {
+  it("pauses a legacy association before auth when no chi section is configured", async () => {
     const f = await syncFixture(null);
     const agent = await f.register({
       "chi.native": JSON.stringify({
@@ -2261,15 +2400,18 @@ describe("automatic sync destinations", () => {
         error: null,
       }),
     });
-    await f.connect().capture(agent.id);
-    expect(f.evidence.at(-1)?.visibility).toBe("shared");
-    expect(
-      JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).audience,
-    ).toBeUndefined();
+    const login = vi.spyOn(f.authority, "login");
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-required");
+    expect(f.evidence).toEqual([]);
+    expect(login).not.toHaveBeenCalled();
+    expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+      paused: true,
+      capturePending: false,
+    });
   });
 
   it("accepts a mixed-case repository in a legacy association", async () => {
-    const f = await syncFixture(null);
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT));
     const agent = await f.register({
       "chi.native": JSON.stringify({
         repo: "github:Fixture/Repo",
@@ -2338,7 +2480,7 @@ describe("automatic sync destinations", () => {
   });
 
   it("reports the default destination for an explicit association and the matched rule for a mapped one", async () => {
-    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
     const explicit = await f.register({
       "chi.native": JSON.stringify({
         repo: "github:fixture/repo",
@@ -2347,7 +2489,7 @@ describe("automatic sync destinations", () => {
         head: null,
         error: null,
         explicit: true,
-        endpoint: DEFAULT_BACKEND_URL,
+        endpoint: LEGACY_ENDPOINT,
         audience: "private",
       }),
     });
@@ -2356,8 +2498,8 @@ describe("automatic sync destinations", () => {
       cwd: f.home,
     });
     expect(explicitStatus.destination).toMatchObject({
-      id: "default",
-      endpoint: DEFAULT_BACKEND_URL,
+      id: "henkaku",
+      endpoint: LEGACY_ENDPOINT,
       audience: "private",
       actor: "github:owner",
     });
@@ -2376,13 +2518,13 @@ describe("automatic sync destinations", () => {
     expect(mappedStatus.mentionsAvailable).toBe(true);
   });
 
-  it("reports mentions unavailable for a peer destination", async () => {
+  it("supports a self-hosted destination as the single mention deployment", async () => {
     const f = await syncFixture(destinationConfig("https://peer.invalid", "shared"));
     const agent = await f.register();
     await f.connect().capture(agent.id);
     const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
     expect(status.destination?.endpoint).toBe("https://peer.invalid");
-    expect(status.mentionsAvailable).toBe(false);
+    expect(status.mentionsAvailable).toBe(true);
   });
 
   it("does not persist a transient busy capture as a durable error", async () => {
@@ -2405,7 +2547,7 @@ describe("automatic sync destinations", () => {
     expect(association.error ?? null).toBeNull();
   });
 
-  it("reports the default destination for a legacy non-paused association", async () => {
+  it("reports paused local status for a legacy association without configuration", async () => {
     const f = await syncFixture(null);
     const agent = await f.register({
       "chi.native": JSON.stringify({
@@ -2417,12 +2559,8 @@ describe("automatic sync destinations", () => {
       }),
     });
     const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
-    expect(status.destination).toMatchObject({
-      id: "default",
-      endpoint: DEFAULT_BACKEND_URL,
-      audience: "shared",
-      actor: "github:owner",
-    });
+    expect(status.destination).toBeNull();
+    expect(status.error).toBe("chi-destination-required");
     expect(status.mentionsAvailable).toBe(false);
     expect(agent.id).toBeTruthy();
   });
@@ -3042,7 +3180,7 @@ describe("automatic sync destinations", () => {
       reason: "unused",
       ref: "refs/chi/provenance/owner/ses_fork",
     }));
-    const f = await syncFixture(destinationConfig(DEFAULT_BACKEND_URL, "shared", []));
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
     const agent = await f.register();
     await expect(f.connect(undefined, undefined, { provenance }).capture(agent.id)).rejects.toThrow(
       "chi-share-required",
