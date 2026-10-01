@@ -17,11 +17,19 @@ const gatedCiJobs = new Map([
   ["typecheck", { name: "typecheck", contract: "quality" }],
   [
     "server-tests-ubuntu",
-    { name: "server-tests (ubuntu-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+    { name: "server-tests (ubuntu-latest, opencode-ai@1.14.46)", contracts: ["server", "hub"] },
+  ],
+  [
+    "server-tests-ubuntu-v2",
+    { name: "server-tests (ubuntu-latest, @opencode/cli@2.0.10)", contracts: ["server", "hub"] },
   ],
   [
     "server-tests-windows",
-    { name: "server-tests (windows-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+    { name: "server-tests (windows-latest, opencode-ai@1.14.46)", contracts: ["server", "hub"] },
+  ],
+  [
+    "server-tests-windows-v2",
+    { name: "server-tests (windows-latest, @opencode/cli@2.0.10)", contracts: ["server", "hub"] },
   ],
   ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
   ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
@@ -90,22 +98,54 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   const trigger = workflowSource.split("jobs:", 1)[0];
 
   assert.match(trigger, /^\s+merge_group:\s*$/m);
-  assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
+  assert.doesNotMatch(workflowSource, /matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
     assert.ok(job, `missing static job ${jobId}`);
-    // Literal match: matrix expressions (`${{ ... }}`) make the job name
-    // dynamic, so a regex would have to escape far more than parentheses.
+    // Static names must survive job-level skips, before matrix expansion.
     assert.ok(
       job.split("\n").includes(`    name: ${expected.name}`),
       `job ${jobId} name drifted: expected "    name: ${expected.name}"`,
     );
     assert.match(job, /needs\.changes\.outputs\.full != 'false'/);
+    assert.match(job, /needs\.changes\.outputs\.docs-only != 'true'/);
+    assert.match(job, /!github\.event\.pull_request\.draft/);
     for (const contract of expected.contracts ?? [expected.contract]) {
       assert.match(job, new RegExp(`needs\\.changes\\.outputs\\.${contract} != 'false'`));
     }
+  }
+});
+
+test("docs classification preserves required contexts and main-only cache writers", () => {
+  const source = readFileSync(ciWorkflowPath, "utf8");
+  assert.doesNotMatch(source.split("jobs:", 1)[0], /paths-ignore/);
+  assert.match(source, /scripts\/ci-docs-only\.mjs/);
+  assert.match(source, /steps\.docs\.outputs\.full != 'false'/);
+  assert.match(source, /docs-only: \$\{\{ steps\.classified\.outputs\.skip \}\}/);
+  assert.match(source, /full: \$\{\{ steps\.classified\.outputs\.full \}\}/);
+  assert.ok(
+    source.indexOf("name: Publish verified classification") >
+      source.indexOf("name: Validate CI contracts"),
+  );
+  assert.match(
+    source,
+    /SKIP:.*steps\.docs\.outcome == 'success' && steps\.filter\.outcome == 'success'/,
+  );
+  assert.match(
+    source,
+    /FULL:.*steps\.docs\.outcome != 'success' \|\| steps\.filter\.outcome != 'success'/,
+  );
+  assert.match(source, /cancel-in-progress:.*github\.ref != 'refs\/heads\/main'/);
+  for (const action of ["ci-restore", "ci-save"]) {
+    const content = readFileSync(new URL(`.github/actions/${action}/action.yml`, repoRoot), "utf8");
+    assert.doesNotMatch(content, /actions\/cache@/);
+    if (action === "ci-save")
+      assert.equal(
+        (content.match(/uses: actions\/cache\/save/g) ?? []).length,
+        (content.match(/if: github\.ref == 'refs\/heads\/main'/g) ?? []).length,
+      );
   }
 });
 
@@ -118,6 +158,40 @@ test("change gating allows superseded workflow runs to cancel", () => {
       "always() keeps jobs alive after concurrency cancellation; use !cancelled() for fail-open gating",
     );
   }
+});
+
+test("the browser cache writer explicitly installs browsers before saving", () => {
+  const save = readFileSync(new URL(".github/actions/ci-save/action.yml", repoRoot), "utf8");
+  const browserSave = save.split(/    - /).find((step) => /key: browsers-/.test(step));
+  assert.ok(browserSave, "browser cache save step must exist");
+  assert.match(
+    browserSave,
+    /if: github\.ref == 'refs\/heads\/main' && github\.job == '[a-z0-9-]+'\n/,
+  );
+  const writer = /github\.job == '([a-z0-9-]+)'/.exec(browserSave)[1];
+  const job = jobBlocks(readFileSync(ciWorkflowPath, "utf8")).get(writer)?.join("\n");
+  assert.ok(job, `missing browser writer job ${writer}`);
+  const steps = job.split(/      - /);
+  const install = steps.findIndex((step) =>
+    /run: npx playwright install (?:--with-deps )?chromium\b/.test(step),
+  );
+  const saveIndex = steps.findIndex((step) => /uses: \.\/\.github\/actions\/ci-save/.test(step));
+  assert.ok(install >= 0 && saveIndex > install, "writer must install Chromium before saving");
+  assert.doesNotMatch(
+    steps[install],
+    /\bif:|continue-on-error:/,
+    "browser installation must succeed unconditionally",
+  );
+});
+
+test("format and lint cannot save build snapshots", () => {
+  const save = readFileSync(new URL(".github/actions/ci-save/action.yml", repoRoot), "utf8");
+  const buildSave = save.split(/    - /).find((step) => /key: build-/.test(step));
+  assert.ok(buildSave, "build cache save step must exist");
+  assert.match(
+    buildSave,
+    /if: github\.ref == 'refs\/heads\/main' && github\.job != 'format' && github\.job != 'lint'\n/,
+  );
 });
 
 test("focused contracts stay inside existing required checks", () => {

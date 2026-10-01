@@ -6716,10 +6716,6 @@ export class DaemonClient {
     event?: string;
     reasonCode?: string;
   }): void {
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
     const wasDisposed = this.connectionState.status === "disposed";
     const reason = input?.reason;
 
@@ -6748,7 +6744,12 @@ export class DaemonClient {
       return;
     }
 
-    this.armReconnectTimer();
+    // A failed WebSocket can emit both error and close. Keep the first retry's
+    // deadline and count the failed connection once, rather than doubling its
+    // backoff and postponing recovery again for the second event.
+    if (!this.reconnectTimeout) {
+      this.armReconnectTimer();
+    }
   }
 
   private emitDisconnectedStateForReconnect(
