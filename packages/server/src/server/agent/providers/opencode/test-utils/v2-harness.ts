@@ -105,7 +105,7 @@ export class V2Harness {
       environment: async (input) => {
         this.environments.push(input);
       },
-      instructions: { entry: { list: unexpected, put: unexpected, remove: unexpected } },
+      instructions: { entry: { list: unexpected, put: unexpected, remove: async () => undefined } },
       prompt: (input, options) => this.prompt(input, options),
       wait: (input, options) => this.wait(input, options),
       interrupt: (input, options) => this.interrupt(input, options),

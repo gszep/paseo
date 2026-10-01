@@ -32,7 +32,7 @@ afterEach(async () => {
   );
 });
 
-function createCatalog(): PaseoToolCatalog {
+function createCatalog(names = ["echo_context"]): PaseoToolCatalog {
   const tool = {
     name: "echo_context",
     title: "Echo context",
@@ -43,7 +43,7 @@ function createCatalog(): PaseoToolCatalog {
       return { content: [{ type: "text", text: parsed.value }] };
     },
   };
-  const tools = new Map([[tool.name, tool]]);
+  const tools = new Map(names.map((name) => [name, { ...tool, name }]));
   return {
     tools,
     getTool(name) {
@@ -76,7 +76,15 @@ describe("OpenCodeBridge", () => {
     const logger = createTestLogger();
     const clients = createTestAgentClients();
     const agentStorage = new AgentStorage(path.join(paseoHome, "agents"), logger);
-    const agentManager = new AgentManager({ clients, registry: agentStorage, logger });
+    const agentManager = new AgentManager({
+      clients,
+      registry: agentStorage,
+      logger,
+      chi: { home: paseoHome, serverId: "fixture" },
+    });
+    const humanPrompts = vi
+      .spyOn(agentManager.chi!, "humanPromptOperation")
+      .mockResolvedValue({ items: [], muted: false, snoozedUntil: 0 });
     const providerSnapshotManager = new ProviderSnapshotManager({ logger, extraClients: clients });
     const dependencies = { agentManager, agentStorage, providerSnapshotManager, logger };
     const bridge = new OpenCodeBridge({ paseoHome, logger });
@@ -109,8 +117,21 @@ describe("OpenCodeBridge", () => {
       const definitions = new Map(manifest.tools.map((tool) => [tool.name, tool]));
       const createDefinition = definitions.get("create_agent")!;
       const sendDefinition = definitions.get("send_agent_prompt")!;
+      const humanDefinition = definitions.get("human_prompts")!;
+      expect(humanDefinition).toMatchObject({
+        inputSchema: { type: "object", required: ["operation"] },
+      });
+      expect(createPaseoToolCatalog(dependencies).getTool("human_prompts")).toBeUndefined();
       // A model can send every advertised default, including a field absent from the input below.
       const ajv = new Ajv({ useDefaults: true, strict: false });
+      expect(ajv.compile(humanDefinition.inputSchema)({ operation: { action: "list" } })).toBe(
+        true,
+      );
+      expect(
+        ajv.compile(humanDefinition.inputSchema)({
+          operation: { action: "list", agentId: "other" },
+        }),
+      ).toBe(false);
       const createInput = {
         title: "Bridge child",
         provider: "codex/gpt-5.4",
@@ -147,6 +168,16 @@ describe("OpenCodeBridge", () => {
         },
       });
       try {
+        await tools
+          .get("paseo_human_prompts")!
+          .execute({ operation: { action: "list" } }, { sessionID: "bound" });
+        expect(humanPrompts).toHaveBeenCalledWith(parent.id, { action: "list" });
+        await expect(
+          catalog.executeTool("human_prompts", {
+            operation: { action: "list", sessionId: "foreign" },
+          }),
+        ).rejects.toThrow();
+        expect(humanPrompts).toHaveBeenCalledTimes(1);
         const created = await tools
           .get("paseo_create_agent")!
           .execute(createInput, { sessionID: "bound" });
@@ -341,7 +372,7 @@ describe("OpenCodeBridge", () => {
   test("v2 plugin filters caller tools and inherits child session bindings", async () => {
     const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-v2-scope-"));
     temporaryDirectories.push(paseoHome);
-    const catalog = createCatalog();
+    const catalog = createCatalog(["echo_context", "human_prompts"]);
     const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
     bridge.setManifestCatalog(catalog);
     await bridge.start();
@@ -389,8 +420,18 @@ describe("OpenCodeBridge", () => {
       });
       const allowed: V2TestContext = {
         sessionID: "child",
-        tools: { paseo_echo_context: {}, native: {} },
+        tools: { paseo_echo_context: {}, paseo_human_prompts: {}, native: {} },
       };
+      await expect(
+        tools
+          .get("paseo_human_prompts")!
+          .execute({ value: "foreign question" }, { sessionID: "child" }),
+      ).rejects.toThrow("own managed session");
+      await expect(
+        tools
+          .get("paseo_human_prompts")!
+          .execute({ value: "own question" }, { sessionID: "parent" }),
+      ).resolves.toMatchObject({ content: [{ type: "text", text: "own question" }] });
       await filter(allowed);
       expect(Object.keys(allowed.tools)).toEqual(["paseo_echo_context", "native"]);
       const disabled: V2TestContext = {

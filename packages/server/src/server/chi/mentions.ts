@@ -25,6 +25,7 @@ export interface MentionIdentity {
   actor: string;
   token: string;
   credentialGeneration?: string;
+  humanPrompts?: boolean;
 }
 export interface MentionAuthority {
   endpoint: string;
@@ -180,6 +181,12 @@ export class ChiMentions {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
+      if (path === "handoffs/inbox" && response.status === 400) {
+        const error = await boundedText(response, 4096)
+          .then((text) => JSON.parse(text))
+          .catch(() => null);
+        if (error?.reason === "invalid-cursor") throw new Error("chi-inbox-invalid-cursor");
+      }
       await response.body?.cancel();
       throw new Error(`chi-mentions-http-${response.status}`);
     }
@@ -300,21 +307,12 @@ export class ChiMentions {
     for (const delivery of receipt.deliveries) {
       if (delivery.status === "delivered") continue;
       try {
-        const response = handoffSchema.parse(
-          await this.call(identity, "handoffs", "POST", {
-            id: delivery.handoffId,
-            recipient: delivery.recipient.ownerId,
-            text: receipt.text,
-            sources: [receipt.source],
-          }),
-        );
-        if (
-          response.handoff.id !== delivery.handoffId ||
-          response.handoff.author !== identity.actor ||
-          response.handoff.recipient !== delivery.recipient.ownerId ||
-          response.handoff.repo !== identity.repo
-        )
-          throw new Error("chi-mention-invalid-response");
+        await this.createHandoff(identity, {
+          id: delivery.handoffId,
+          recipient: delivery.recipient.ownerId,
+          text: receipt.text,
+          sources: [receipt.source],
+        });
         delivery.status = "delivered";
         delivery.error = null;
       } catch (error) {
@@ -323,6 +321,25 @@ export class ChiMentions {
       }
       await writeConversationReceipt(this.path(receipt.agentId, receipt.messageId), receipt);
     }
+  }
+  async createHandoff(
+    identity: MentionIdentity,
+    input: {
+      id: string;
+      recipient: string;
+      text: string;
+      sources: z.infer<typeof ChiSourceSchema>[];
+    },
+  ) {
+    const { handoff } = handoffSchema.parse(await this.call(identity, "handoffs", "POST", input));
+    if (
+      handoff.id !== input.id ||
+      handoff.author !== identity.actor ||
+      handoff.recipient !== input.recipient ||
+      handoff.repo !== identity.repo
+    )
+      throw new Error("chi-mention-invalid-response");
+    return handoff;
   }
   async retry(agentId: string, identity: MentionIdentity) {
     return this.exclusive(agentId, async () => {
@@ -467,6 +484,7 @@ export class ChiMentions {
         handoffs: z.array(ChiHandoffSchema),
         nextCursor: z.string().nullable(),
         unreadCount: z.number().int().nonnegative(),
+        unavailableRepos: z.array(z.string()).optional(),
       })
       .parse(
         await this.call(identity, "handoffs/inbox", "GET", undefined, {
@@ -485,6 +503,7 @@ export class ChiMentions {
       handoffs: result.handoffs,
       nextCursor: result.nextCursor,
       unreadCount: result.unreadCount,
+      ...(result.unavailableRepos ? { unavailableRepos: result.unavailableRepos } : {}),
     };
   }
 }

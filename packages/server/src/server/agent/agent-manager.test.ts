@@ -452,6 +452,35 @@ test("Chi admission checks queued prompts at the execution boundary and releases
 });
 const MOBILE_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("mobile-client");
 
+test("foreground admission carries and acknowledges the Chi reminder through the provider boundary", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "human-reminder-admission-"));
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    logger: createTestLogger(),
+    chi: { home: directory, serverId: "fixture" },
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
+    workspaceId: undefined,
+  });
+  try {
+    const boundary = vi
+      .spyOn(manager.chi!, "humanPromptBoundary")
+      .mockResolvedValue("untrusted human-written data");
+    const ack = vi
+      .spyOn(manager.chi!, "acknowledgeHumanPromptReminder")
+      .mockResolvedValue(undefined);
+    const start = vi.spyOn(manager.getAgent(agent.id)!.session!, "startTurn");
+    await manager.runAgent(agent.id, "foreground");
+    expect(boundary).toHaveBeenCalledWith(agent.id);
+    expect(start.mock.calls[0]![1]?.humanPromptReminder).toBe("untrusted human-written data");
+    await start.mock.calls[0]![1]?.onHumanPromptReminder?.();
+    expect(ack).toHaveBeenCalledWith(agent.id, "untrusted human-written data");
+  } finally {
+    await manager.closeAgent(agent.id);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("Chi admission blocks a persisted predecessor unarchive after manager restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "chi-unarchive-"));
   const logger = createTestLogger();

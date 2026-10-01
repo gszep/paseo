@@ -222,6 +222,23 @@ function readAttentionRequiredMessage(ws: ReturnType<typeof createOpenSocket>) {
 }
 
 describe("VoiceAssistantWebSocketServer notification payloads", () => {
+  it("suppresses human prompts only for the recipient's visible recent clients", () => {
+    const chi = {
+      isHumanPromptViewed: (_agent: string, _recipient: string, _owner: string) => false,
+    };
+    const { server } = createServer({ chi });
+    const ws = connectClient(server, {
+      deviceType: "web",
+      focusedAgentId: "agent-1",
+      appVisible: true,
+      lastActivityAt: new Date(),
+    });
+    expect(chi.isHumanPromptViewed("agent-1", "github:owner", "github:owner")).toBe(true);
+    expect(chi.isHumanPromptViewed("agent-1", "github:recipient", "github:owner")).toBe(false);
+    expect(chi.isHumanPromptViewed("other", "github:owner", "github:owner")).toBe(false);
+    asInternals<WebSocketServerInternals>(server).sessions.delete(ws);
+    expect(chi.isHumanPromptViewed("agent-1", "github:owner", "github:owner")).toBe(false);
+  });
   afterEach(() => {
     vi.clearAllMocks();
   });

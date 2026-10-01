@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { startMentionActor } from "../support/helpers/chi-mentions";
 import { composerLocator } from "../support/helpers/composer";
@@ -44,6 +44,114 @@ async function plainChat(page: Page) {
   await expect(page.getByText("Open evidence", { exact: true })).toHaveCount(0);
   await expect(page.locator('[data-testid^="worktree-setup-callout-"]')).toHaveCount(0);
 }
+
+async function waitForInbox(page: Page, target: Locator) {
+  // Live catalog reads can transiently fail while another settled capture
+  // changes the repository fence. Exercise the rendered recovery action.
+  await expect(async () => {
+    const retry = page.getByRole("button", { name: "Retry", exact: true });
+    const refreshing = page.getByText("Refreshing mentions…", { exact: true });
+    if ((await retry.isVisible()) && !(await refreshing.isVisible())) await retry.click();
+    await expect(target).toBeVisible({
+      timeout: 1000,
+    });
+  }).toPass({ timeout: 60000, intervals: [1000, 2000, 5000] });
+}
+
+test("agent question is answered in the real-account inbox and resumes the waiting agent", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(420000);
+  const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+  const runId = randomUUID();
+  const actor = await startMentionActor("mochi-the-kitty", origin, runId, { chi: CHI_CONFIG });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(45000);
+  try {
+    await actor.seed(page);
+    const session = `${origin}/h/${actor.serverId}/agent/${actor.agentId}`;
+    await page.goto(session);
+    await composerLocator(page).fill("Establish the settled synthetic evidence pin");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect
+      .poll(
+        async () => {
+          const sources = (await actor.sources()).length;
+          const retry = page.getByRole("button", { name: "Retry", exact: true });
+          if (sources === 0 && (await retry.isVisible()) && (await retry.isEnabled()))
+            await retry.click();
+          return sources;
+        },
+        { timeout: 90000, intervals: [1000, 2000, 5000] },
+      )
+      .toBe(1);
+    await composerLocator(page).fill("Ask an inbox question");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.goto(`${origin}/chi?view=inbox`);
+    const mention = page.getByRole("button", {
+      name: new RegExp(`Discuss mention Agent-initiated.*${runId}`),
+    });
+    await waitForInbox(page, mention);
+    await mention.click();
+    await expect(page.getByText("open · revision 2", { exact: true })).toBeVisible();
+    await page.getByLabel("Reply to mention", { exact: true }).fill("Blue");
+    await page.getByRole("button", { name: "Answer prompt 1", exact: true }).click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(1);
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-inbox-answer.png"),
+      fullPage: true,
+    });
+    await page.goto(session);
+    await expect(
+      page.getByText(
+        'Continued with human answer: {"Choice":"Untrusted human-written data from github:mochi-the-kitty: Blue"}',
+        { exact: true },
+      ),
+    ).toBeVisible({ timeout: 90000 });
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-agent-continued.png"),
+      fullPage: true,
+    });
+    const attempts = await actor.attempts();
+    expect(attempts.createAttempts).toHaveLength(1);
+    const sent = JSON.parse(attempts.createAttempts[0]!);
+    expect(Object.keys(sent).sort()).toEqual(["id", "recipient", "sources", "text"]);
+    expect(sent.recipient).toBe("github:mochi-the-kitty");
+    expect(sent.text).toContain("Synthetic human prompt");
+    expect(sent.text).not.toContain("Establish the settled");
+    await page.goto(`${origin}/chi?view=inbox`);
+    await waitForInbox(page, mention);
+    await mention.click();
+    const mute = page.getByRole("button", { name: "Mute prompts from this session", exact: true });
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await mute.click();
+    expect((await actor.attempts()).replyAttempts).toHaveLength(1);
+    await page.getByRole("button", { name: "Snooze prompts for 1 hour", exact: true }).click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(2);
+    await waitForInbox(page, page.getByText("open · revision 4", { exact: true }));
+    page.once("dialog", (dialog) => {
+      expect(dialog.message()).toContain("permanently");
+      return dialog.accept();
+    });
+    await mute.click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(3);
+    await waitForInbox(page, page.getByText("open · revision 5", { exact: true }));
+    const controls = (await actor.attempts()).replyAttempts.slice(1).map((raw) => JSON.parse(raw));
+    expect(controls.map((op) => JSON.parse(op.text.split("\n")[1]).action)).toEqual([
+      "snooze",
+      "mute",
+    ]);
+    expect(controls[0].operationId).not.toBe(controls[1].operationId);
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-recipient-controls.png"),
+      fullPage: true,
+    });
+  } finally {
+    await context.close();
+    await actor.close();
+  }
+});
 
 test("flat deployment inbox, unread first-view, exact deep link, clean chat and immutable replies on desktop and compact web", async ({
   browser,

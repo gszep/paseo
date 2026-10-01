@@ -58,6 +58,20 @@ export async function startMentionActor(
   if (!credentials)
     throw new Error("Set CHI_MENTION_TEST_ACTORS_DIR to the private test-account token directory");
   const token = (await readFile(join(credentials, `${actor}.chi-token`), "utf8")).trim();
+  // The live repository catalog can be cold after deployment. Establish its
+  // readiness before the rendered scenario; real capture still reauthorizes it.
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), "repos"), {
+      redirect: "error",
+      signal: AbortSignal.timeout(20000),
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await response.body?.cancel();
+    if (response.ok) break;
+    if (response.status !== 503 || attempt === 2)
+      throw new Error(`Synthetic repository readiness failed: ${response.status}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
   async function removeSource(sourceId: string) {
     const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
     url.searchParams.set("sourceId", sourceId);
@@ -174,6 +188,22 @@ export async function startMentionActor(
   };
   const agentClient = createTestAgentClient("opencode", {
     nativeRuntime: runtime,
+    humanPromptTurnId: async (sessionId) => messages.get(sessionId)?.at(-1)?.id ?? null,
+    questionForPrompt: (prompt) =>
+      prompt.startsWith("Ask an inbox question")
+        ? {
+            questions: [
+              {
+                header: "Choice",
+                question: `Synthetic human prompt ${runId}: choose a colour`,
+                options: [
+                  { label: "Blue", description: "Use blue" },
+                  { label: "Green", description: "Use green" },
+                ],
+              },
+            ],
+          }
+        : null,
     onStartTurn(prompt, options, sessionId) {
       if (!options?.clientMessageId || typeof prompt !== "string")
         throw new Error("Synthetic fixture requires a correlated text prompt");
@@ -322,12 +352,15 @@ export async function startMentionActor(
     },
     async close() {
       try {
-        for (const sourceId of createdSources) await removeSource(sourceId);
-      } finally {
+        // The rendered continuation can finish before its settled capture. Drain
+        // that writer and stop the isolated host before purging its evidence.
+        await host.daemon.agentManager.chi?.capture(agent.id).catch(() => undefined);
         await client.removeProject(project.project!.projectId).catch(() => undefined);
         await client.removeProject(localProject.project!.projectId).catch(() => undefined);
         await client.close().catch(() => undefined);
         await host.close();
+        for (const sourceId of createdSources) await removeSource(sourceId);
+      } finally {
         await rm(cwd, { recursive: true, force: true });
         await rm(localCwd, { recursive: true, force: true });
         await rm(paseoHomeRoot, { recursive: true, force: true });

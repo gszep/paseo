@@ -258,7 +258,11 @@ host GitHub logout) clear the scope on mutations as well as reads. Loading and
 transient read failures do not become access-loss warnings. Read-only HTTP 409
 requests reacquire the backend fence with bounded retries; mutations retain their
 explicit recovery flow. This is pull-based access reacquisition, not recall of data
-already downloaded.
+already downloaded. A partially acquired inbox retains the backend's
+`unavailableRepos`, shows an incomplete-inbox notice, and marks the unread badge
+with `+` (including `0+`) and an accessible incomplete-count label. Deployment
+cursors bind that unavailable set; `invalid-cursor` clears the whole cached walk
+and restarts at page one rather than mixing coverage from different pages.
 
 First view saves the recipient's durable `readAt` marker without acknowledging the
 handoff. Native source navigation maps the provider entry ID to a canonical timeline
@@ -296,6 +300,55 @@ Replies longer than 8,000 characters never enter durable storage. The SDK expose
 backend routes and sanitized failures. No notification transport or account store
 is added. Pi/artifact handoffs remain visible, but in-app exact context browsing is
 currently limited to native evidence.
+
+Mapped OpenCode V2 agents use the caller-bound `human_prompts` tool for questions,
+approvals, decisions and local notes. The authenticated session owner authors the
+ordinary handoff; its scanned text identifies agent initiation and pins the native
+session/message. A waiting form uses the last settled source/snapshot/entry, because
+an active native export is not capturable. A first-turn question without settled
+evidence stays local. No surrounding conversation is attached or visibility widened.
+
+Private receipts enforce immutable dedupe keys, 100 items per session, 2,000
+characters per item, at most five items per batch, and eight batches per recipient
+per UTC day across one daemon home, spaced five minutes apart. This quota is not
+cross-host. FYI/notes, mute, snooze and recent focused viewing suppress dispatch.
+Blocked native forms retry the same immutable batch during the sweep; other lost
+deliveries use explicit retry. Later-day retries reserve that day's quota.
+Recipient inbox mute and one-hour snooze actions persist in backend policy storage,
+independent of agent receipts and source deletion. These session controls only tighten;
+mute lasts for that session. The agent tool can also tighten local suppression but
+cannot clear either policy. Checked-work resolution remains a separate human action.
+Mute requires confirmation. Mute, snooze and replies keep separate immutable pending
+operations; retrying a control cannot resend a pending answer or another control.
+
+**Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
+answers resolve local receipts; a later answer can correct an invalid form answer.
+Every exposed answer reauthorizes the exact handoff. Only owner-session forms with
+`metadata.kind === "question"` and a native tool link may resume with inbox answers;
+child, web-search, consent and plugin forms cannot. Unregistered
+native children cannot inherit the parent's human-prompts tool or receipts.
+Queued native items stop dispatching or retrying once their form closes locally;
+retirement retains the immutable receipt and never invents a recipient answer.
+Answers are escaped, attributed untrusted human-written data in tool results or a
+separate user-role message, never a system instruction. Foreground reminders are
+change-only and limited to 600 characters, with answered items first; acknowledgement
+follows successful injection. Steering never injects them. Resumed/forked sessions
+remove the retired `chi-human-prompts` instruction entry. The minimiser omits private
+user reminders and legacy system deltas; the backend rejects un-omitted captures.
+The provider filters tagged reminders from the owner timeline. `/compact` and
+`/summarize` admit fresh reminders after compaction, retaining the untrusted label
+for compacted answers even when no new reminder is pending.
+Automatic reconciliation polls at most eight pending batches per boundary with a
+durable rotating cursor and one authority bracket. Each completed read saves its
+cursor and answers independently. Reads run outside the dispatch lock, and queued
+sends precede reads. A lost create response stays uncertain until an exact read
+proves delivery; recovery does not require a second send. Cached answers exposed by the
+bounded reminder get exact ACL verification without polling for corrections. The
+foreground step has a two-second deadline; expiration withholds the reminder and
+prevents subsequent dispatch while the bounded reader continues for the next turn.
+Explicit list/resolve may read the full bounded receipt.
+Dispatch requires the backend's scanner capability; recipient controls require its
+optional handoff capability. Old clients still parse ordinary discussion.
 
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.

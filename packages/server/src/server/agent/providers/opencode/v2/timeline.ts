@@ -63,6 +63,7 @@ export class V2Timeline {
     state: TimelineState,
     push: (item: AgentTimelineItem) => void,
   ) {
+    if (message.metadata?.chiHumanPrompts === true) return;
     state.structured = message.metadata?.paseoOutputSchema !== undefined;
     state.accepted = false;
     if (this.content.has(message.id)) return;

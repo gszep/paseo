@@ -8,6 +8,8 @@ import {
   ChiMentionOperationSchema,
   ChiMentionContextSchema,
   ChiOperationError,
+  readHumanPrompts,
+  encodeHumanAnswers,
 } from "@getpaseo/protocol/chi-mentions";
 import { z } from "zod";
 import { sameMentionContext } from "./mention-context";
@@ -38,7 +40,10 @@ export function openReplyForm(input: {
   execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
   onSuccess(handoff: ChiHandoff): void;
   uuid(): string;
+  control?: "mute" | "snooze";
+  confirmMute?(): Promise<boolean>;
 }) {
+  const storageKey = input.control ? `chi-human-control:${input.control}:${input.key}` : input.key;
   let state: ReplyState = {
     text: "",
     status: "loading",
@@ -48,13 +53,14 @@ export function openReplyForm(input: {
     canReauthorize: false,
   };
   const exclusive = <T>(run: () => Promise<T>) =>
-    withOperationStorage(input.storage, input.key, run);
+    withOperationStorage(input.storage, storageKey, run);
   async function read() {
-    const saved = await input.storage.getItem(input.key);
+    const saved = await input.storage.getItem(storageKey);
     return saved ? envelopeSchema.parse(JSON.parse(saved)) : null;
   }
   // COMPAT(chiReplyKeys): added in v0.9.0, remove after 2027-03-29 once saved operations have migrated.
   async function migrateLegacy() {
+    if (input.control) return;
     if (!input.key.startsWith("chi-reply:")) return;
     if (!input.storage.getAllKeys) throw new Error("Unable to discover saved mention operations");
     const keys = await input.storage.getAllKeys();
@@ -83,7 +89,7 @@ export function openReplyForm(input: {
       if (saved && JSON.stringify(saved.operation) !== JSON.stringify(legacy.operation))
         throw new Error("Multiple unresolved mention operations require reconciliation");
       if (!saved)
-        await input.storage.setItem(input.key, JSON.stringify({ ...legacy, legacy: true }));
+        await input.storage.setItem(storageKey, JSON.stringify({ ...legacy, legacy: true }));
       await input.storage.removeItem(key);
     }
   }
@@ -99,7 +105,7 @@ export function openReplyForm(input: {
     await exclusive(async () => {
       const saved = await read();
       if (saved && JSON.stringify(saved.operation) === JSON.stringify(operation))
-        await input.storage.removeItem(input.key);
+        await input.storage.removeItem(storageKey);
     });
   }
   let closed = false;
@@ -131,7 +137,7 @@ export function openReplyForm(input: {
     const applied = input.handoff.replies?.some((reply) => reply.id === op.operationId);
     if (applied) {
       // The entire restore/check/remove runs in the same lane as prepare and completion.
-      await input.storage.removeItem(input.key).catch(() => undefined);
+      await input.storage.removeItem(storageKey).catch(() => undefined);
       publish({ status: "sent" });
       return;
     }
@@ -151,13 +157,73 @@ export function openReplyForm(input: {
       error: "Unable to restore the pending reply. Refresh and try again.",
     }),
   );
-  async function send(action: "reply" | "acknowledge") {
+  function controlText(control: "mute" | "snooze"): string | null {
+    if (
+      input.context.actor.toLowerCase() !== input.handoff.recipient.toLowerCase() ||
+      !readHumanPrompts(input.handoff.text) ||
+      input.handoff.humanPromptControls !== true
+    ) {
+      publish({ status: "failed", error: "chi-human-prompt-recipient-required" });
+      return null;
+    }
+    return (
+      "Human prompt controls (v1)\n" +
+      JSON.stringify({ action: control, ...(control === "snooze" ? { minutes: 60 } : {}) })
+    );
+  }
+  function replyText(promptId?: string): string | null {
+    if (input.control) return controlText(input.control);
+    let text = state.text.trim();
+    if (promptId && !state.operation) {
+      const batch = readHumanPrompts(input.handoff.text);
+      if (
+        input.context.actor.toLowerCase() !== input.handoff.recipient.toLowerCase() ||
+        !batch?.items.some((item) => item.id === promptId)
+      ) {
+        publish({ status: "failed", error: "chi-human-prompt-recipient-required" });
+        return null;
+      }
+      try {
+        text = encodeHumanAnswers([{ id: promptId, text }]);
+      } catch {
+        publish({ status: "failed", error: "chi-mention-text-too-long" });
+        return null;
+      }
+    }
+    return text;
+  }
+  let confirming = false;
+  function canSend(action: "reply" | "acknowledge") {
+    return (
+      !closed &&
+      !confirming &&
+      state.status !== "pending" &&
+      state.status !== "blocked" &&
+      (!input.control || action === "reply")
+    );
+  }
+  async function confirmControl() {
+    if (input.control !== "mute" || state.operation) return true;
+    confirming = true;
+    try {
+      return (await input.confirmMute?.()) === true && !closed;
+    } catch {
+      publish({ status: "failed", error: "Unable to confirm mute" });
+      return false;
+    } finally {
+      confirming = false;
+    }
+  }
+  async function send(action: "reply" | "acknowledge", promptId?: string) {
     await ready;
-    if (closed || state.status === "pending" || state.status === "blocked") return;
+    if (!canSend(action)) return;
     if (!state.operation && action === "reply" && state.text.trim().length > 8000) {
       publish({ status: "failed", error: "chi-mention-text-too-long" });
       return;
     }
+    const text = replyText(promptId);
+    if (text === null) return;
+    if (!(await confirmControl())) return;
     const operation =
       state.operation ??
       (action === "reply"
@@ -166,7 +232,7 @@ export function openReplyForm(input: {
             id: input.handoff.id,
             operationId: input.uuid(),
             revision: input.handoff.revision,
-            text: state.text.trim(),
+            text,
           }
         : {
             action,
@@ -189,7 +255,7 @@ export function openReplyForm(input: {
           throw new Error("chi-mention-submission-unresolved");
         attempt = crypto.randomUUID();
         await input.storage.setItem(
-          input.key,
+          storageKey,
           JSON.stringify({ context: input.context, operation, attempt }),
         );
       });
@@ -210,7 +276,7 @@ export function openReplyForm(input: {
             saved.attempt === attempt &&
             JSON.stringify(saved.operation) === JSON.stringify(operation)
           ) {
-            await input.storage.setItem(input.key, JSON.stringify({ ...saved, rejected: true }));
+            await input.storage.setItem(storageKey, JSON.stringify({ ...saved, rejected: true }));
             return true;
           }
           return false;
@@ -243,7 +309,7 @@ export function openReplyForm(input: {
           const saved = await read();
           if (!saved?.rejected || JSON.stringify(saved.operation) !== JSON.stringify(operation))
             return false;
-          await input.storage.removeItem(input.key);
+          await input.storage.removeItem(storageKey);
           return true;
         });
         if (!discarded) {
@@ -264,7 +330,7 @@ export function openReplyForm(input: {
         const saved = await read();
         if (!saved || !canReauthorize(saved)) throw new Error("chi-mention-context-changed");
         await input.storage.setItem(
-          input.key,
+          storageKey,
           JSON.stringify({ ...saved, context: input.context, attempt: crypto.randomUUID() }),
         );
         publish({

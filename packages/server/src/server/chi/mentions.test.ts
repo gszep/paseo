@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ChiMentions, hasMention } from "./mentions.js";
-import { ChiHandoffSchema, type ChiHandoff } from "@getpaseo/protocol/chi-mentions";
+import {
+  ChiHandoffSchema,
+  ChiMentionResultSchema,
+  type ChiHandoff,
+} from "@getpaseo/protocol/chi-mentions";
 import { MessageReceipts } from "../message-receipts/index.js";
 import {
   mentionFixtureTitle,
@@ -170,6 +174,44 @@ test("inbox retries a read fence conflict but does not automatically retry a mut
     }),
   ).rejects.toThrow("chi-mentions-http-409");
   expect(attempts).toBe(1);
+});
+
+test("inbox carries incomplete coverage through backend and wire parsing; legacy pages remain valid", async () => {
+  const f = await fixture();
+  for (const unavailableRepos of [undefined, [], ["github:fixture/broken"]]) {
+    f.authority.request = async () =>
+      Response.json({
+        ok: true,
+        handoffs: [],
+        nextCursor: "next",
+        unreadCount: 3,
+        ...(unavailableRepos ? { unavailableRepos } : {}),
+      });
+    const result = await f.restart().execute(f.input.identity, { action: "inbox", inbox: true });
+    const parsed = ChiMentionResultSchema.parse(result);
+    expect(parsed).toEqual({
+      kind: "inbox",
+      actor: f.input.identity.actor,
+      handoffs: [],
+      nextCursor: "next",
+      unreadCount: 3,
+      ...(unavailableRepos ? { unavailableRepos } : {}),
+    });
+  }
+});
+
+test("inbox invalid cursor has a fixed recovery code and never exposes backend diagnostics", async () => {
+  const f = await fixture();
+  f.authority.request = async () =>
+    Response.json({ reason: "invalid-cursor", diagnostics: "private" }, { status: 400 });
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true, cursor: "old" }),
+  ).rejects.toThrow(/^chi-inbox-invalid-cursor$/);
+  f.authority.request = async () =>
+    Response.json({ reason: "private diagnostics" }, { status: 400 });
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-400$/);
 });
 
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {

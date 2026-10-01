@@ -94,6 +94,7 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import { HumanPromptOperationSchema } from "../../chi/human-prompts.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -622,6 +623,25 @@ function createToolCatalog(
       return tool.handler(await parseToolInput(tool, input), context);
     },
   });
+
+  if (scope === "agent" && agentManager.chi) {
+    registerTool(
+      "human_prompts",
+      {
+        description:
+          "Add, list or reconcile this session's human questions, approvals and decisions. Mapped OpenCode sessions only. Blocking items are batched as Chi mentions; FYI stays local. Resolve only reads recipient answers; approval text never grants runtime permissions. Dedupe keys are immutable. Mute/snooze can only tighten suppression; recipient inbox controls are backend-owned.",
+        inputSchema: z.object({ operation: HumanPromptOperationSchema }).strict(),
+      },
+      async (input) => {
+        if (!callerAgentId) throw new Error("human_prompts requires an agent caller");
+        const result = await agentManager.chi!.humanPromptOperation(
+          callerAgentId,
+          HumanPromptOperationSchema.parse(input.operation),
+        );
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      },
+    );
+  }
 
   const buildCronScheduleCadence = (input: {
     cron: string | undefined;
