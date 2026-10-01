@@ -68,7 +68,8 @@ Never remove a test because it's flaky. Find the variance source (time, randomne
 ## CI fast paths
 
 All 17 required contexts remain present. Draft PRs and changes containing only
-untested Markdown skip heavy jobs at job level. Changelogs, public documentation
+untested Markdown skip unrelated jobs at job level; critical contracts still run.
+Changelogs, public documentation
 read by tests, and runtime skills keep their tests. HTML and SVG are not
 Markdown-only changes. Classification errors run the full matrix; main pushes
 and non-PR runs never use the docs-only skip.
@@ -273,11 +274,43 @@ Test suites in this repo are heavy. Running them in bulk freezes the machine, es
 
 ## Pull-request test routing
 
-PR checks are routed by the behavior each suite proves, using `.github/ci-paths.yml`. A package does not inherit every test suite of its runtime consumers: app changes do not run CLI or Electron-wrapper tests, and protocol changes do not run every package that imports the protocol. Cross-package static compatibility belongs to `typecheck`; full integration coverage runs after merge on main and in manual CI runs.
+PR selection follows the dependency cone of the base-to-tested-merge-tree diff.
+Workspace manifests, compiler-resolved imports, exports, references and aliases
+provide production edges. Platform implementations are unioned: web, native,
+Electron, iOS and Android changes cannot hide behind the runner's platform.
+`scripts/ci-test-policy.mjs` owns the cross-process harness edges and explicit
+critical inventory. Review that inventory when moving or adding security tests.
 
 Required matrix legs are declared as statically named jobs. Their shared steps use YAML anchors, while job-level `if` conditions let GitHub report an unaffected leg as genuinely skipped without allocating a runner or losing the exact required-check name.
 
-The smallest meaningful contract wins over package ownership. Tiny structural invariants such as daemon launch supervision run unconditionally in the always-running routing job instead of maintaining a transitive file list; this check reads source entrypoints and builds no product. Routed integration contracts use stable domain directories. Browser changes select the required Playwright shards; desktop changes select the existing required desktop jobs, with renderer and real-Electron coverage together in the Ubuntu leg. Packaging runs on main in the Desktop Packages, Docker, and Nix workflows. CLI-side Hub changes select one focused test inside the existing required server jobs. The CLI source suite runs once in the third required CLI job; only the separate local E2E runner is sharded, and that runner owns its dependency build. Repository scripts and the shared Vitest configuration run every PR contract because they are cross-cutting toolchain inputs.
+Critical Chi capture/scan/minimisation/provenance, auth and mention contracts are
+unioned with related unit files before invoking the runner. Never combine a
+critical file filter with `--changed` or `--related`: that intersects the sets.
+The server admission/durability integration regression runs explicitly because
+the pre-existing integration allowlist did not include it. The CLI runner unions
+its permission/auth contracts before creating disjoint shards; an empty shard
+succeeds inside its existing job.
+
+Static imports cannot establish independence for process, network, filesystem,
+computed-loader or unresolved-module tests. Keep those tests in affected packages.
+App browser-unit setup starts a real daemon, and app/desktop E2E starts both the
+daemon and renderer. These are explicit harness edges. Browser reachability is
+not yet fine-grained, so an affected browser boundary retains every spec across
+the four existing shards. Broad UI/server changes can still take the full-run
+time; selected-file counts alone are not a speed measurement.
+
+New paths, deletions/renames, unknown inputs, helpers, fixtures, configuration,
+scripts, lockfiles, vendored tarballs, graph errors and stale critical paths run
+everything. Missing classifier outputs also force every downstream runner full.
+Main pushes, nightly, queue and manual runs use the full matrix, including
+Windows. Recency never removes a test. The existing draft/untested-Markdown
+job-level skip applies only to jobs without critical contracts.
+
+`node --test scripts/ci-selection.test.mjs scripts/ci-workflow.test.mjs` checks
+the real-tree change matrix, related-file resolution, critical union, runtime
+fallbacks and required contexts. CI logs the selected paths and reason. Validate
+the final PR head with a completed full run, and record elapsed Actions time
+separately from job execution time when comparing a selected run.
 
 ## Agent authentication in tests
 
