@@ -278,8 +278,12 @@ PR selection follows the dependency cone of the base-to-tested-merge-tree diff.
 Workspace manifests, compiler-resolved imports, exports, references and aliases
 provide production edges. Platform implementations are unioned: web, native,
 Electron, iOS and Android changes cannot hide behind the runner's platform.
-`scripts/ci-test-policy.mjs` owns the cross-process harness edges and explicit
-critical inventory. Review that inventory when moving or adding security tests.
+`scripts/ci-test-policy.mjs` owns the cross-process harness edges, the explicit
+critical inventory and the always-run critical directories. Every unit test
+under a listed directory must be in the inventory or in `criticalExemptions`
+with a reason; `ci-selection.test.mjs` fails otherwise, so a new security test
+cannot land outside the floor. Review that inventory when moving or adding
+security tests.
 
 Required matrix legs are declared as statically named jobs. Their shared steps use YAML anchors, while job-level `if` conditions let GitHub report an unaffected leg as genuinely skipped without allocating a runner or losing the exact required-check name.
 

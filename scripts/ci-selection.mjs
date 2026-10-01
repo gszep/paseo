@@ -138,8 +138,10 @@ export async function buildGraph(root, files = inventory(root)) {
           else opaque.add(file);
         }
         // Runtime/config/fixture discovery cannot establish independence.
+        // Match the Sync/File suffixes too: `\bspawn\b` does not match
+        // `spawnSync`, and `execFile`/`execFileSync` use the actual Node APIs.
         if (
-          /\b(fetch|eval|Function|glob|readFile|readdir|spawn|exec|fork|createRequire|readFileSync)\b/.test(
+          /\b(fetch|eval|Function|glob|readFile(?:Sync)?|readdir(?:Sync)?|spawn(?:Sync)?|exec(?:File)?(?:Sync)?|fork|createRequire)\b/.test(
             name,
           )
         )

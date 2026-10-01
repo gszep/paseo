@@ -13,7 +13,13 @@ import {
   changedFiles,
   unitFiles,
 } from "./ci-selection.mjs";
-import { critical, criticalCli, criticalServerIntegration } from "./ci-test-policy.mjs";
+import {
+  critical,
+  criticalCli,
+  criticalDirectories,
+  criticalExemptions,
+  criticalServerIntegration,
+} from "./ci-test-policy.mjs";
 import {
   commands,
   runCommands,
@@ -229,6 +235,7 @@ test("critical inventory cannot lose the named security contracts", () => {
     app: [
       "src/utils/scanned-pairing-offer.test.ts",
       "src/chi/continuation-state.test.ts",
+      "src/chi/entry-navigation.test.ts",
       "src/chi/mention-submission.test.ts",
       "src/chi/mention-context.test.ts",
       "src/chi/mention-errors.test.ts",
@@ -236,6 +243,9 @@ test("critical inventory cannot lose the named security contracts", () => {
       "src/chi/inbox-model.test.ts",
       "src/chi/inbox-query.test.ts",
       "src/chi/mentions-unavailable.browser.test.tsx",
+      "src/chi/repository-filter.browser.test.tsx",
+      "src/chi/sync-notice.browser.test.tsx",
+      "src/chi/use-sync-destination.browser.test.tsx",
       "src/composer/actions.test.ts",
       "src/runtime/host-runtime.test.ts",
     ],
@@ -253,6 +263,43 @@ test("critical inventory cannot lose the named security contracts", () => {
     "34-daemon-status-auth.test.ts",
   ])
     assert.ok(criticalCli.includes(file));
+});
+
+test("every test in an always-run critical directory is in the critical inventory", () => {
+  // `critical` is a hand-maintained always-run floor. Without this guard a new
+  // sibling test in a wholly critical directory (chi/auth capture areas) can
+  // land outside the floor and be skippable by a docs-only or unrelated diff.
+  for (const [pkg, directories] of Object.entries(criticalDirectories)) {
+    assert.ok(critical[pkg], `${pkg}: critical directory has no inventory`);
+    for (const directory of directories) {
+      const files = unitFiles(graph.files, pkg).filter((file) => file.startsWith(`${directory}/`));
+      assert.ok(files.length, `${pkg}/${directory}: no tests found; stale directory guard`);
+      for (const file of files) {
+        const path = `packages/${pkg}/${file}`;
+        if (Object.prototype.hasOwnProperty.call(criticalExemptions, path)) {
+          assert.ok(
+            typeof criticalExemptions[path] === "string" &&
+              criticalExemptions[path].trim().length > 0,
+            `${path}: exemption needs a reason`,
+          );
+        } else {
+          assert.ok(
+            critical[pkg].includes(file),
+            `critical directory test outside the floor: ${path}`,
+          );
+        }
+      }
+    }
+  }
+  // An exemption must still point at a guarded, tracked file. A stale or
+  // misspelled allowlist entry silently reopens the gap it was meant to scope.
+  for (const path of Object.keys(criticalExemptions)) {
+    const guarded = Object.entries(criticalDirectories).some(([pkg, directories]) =>
+      directories.some((directory) => path.startsWith(`packages/${pkg}/${directory}/`)),
+    );
+    assert.ok(guarded, `stale critical exemption: ${path}`);
+    assert.ok(graph.files.includes(path), `critical exemption not tracked: ${path}`);
+  }
 });
 
 test("critical paths excluded by runner config cannot turn a job green", () => {
@@ -531,6 +578,31 @@ test("computed loaders, subprocesses, fixtures and unresolved imports retain dep
     "src/process.test.ts",
     "src/unresolved.test.ts",
   ]);
+});
+
+test("Sync/File process and filesystem call names are opaque without a node: import", async (t) => {
+  // These files have no import at all, so the external-module fallback cannot
+  // retain them. The only signal is the call name; `\bspawn\b`/`\bexec\b` do not
+  // match `spawnSync`/`execFile`, which is exactly the gap being closed.
+  const f = fixture(t);
+  f.write("packages/leaf/src/value.ts", "export const value = 1;");
+  const calls = {
+    "spawnSync.test.ts": "spawnSync('echo', []);",
+    "execSync.test.ts": "execSync('echo');",
+    "execFile.test.ts": "execFile('echo', []);",
+    "execFileSync.test.ts": "execFileSync('echo', []);",
+    "readFileSync.test.ts": "readFileSync('value.json');",
+    "readdirSync.test.ts": "readdirSync('.');",
+  };
+  for (const [file, body] of Object.entries(calls)) f.write(`packages/leaf/src/${file}`, body);
+  f.write("packages/leaf/src/unrelated.test.ts", "export {};");
+  const result = selectChanges(await f.build(), modified("packages/leaf/src/value.ts"));
+  assert.deepEqual(
+    result.tests.leaf,
+    Object.keys(calls)
+      .map((file) => `src/${file}`)
+      .sort(),
+  );
 });
 
 test("invalid graph syntax cannot create skip authority", async (t) => {

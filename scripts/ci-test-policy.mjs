@@ -27,6 +27,7 @@ export const critical = {
   app: [
     "src/utils/scanned-pairing-offer.test.ts",
     "src/chi/continuation-state.test.ts",
+    "src/chi/entry-navigation.test.ts",
     "src/chi/mention-submission.test.ts",
     "src/chi/mention-context.test.ts",
     "src/chi/mention-errors.test.ts",
@@ -34,10 +35,28 @@ export const critical = {
     "src/chi/inbox-model.test.ts",
     "src/chi/inbox-query.test.ts",
     "src/chi/mentions-unavailable.browser.test.tsx",
+    "src/chi/repository-filter.browser.test.tsx",
+    "src/chi/sync-notice.browser.test.tsx",
+    "src/chi/use-sync-destination.browser.test.tsx",
     "src/composer/actions.test.ts",
     "src/runtime/host-runtime.test.ts",
   ],
   client: ["src/daemon-client.test.ts"],
+};
+
+// Directories whose entire unit-test inventory is an always-run floor. Every
+// *.test.ts(x) below must appear in `critical` (or in `criticalExemptions` with
+// a reason), so a new sibling test cannot silently fall outside the floor. The
+// coverage guard lives in scripts/ci-selection.test.mjs.
+export const criticalDirectories = {
+  app: ["src/chi"],
+  server: ["src/server/chi", "src/server/message-receipts"],
+};
+
+// Deliberate exceptions to `criticalDirectories`, keyed by repo-relative path.
+// Each value is the reason the test is not part of the always-run floor.
+export const criticalExemptions = {
+  // "packages/app/src/chi/example.test.ts": "reason",
 };
 
 // This regression is not part of the old server test:integration allowlist.
