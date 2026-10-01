@@ -123,6 +123,20 @@ test("docs classification preserves required contexts and main-only cache writer
   assert.doesNotMatch(source.split("jobs:", 1)[0], /paths-ignore/);
   assert.match(source, /scripts\/ci-docs-only\.mjs/);
   assert.match(source, /steps\.docs\.outputs\.full != 'false'/);
+  assert.match(source, /docs-only: \$\{\{ steps\.classified\.outputs\.skip \}\}/);
+  assert.match(source, /full: \$\{\{ steps\.classified\.outputs\.full \}\}/);
+  assert.ok(
+    source.indexOf("name: Publish verified classification") >
+      source.indexOf("name: Validate CI contracts"),
+  );
+  assert.match(
+    source,
+    /SKIP:.*steps\.docs\.outcome == 'success' && steps\.filter\.outcome == 'success'/,
+  );
+  assert.match(
+    source,
+    /FULL:.*steps\.docs\.outcome != 'success' \|\| steps\.filter\.outcome != 'success'/,
+  );
   assert.match(source, /cancel-in-progress:.*github\.ref != 'refs\/heads\/main'/);
   for (const action of ["ci-restore", "ci-save"]) {
     const content = readFileSync(new URL(`.github/actions/${action}/action.yml`, repoRoot), "utf8");

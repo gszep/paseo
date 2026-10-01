@@ -26,8 +26,8 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      docs-only: ${{ steps.docs.outputs.skip }}
-      full: ${{ github.event_name != 'pull_request' || steps.docs.outputs.full != 'false' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
+      docs-only: ${{ steps.classified.outputs.skip }}
+      full: ${{ steps.classified.outputs.full }}
       format: ${{ steps.filter.outputs.format }}
       quality: ${{ steps.filter.outputs.quality }}
       hub: ${{ steps.filter.outputs.hub }}
@@ -61,6 +61,17 @@ jobs:
 
       - name: Validate CI contracts
         run: node --test scripts/ci-workflow.test.mjs scripts/ci-cache.test.mjs scripts/daemon-launch-contract.test.mjs scripts/sync-fdroid-changelogs.test.mjs scripts/upload-release-assets.test.mjs scripts/lockfile-file-deps.test.mjs
+
+      # Publish skip authority only after classification AND its contracts pass.
+      # Missing outputs keep every downstream job on its fail-open path.
+      - name: Publish verified classification
+        id: classified
+        env:
+          SKIP: ${{ steps.docs.outcome == 'success' && steps.filter.outcome == 'success' && steps.docs.outputs.skip == 'true' }}
+          FULL: ${{ github.event_name != 'pull_request' || steps.docs.outcome != 'success' || steps.filter.outcome != 'success' || steps.docs.outputs.full != 'false' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
+        run: |
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
 
   format:
     name: format
