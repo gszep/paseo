@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import test from "node:test";
 import {
   buildGraph,
@@ -114,6 +114,80 @@ test("new/deleted/renamed/typechanged paths, fixtures, assets, configuration and
   ])
     assert.equal(selected(file).full, true, file);
   assert.equal(selectChanges(graph, []).full, true);
+});
+
+test("a desktop test-only change cannot lose the job to the process-harness override", () => {
+  const file = "packages/desktop/src/features/browser-capture.test.ts";
+  const result = selected(file);
+  assert.equal(result.full, false);
+  assert.equal(result.jobs.desktop, true);
+  assert.ok(result.tests.desktop.includes("src/features/browser-capture.test.ts"));
+});
+
+test("CLI source lifecycle E2E remains in test:unit inventory and related execution", () => {
+  // Only SERVER test:unit excludes .e2e.test.ts. CLI test:unit runs all of src.
+  const path = "src/commands/daemon/lifecycle.e2e.test.ts";
+  assert.ok(unitFiles(graph.files, "cli").includes(path));
+  assert.ok(!unitFiles(graph.files, "server").includes(criticalServerIntegration[0]));
+  const result = selected(`packages/cli/${path}`);
+  assert.equal(result.full, false);
+  assert.ok(commands("cli", result).flat().includes(path));
+});
+
+test("selector unit inventories equal the real suite collections; configuration drift cannot hide tests", () => {
+  // These flags mirror the existing npm suite boundaries, NOT production paths.
+  // Compare against the actual runner so changing a package's include/exclude
+  // cannot leave a test silently outside the graph's selectable inventory.
+  const boundaries = {
+    server: ["--exclude", "**/*.e2e.test.ts"],
+    app: [],
+    client: [],
+    protocol: [],
+    plugin: [],
+    highlight: [],
+    relay: [],
+    cli: ["src"],
+    desktop: ["--exclude", "e2e/**"],
+    website: ["--config", "../../vitest.config.ts", "src"],
+  };
+  for (const [pkg, flags] of Object.entries(boundaries)) {
+    if (pkg !== "website") {
+      const expected =
+        {
+          server: 'vitest run --fileParallelism --exclude "**/*.e2e.test.ts"',
+          cli: "vitest run src",
+          desktop: 'install-electron && vitest run --exclude "e2e/**"',
+        }[pkg] ?? "vitest run";
+      const script = pkg === "server" || pkg === "cli" ? "test:unit" : "test";
+      assert.equal(
+        graph.packages.get(pkg).scripts[script],
+        expected,
+        `${pkg}: npm suite boundary changed; update and prove collection`,
+      );
+    }
+    const listed = JSON.parse(
+      execFileSync(
+        "npm",
+        [
+          "exec",
+          `--workspace=@getpaseo/${pkg}`,
+          "--",
+          "vitest",
+          "list",
+          "--filesOnly",
+          ...flags,
+          "--json",
+        ],
+        { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+      ),
+    );
+    const actual = [
+      ...new Set(
+        listed.map(({ file }) => relative(join(root, "packages", pkg), file).replaceAll("\\", "/")),
+      ),
+    ].sort();
+    assert.deepEqual(unitFiles(graph.files, pkg), actual, pkg);
+  }
 });
 
 test("stale critical unit or integration inventories run everything", () => {

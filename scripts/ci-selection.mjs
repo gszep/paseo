@@ -35,8 +35,9 @@ export function unitFiles(files, pkg) {
     .filter(
       (file) =>
         !file.startsWith("e2e/") &&
-        !file.includes(".e2e.test.") &&
-        (pkg !== "cli" || file.startsWith("src/")),
+        (pkg !== "server" || !file.endsWith(".e2e.test.ts")) &&
+        (pkg !== "cli" || file.startsWith("src/")) &&
+        (pkg !== "app" || file.startsWith("src/") || file === "native-release-version.test.ts"),
     )
     .sort();
 }
@@ -325,7 +326,7 @@ export function selectChanges(graph, changes) {
   }
   // Critical units do not imply that unrelated process/browser harnesses changed.
   jobs.browser = suites.browser.some((pkg) => affected.has(pkg));
-  jobs.desktop = suites.desktop.some((pkg) => affected.has(pkg));
+  jobs.desktop = suites.desktop.some((pkg) => affected.has(pkg)) || tests.desktop.length > 0;
   jobs.cli = true; // critical CLI permission/auth contracts, unioned before sharding
   return { full: false, reason: "dependency graph", jobs, tests, packages: [...affected].sort() };
 }
