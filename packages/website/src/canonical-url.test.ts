@@ -13,4 +13,12 @@ describe("getCanonicalRedirect", () => {
 
     expect(getCanonicalRedirect(url, "production")).toBe("https://paseo.sh/download");
   });
+
+  it("preserves the deep link, query and fragment when canonicalizing", () => {
+    const url = new URL("http://www.paseo.sh/docs/agents?provider=codex#permissions");
+
+    expect(getCanonicalRedirect(url, "production")).toBe(
+      "https://paseo.sh/docs/agents?provider=codex#permissions",
+    );
+  });
 });

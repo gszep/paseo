@@ -11,6 +11,7 @@ export function getCanonicalRedirect(
     return null;
   }
 
+  // Canonicalize the origin while preserving the deep link's path, query and fragment.
   url.protocol = "https:";
   url.hostname = CANONICAL_HOST;
   return url.toString();
