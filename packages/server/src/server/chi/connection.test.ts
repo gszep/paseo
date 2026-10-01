@@ -601,6 +601,12 @@ describe("Chi owner recovery", () => {
   it("keeps receipt-owned forks quarantined after removing or replacing their destination", async () => {
     const f = await canonicalFixture();
     await f.ready();
+    // Node's Windows mode bits cannot establish the POSIX-private receipt
+    // contract. Keep that existing fail-closed boundary, including after unmap.
+    const rejection =
+      process.platform === "win32"
+        ? "chi-receipt-quarantine-unavailable"
+        : "chi-conversation-recovery-required";
     for (const config of [undefined, fixtureConfig("https://replacement.invalid")]) {
       const connection = new ChiConnection(f.manager, {
         home: f.home,
@@ -614,7 +620,7 @@ describe("Chi owner recovery", () => {
           cwd: f.home,
           workspaceId: "workspace",
         }),
-      ).rejects.toThrow("chi-conversation-recovery-required");
+      ).rejects.toThrow(rejection);
     }
     expect(f.runtime.import).not.toHaveBeenCalled();
   });
@@ -1785,8 +1791,10 @@ describe("automatic sync destinations", () => {
 
   it("can construct an unconfigured daemon and keep ordinary local imports available", async () => {
     const f = await fixture();
+    const home = join(f.home, "empty-daemon");
+    await mkdir(home, { mode: 0o700 });
     const request = vi.spyOn(globalThis, "fetch");
-    const connection = new ChiConnection(f.manager, { home: f.home, serverId: "server" });
+    const connection = new ChiConnection(f.manager, { home, serverId: "server" });
     expect(await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).toMatchObject({
       destination: null,
       mentionsAvailable: false,
