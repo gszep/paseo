@@ -7,6 +7,7 @@ import { V2Harness } from "../test-utils/v2-harness.js";
 import { createTestLogger } from "../../../../../test-utils/test-logger.js";
 import type { AgentStreamEvent, AgentUsage } from "../../../agent-sdk-types.js";
 import { SessionTurns } from "./turns.js";
+import { SessionPermissions } from "./permissions.js";
 
 function collectAssistantText(session: {
   subscribe: (cb: (e: AgentStreamEvent) => void) => () => void;
@@ -20,7 +21,7 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
-  test("human-prompt reminders precede foreground dispatch, never steer or user metadata", async () => {
+  test("human-prompt reminders use a non-running user message, never system instructions or steer", async () => {
     const harness = new V2Harness();
     const writes: string[] = [];
     const put = vi
@@ -50,22 +51,29 @@ describe("OpenCode v2 resume configuration", () => {
       humanPromptReminder: "quoted answer",
       onHumanPromptReminder: acknowledged,
     });
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
-    expect(writes).toEqual(["reminder:chi-human-prompts:quoted answer", "prompt:human request"]);
-    expect(JSON.stringify(prompt.mock.calls)).not.toContain("quoted answer");
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    expect(writes).toEqual(["prompt:quoted answer", "prompt:human request"]);
+    expect(prompt.mock.calls[0]![0]).toMatchObject({
+      text: "quoted answer",
+      resume: false,
+      metadata: { chiHumanPrompts: true },
+    });
+    expect(prompt.mock.calls[1]![0].metadata).not.toHaveProperty("chiHumanPrompts");
     expect(acknowledged).toHaveBeenCalledTimes(1);
     await turns.steerActiveTurn("steer", {
       expectedTurnId: turnId,
       humanPromptReminder: "MUST NOT INJECT",
     });
-    expect(put).toHaveBeenCalledTimes(1);
+    expect(put).not.toHaveBeenCalled();
+    expect(prompt.mock.calls.at(-1)![0].text).toBe("steer");
     finish();
   });
 
   test("failed reminder injection does not block the foreground prompt", async () => {
     const harness = new V2Harness();
-    vi.spyOn(harness.api.session.instructions.entry, "put").mockRejectedValue(new Error("offline"));
-    const prompt = vi.spyOn(harness.api.session, "prompt");
+    const prompt = vi
+      .spyOn(harness.api.session, "prompt")
+      .mockRejectedValueOnce(new Error("offline"));
     const turns = new SessionTurns({
       client: harness.api,
       id: "session",
@@ -80,8 +88,73 @@ describe("OpenCode v2 resume configuration", () => {
       humanPromptReminder: "quoted answer",
       onHumanPromptReminder: acknowledged,
     });
-    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+    expect(prompt.mock.calls[1]![0].text).toBe("human request");
     expect(acknowledged).not.toHaveBeenCalled();
+  });
+  test("resume removes a fork's inherited chi-human-prompts instruction before it can run", async () => {
+    const harness = new V2Harness();
+    harness.info.id = "forked-session";
+    const entries = new Map([["chi-human-prompts", "another session's private answer"]]);
+    const remove = vi
+      .spyOn(harness.api.session.instructions.entry, "remove")
+      .mockImplementation(async ({ key }) => {
+        entries.delete(key);
+      });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    try {
+      expect(remove).toHaveBeenCalledWith({ sessionID: harness.info.id, key: "chi-human-prompts" });
+      expect(entries.has("chi-human-prompts")).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("form routing preserves the real question kind and tool link, including web-search consent", async () => {
+    const harness = new V2Harness();
+    const tool = { messageID: "msg", id: "call" };
+    harness.api.session.form.list = async () => [
+      {
+        id: "question",
+        sessionID: "session",
+        title: "Questions",
+        metadata: { kind: "question", tool },
+        fields: [{ key: "q0", type: "string" }],
+      },
+      {
+        id: "websearch",
+        sessionID: "session",
+        title: "Choose web search provider",
+        metadata: { kind: "websearch.provider" },
+        fields: [
+          { key: "provider", type: "string", options: [{ value: "allow", label: "Allow" }] },
+        ],
+      },
+    ];
+    const permissions = new SessionPermissions(
+      harness.api,
+      "session",
+      { provider: "opencode", cwd: "/fixture" },
+      () => undefined,
+    );
+    await permissions.reconcile("session");
+    expect(permissions.list().map((request) => request.metadata)).toEqual([
+      { source: "opencode_question", sessionId: "session", formKind: "question", tool },
+      {
+        source: "opencode_question",
+        sessionId: "session",
+        formKind: "websearch.provider",
+        tool: undefined,
+      },
+    ]);
   });
   test("restores each same-directory agent environment on reconnect and resume", async () => {
     const first = new V2Harness();

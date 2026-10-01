@@ -147,6 +147,12 @@ export class OpenCodeV2Session implements AgentSession {
       });
       await this.awaitMcp(server);
     }
+    // Forks copy instruction entries. Remove the retired system-role transport
+    // before any model step, including sessions with no local prompt receipts.
+    await this.client.session.instructions.entry.remove({
+      sessionID: this.id,
+      key: "chi-human-prompts",
+    });
     const system = composeSystemPromptParts(
       this.config.systemPrompt,
       this.config.daemonAppendSystemPrompt,

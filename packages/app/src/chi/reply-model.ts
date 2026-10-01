@@ -153,7 +153,22 @@ export function openReplyForm(input: {
       error: "Unable to restore the pending reply. Refresh and try again.",
     }),
   );
-  function replyText(promptId?: string): string | null {
+  function controlText(control: "mute" | "snooze"): string | null {
+    if (
+      input.context.actor.toLowerCase() !== input.handoff.recipient.toLowerCase() ||
+      !readHumanPrompts(input.handoff.text) ||
+      input.handoff.humanPromptControls !== true
+    ) {
+      publish({ status: "failed", error: "chi-human-prompt-recipient-required" });
+      return null;
+    }
+    return (
+      "Human prompt controls (v1)\n" +
+      JSON.stringify({ action: control, ...(control === "snooze" ? { minutes: 60 } : {}) })
+    );
+  }
+  function replyText(promptId?: string, control?: "mute" | "snooze"): string | null {
+    if (control) return controlText(control);
     let text = state.text.trim();
     if (promptId && !state.operation) {
       const batch = readHumanPrompts(input.handoff.text);
@@ -173,14 +188,18 @@ export function openReplyForm(input: {
     }
     return text;
   }
-  async function send(action: "reply" | "acknowledge", promptId?: string) {
+  async function send(
+    action: "reply" | "acknowledge",
+    promptId?: string,
+    control?: "mute" | "snooze",
+  ) {
     await ready;
     if (closed || state.status === "pending" || state.status === "blocked") return;
     if (!state.operation && action === "reply" && state.text.trim().length > 8000) {
       publish({ status: "failed", error: "chi-mention-text-too-long" });
       return;
     }
-    const text = replyText(promptId);
+    const text = replyText(promptId, control);
     if (text === null) return;
     const operation =
       state.operation ??

@@ -308,22 +308,34 @@ Private receipts enforce immutable dedupe keys, 100 items per session, 2,000
 characters per item, at most five items per batch, and eight batches per recipient
 per UTC day across one daemon home, spaced five minutes apart. This quota is not
 cross-host. FYI/notes, mute, snooze and recent focused viewing suppress dispatch.
-Lost deliveries require explicit retry of the same batch; later-day retries reserve
-that day's quota. Checked-work resolution remains a separate human action.
+Blocked native forms retry the same immutable batch during the sweep; other lost
+deliveries use explicit retry. Later-day retries reserve that day's quota.
+Recipient inbox mute and one-hour snooze actions persist in backend policy storage,
+independent of agent receipts and source deletion. These session controls only tighten;
+mute lasts for that session. The agent tool can also tighten local suppression but
+cannot clear either policy. Checked-work resolution remains a separate human action.
 
 **Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
 answers resolve local receipts; a later answer can correct an invalid form answer.
-Every read reauthorizes the exact handoff. Pending owner-session question forms may
-resume with those answers; child forms and runtime permissions cannot. Unregistered
+Every exposed answer reauthorizes the exact handoff. Only owner-session forms with
+`metadata.kind === "question"` and a native tool link may resume with inbox answers;
+child, web-search, consent and plugin forms cannot. Unregistered
 native children cannot inherit the parent's human-prompts tool or receipts.
 Queued native items stop dispatching or retrying once their form closes locally;
 retirement retains the immutable receipt and never invents a recipient answer.
-Other answers appear as quoted data in a change-only, 600-character reminder before a foreground
-model dispatch, with answered items first. Native instruction-entry acknowledgement
-follows successful injection; steering never injects it. The private minimiser omits
-the entire `api/chi-human-prompts` system delta, including mixed updates and metadata.
-Deploy Chi's decoded prompt/answer envelope scanner before enabling this host feature.
-The envelope adds no WebSocket fields or RPCs; old clients retain ordinary discussion.
+Answers are escaped, attributed untrusted human-written data in tool results or a
+separate user-role message, never a system instruction. Foreground reminders are
+change-only and limited to 600 characters, with answered items first; acknowledgement
+follows successful injection. Steering never injects them. Resumed/forked sessions
+remove the retired `chi-human-prompts` instruction entry. The minimiser omits private
+user reminders and legacy system deltas; the backend rejects un-omitted captures.
+Automatic reconciliation polls at most eight pending batches per boundary with a
+durable rotating cursor and one authority bracket. Cached answers exposed by the
+bounded reminder get exact ACL verification without polling for corrections. The
+foreground step has a two-second deadline; expiration withholds the reminder and
+prevents subsequent dispatch. Explicit list/resolve may read the full bounded receipt.
+Dispatch requires the backend's scanner capability; recipient controls require its
+optional handoff capability. Old clients still parse ordinary discussion.
 
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.

@@ -90,6 +90,63 @@ test("inbox answers use the immutable reply receipt and recipient-only item sele
   author.close();
 });
 
+test.each(["mute", "snooze"] as const)(
+  "recipient inbox %s actions are immutable and cannot be sent by the author",
+  async (control) => {
+    const prompt = {
+      ...handoff,
+      humanPromptControls: true,
+      text: encodeHumanPrompts({
+        sessionId: "ses",
+        turnId: "msg",
+        items: [{ id: handoff.id, kind: "question", priority: "blocking", text: "Pick" }],
+      }),
+    };
+    const sent: ChiMentionOperation[] = [];
+    const options = {
+      handoff: prompt,
+      context,
+      key: "control",
+      storage: storage(),
+      uuid: () => handoff.id,
+      onSuccess: () => undefined,
+      execute: async (op: ChiMentionOperation) => {
+        sent.push(op);
+        throw new Error("lost");
+      },
+    };
+    const form = openReplyForm(options);
+    await form.send("reply", undefined, control);
+    expect(sent[0]).toMatchObject({
+      action: "reply",
+      text:
+        "Human prompt controls (v1)\n" +
+        JSON.stringify({ action: control, ...(control === "snooze" ? { minutes: 60 } : {}) }),
+    });
+    await form.send("reply", undefined, control === "mute" ? "snooze" : "mute");
+    expect(sent[1]).toEqual(sent[0]);
+    const author = openReplyForm({
+      ...options,
+      storage: storage(),
+      context: { ...context, actor: handoff.author },
+    });
+    await author.send("reply", undefined, control);
+    expect(sent).toHaveLength(2);
+    expect(author.getState().error).toBe("chi-human-prompt-recipient-required");
+    const oldBackend = openReplyForm({
+      ...options,
+      storage: storage(),
+      handoff: { ...prompt, humanPromptControls: undefined },
+    });
+    await oldBackend.send("reply", undefined, control);
+    expect(sent).toHaveLength(2);
+    expect(oldBackend.getState().error).toBe("chi-human-prompt-recipient-required");
+    form.close();
+    author.close();
+    oldBackend.close();
+  },
+);
+
 test.each(["reply", "acknowledge"] as const)(
   "discovers legacy uncertain %s and requires explicit same-actor reauthorization before immutable retry",
   async (action) => {

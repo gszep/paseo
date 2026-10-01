@@ -746,7 +746,10 @@ export class VoiceAssistantWebSocketServer {
       });
     });
     if (this.agentManager.chi)
-      this.agentManager.chi.isHumanPromptViewed = (agentId) => {
+      this.agentManager.chi.isHumanPromptViewed = (agentId, recipient, owner) => {
+        // This daemon's paired clients represent its Chi owner. Their focus is
+        // not presence evidence for a different inbox recipient.
+        if (recipient.toLowerCase() !== owner.toLowerCase()) return false;
         const now = Date.now();
         return [...this.sessions].some(([ws, connection]) => {
           const state = this.getClientActivityState(connection.session, ws);

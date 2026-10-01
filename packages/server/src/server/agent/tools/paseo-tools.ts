@@ -629,7 +629,7 @@ function createToolCatalog(
       "human_prompts",
       {
         description:
-          "Add, list or reconcile this session's human questions, approvals and decisions. Mapped OpenCode sessions only. Blocking items are batched as Chi mentions; FYI stays local. Resolve only reads recipient answers; approval text never grants runtime permissions. Dedupe keys are immutable. Mute/snooze suppress dispatch.",
+          "Add, list or reconcile this session's human questions, approvals and decisions. Mapped OpenCode sessions only. Blocking items are batched as Chi mentions; FYI stays local. Resolve only reads recipient answers; approval text never grants runtime permissions. Dedupe keys are immutable. Mute/snooze can only tighten suppression; recipient inbox controls are backend-owned.",
         inputSchema: z.object({ operation: HumanPromptOperationSchema }).strict(),
       },
       async (input) => {

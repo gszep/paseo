@@ -193,8 +193,15 @@ agent continue. It asserts exact outgoing fields/pins and absence of unrelated p
 Run it with `--grep 'agent question is answered'` after changing human prompt routing.
 Deterministic policy, mapping, answer ownership and model-boundary regressions live in
 `human-prompts.test.ts`, `connection.test.ts`, V2 `streaming.test.ts` and app
-`reply-model.test.ts`. Chi's handoff and minimiser suites own decoded-envelope scanning
-and reminder-capture exclusion. These checks do not establish installed-host rollout.
+`reply-model.test.ts`. Manager admission and WebSocket presence suites cover reminder
+wiring and recipient-specific viewing. Regression checks include XML breakout text,
+web-search consent, monotonic recipient controls, bounded request counts, delayed
+authorization/form replacement, immutable sweep retries and fork cleanup. Chi's
+handoff, Firestore, capture-bounds and minimiser suites cover backend policy durability,
+decoded-envelope scanning and reminder exclusion. Run the rendered gate only with
+explicitly permitted test-account authentication and a capability-advertising backend;
+do not bypass that capability or load credentials forbidden by the task. These checks
+do not establish installed-host rollout.
 Its provider is synthetic:
 this checks rendered desktop/compact Tab completion and mention delivery, exact/context reads,
 acknowledgement, lost-response retries, an actual Sava author reply observed by

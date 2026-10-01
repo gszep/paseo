@@ -92,13 +92,14 @@ export class SessionTurns {
     this.options.emit({ type: "turn_started", provider: "opencode", turnId: id });
     try {
       if (options?.humanPromptReminder) {
-        // The caller only supplies this on foreground admission, never steer.
-        // Instruction entries use OpenCode's next-step system-update boundary.
-        await this.options.client.session.instructions.entry
-          .put({
+        // A separate user message preserves the trust boundary and allows capture
+        // to omit private inbox data without dropping the foreground user's text.
+        await this.options.client.session
+          .prompt({
             sessionID: this.options.id,
-            key: "chi-human-prompts",
-            value: options.humanPromptReminder,
+            text: options.humanPromptReminder,
+            resume: false,
+            metadata: { chiHumanPrompts: true },
           })
           .then(() => options.onHumanPromptReminder?.())
           .catch(() => undefined);

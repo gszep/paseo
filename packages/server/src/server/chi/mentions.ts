@@ -25,6 +25,7 @@ export interface MentionIdentity {
   actor: string;
   token: string;
   credentialGeneration?: string;
+  humanPrompts?: boolean;
 }
 export interface MentionAuthority {
   endpoint: string;

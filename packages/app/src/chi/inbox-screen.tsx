@@ -726,6 +726,37 @@ function PinnedContext({
   );
 }
 
+function HumanPromptControls({
+  handoff,
+  actor,
+  form,
+  locked,
+}: {
+  handoff: ChiHandoff;
+  actor: string;
+  form: ReturnType<typeof openReplyForm>;
+  locked: boolean;
+}) {
+  const mute = useCallback(() => void form.send("reply", undefined, "mute"), [form]);
+  const snooze = useCallback(() => void form.send("reply", undefined, "snooze"), [form]);
+  if (
+    !readHumanPrompts(handoff.text) ||
+    handoff.humanPromptControls !== true ||
+    handoff.recipient !== actor
+  )
+    return null;
+  return (
+    <>
+      <Button size="sm" variant="outline" disabled={locked} onPress={mute}>
+        Mute prompts from this session
+      </Button>
+      <Button size="sm" variant="outline" disabled={locked} onPress={snooze}>
+        Snooze prompts for 1 hour
+      </Button>
+    </>
+  );
+}
+
 function ReplyForm({
   handoff,
   context,
@@ -802,6 +833,12 @@ function ReplyForm({
           ))
         : null}
       {state.status === "pending" ? <Text style={styles.hint}>Sending…</Text> : null}
+      <HumanPromptControls
+        handoff={handoff}
+        actor={context.identity.actor}
+        form={form}
+        locked={locked}
+      />
       {state.status === "sent" ? <Alert variant="success" title="Reply delivered" /> : null}
       {state.status === "failed" || state.status === "blocked" ? (
         <Alert

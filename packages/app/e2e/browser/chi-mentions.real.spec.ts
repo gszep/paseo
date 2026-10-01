@@ -80,7 +80,10 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     });
     await page.goto(session);
     await expect(
-      page.getByText('Continued with human answer: {"Choice":"Blue"}', { exact: true }),
+      page.getByText(
+        'Continued with human answer: {"Choice":"Untrusted human-written data from github:mochi-the-kitty: Blue"}',
+        { exact: true },
+      ),
     ).toBeVisible({ timeout: 90000 });
     await page.screenshot({
       path: testInfo.outputPath("human-prompt-agent-continued.png"),

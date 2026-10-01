@@ -604,7 +604,16 @@ class FakeAgentSession implements AgentSession {
       provider: this.providerName,
       name: tool.name,
       kind: tool.question ? "question" : "tool",
-      ...(tool.question ? { metadata: { source: "opencode_question", sessionId: this.id } } : {}),
+      ...(tool.question
+        ? {
+            metadata: {
+              source: "opencode_question",
+              sessionId: this.id,
+              formKind: "question",
+              tool: { messageID: this.id, id: tool.name },
+            },
+          }
+        : {}),
       title: "Permission required",
       description: "Test permission request",
       input: tool.input ?? {},

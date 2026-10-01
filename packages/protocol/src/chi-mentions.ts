@@ -49,6 +49,7 @@ export const ChiHandoffSchema = z.object({
   createdAt: id,
   updatedAt: id,
   readAt: id.optional(),
+  humanPromptControls: z.boolean().optional(),
   events: z.array(
     z.object({ actor: principal, state, at: id, revision: z.number().int().positive() }),
   ),

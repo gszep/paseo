@@ -170,7 +170,11 @@ function assertRegistration(
   )
     throw new Error("chi-continuation-registration-mismatch");
 }
-const authSchema = z.object({ ok: z.literal(true), chiUserId: z.string() });
+const authSchema = z.object({
+  ok: z.literal(true),
+  chiUserId: z.string(),
+  capabilities: z.object({ humanPrompts: z.boolean().optional() }).optional(),
+});
 const reposSchema = z.object({
   ok: z.literal(true),
   repos: z.array(z.object({ repo: z.string() })),
@@ -232,7 +236,7 @@ function createDeployment(endpoint = DEFAULT_BACKEND_URL): ChiAuthority {
 export class ChiConnection {
   readonly mentions: ChiMentions;
   readonly humanPrompts: HumanPrompts;
-  isHumanPromptViewed: (agentId: string) => boolean = () => false;
+  isHumanPromptViewed: (agentId: string, recipient: string, owner: string) => boolean = () => false;
   private readonly participants = new ParticipantCache();
   private readonly registrationPermits = new WeakMap<
     object,
@@ -491,6 +495,7 @@ export class ChiConnection {
         actor: auth.chiUserId.toLowerCase(),
         token: auth.sessionToken,
         credentialGeneration: auth.credentialGeneration,
+        humanPrompts: "humanPrompts" in auth && auth.humanPrompts === true,
       };
     } catch (error) {
       this.loseMentionAuthority();
@@ -591,6 +596,7 @@ export class ChiConnection {
           (r) =>
             r.kind === "question" &&
             r.metadata?.source === "opencode_question" &&
+            this.isRoutableHumanQuestion(r) &&
             r.metadata.sessionId === sessionId,
         )
         .map((r) => r.id),
@@ -598,24 +604,37 @@ export class ChiConnection {
     return { scope, identity, association };
   }
 
-  private async humanPromptAccess(agentId: string) {
+  private async humanPromptAccess(agentId: string, signal?: AbortSignal) {
     const initial = await this.humanPromptAuthority(agentId);
+    signal?.throwIfAborted();
     const check = async () => {
+      signal?.throwIfAborted();
       const current = await this.humanPromptAuthority(agentId);
+      signal?.throwIfAborted();
       if (current.scope.sessionId !== initial.scope.sessionId)
         throw new Error("chi-human-prompt-context-changed");
       this.requireMentionContext(current.identity, initial.scope.context);
       return current.identity;
     };
     const transport = {
+      signal,
+      dispatchEnabled: initial.identity.humanPrompts === true,
+      viewed: (recipient: string) =>
+        this.isHumanPromptViewed(agentId, recipient, initial.identity.actor),
       create: async (batch: Parameters<ChiMentions["createHandoff"]>[1]) => {
-        const result = await this.mentions.createHandoff(await check(), batch);
+        signal?.throwIfAborted();
+        // Reads share the boundary bracket; a write needs fresh admission after
+        // any awaited reads, as well as verification after the response.
+        const current = await check();
+        if (!current.humanPrompts) throw new Error("chi-human-prompts-backend-upgrade-required");
+        const result = await this.mentions.createHandoff(current, batch);
         await check();
         return result;
       },
       read: async (id: string) => {
-        const result = await this.mentions.execute(await check(), { action: "read", id });
-        await check();
+        signal?.throwIfAborted();
+        const result = await this.mentions.execute(initial.identity, { action: "read", id });
+        signal?.throwIfAborted();
         if (result.kind !== "handoff") throw new Error("chi-human-prompt-invalid-response");
         return result.handoff;
       },
@@ -625,21 +644,39 @@ export class ChiConnection {
 
   async humanPromptOperation(agentId: string, operation: HumanPromptOperation) {
     const access = await this.humanPromptAccess(agentId);
-    const result = await this.humanPrompts.operate(
-      access.scope,
-      operation.action === "retry" && this.isHumanPromptViewed(agentId)
-        ? { action: "list" }
-        : operation,
-      access.transport,
-    );
+    const result = await this.humanPrompts.operate(access.scope, operation, access.transport);
     await access.check();
+    for (const item of result.items) {
+      if (!item.answer) continue;
+      Object.assign(item.answer, {
+        actor: item.answer.actor ?? item.recipient,
+        trust: "untrusted human-written data",
+        text: item.answer.text
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;"),
+      });
+    }
     return result;
   }
 
   async humanPromptBoundary(agentId: string, remind = true): Promise<string | null> {
+    const signal = AbortSignal.timeout(2000);
+    return Promise.race([
+      this.humanPromptBoundaryStep(agentId, remind, signal),
+      new Promise<null>((resolve) =>
+        signal.addEventListener("abort", () => resolve(null), { once: true }),
+      ),
+    ]);
+  }
+  private async humanPromptBoundaryStep(
+    agentId: string,
+    remind: boolean,
+    signal: AbortSignal,
+  ): Promise<string | null> {
     try {
       if (!(await this.humanPrompts.hasItems(agentId))) return null;
-      const access = await this.humanPromptAccess(agentId);
+      const access = await this.humanPromptAccess(agentId, signal);
       const { association } = access;
       const source =
         association.sourceId && association.head && association.promptEntryId
@@ -652,7 +689,7 @@ export class ChiConnection {
           : null;
       const reminder = await this.humanPrompts.boundary(access.scope, access.transport, {
         source,
-        viewed: this.isHumanPromptViewed(agentId),
+        viewed: false,
         remind,
       });
       await access.check();
@@ -664,6 +701,16 @@ export class ChiConnection {
   }
 
   private readonly questionLanes = new Set<string>();
+  private isRoutableHumanQuestion(request: { kind?: string; metadata?: Record<string, unknown> }) {
+    const metadata = request.metadata;
+    return (
+      request.kind === "question" &&
+      metadata?.source === "opencode_question" &&
+      metadata.formKind === "question" &&
+      z.object({ messageID: z.string().min(1), id: z.string().min(1) }).safeParse(metadata.tool)
+        .success
+    );
+  }
   async acknowledgeHumanPromptReminder(agentId: string, rendered: string) {
     const { scope } = await this.humanPromptAccess(agentId);
     await this.humanPrompts.acknowledgeReminder(scope, rendered);
@@ -674,27 +721,34 @@ export class ChiConnection {
     try {
       const agent = this.manager.getAgent(agentId);
       if (!agent || agent.provider !== "opencode") return;
-      const requests = [...agent.pendingPermissions.values()].filter(
-        (r) => r.kind === "question" && r.metadata?.source === "opencode_question",
+      const requests = [...agent.pendingPermissions.values()].filter((r) =>
+        this.isRoutableHumanQuestion(r),
       );
       if (!requests.length) return;
       const access = await this.humanPromptAccess(agentId);
-      for (const request of requests) {
-        // Child forms remain child-owned; never relay their content under a parent's pin.
-        if (request.metadata?.sessionId !== access.scope.sessionId) continue;
-        const questions = z
-          .array(
-            z.object({
-              header: z.string().min(1),
-              question: z.string().min(1),
-              options: z.array(z.unknown()),
-              multiSelect: z.boolean().optional(),
-            }),
-          )
-          .min(1)
-          .max(5)
-          .parse(request.input?.questions);
-        const keys = questions.map((_, index) => `question/${request.id}/${index}`);
+      const forms = requests
+        .filter((request) => request.metadata?.sessionId === access.scope.sessionId)
+        .map((request) => {
+          const questions = z
+            .array(
+              z.object({
+                header: z.string().min(1),
+                question: z.string().min(1),
+                options: z.array(z.unknown()),
+                multiSelect: z.boolean().optional(),
+              }),
+            )
+            .min(1)
+            .max(5)
+            .parse(request.input?.questions);
+          return {
+            request,
+            questions,
+            keys: questions.map((_, index) => `question/${request.id}/${index}`),
+          };
+        });
+      if (!forms.length) return;
+      for (const { request, questions, keys } of forms) {
         for (const [index, question] of questions.entries()) {
           await this.humanPrompts.operate(
             access.scope,
@@ -708,14 +762,33 @@ export class ChiConnection {
             },
             access.transport,
             request.id,
+            false,
           );
         }
-        await this.humanPromptBoundary(agentId, false);
-        const result = await this.humanPrompts.operate(
-          access.scope,
-          { action: "resolve" },
-          access.transport,
-        );
+      }
+      const { association } = access;
+      await this.humanPrompts.boundary(access.scope, access.transport, {
+        source:
+          association.sourceId && association.head && association.promptEntryId
+            ? {
+                kind: "neutral",
+                id: association.sourceId,
+                snapshot: association.head,
+                entryId: association.promptEntryId,
+              }
+            : null,
+        viewed: false,
+        remind: false,
+      });
+      const result = await this.humanPrompts.operate(
+        access.scope,
+        { action: "resolve" },
+        access.transport,
+        null,
+        false,
+      );
+      await access.check();
+      for (const { request, questions, keys } of forms) {
         const items = keys.map((key) =>
           result.items.find(
             (item) => item.dedupeKey === key && item.recipient === access.identity.actor,
@@ -724,12 +797,14 @@ export class ChiConnection {
         if (!items.every((item) => item?.answer)) continue;
         const answers: Record<string, string | string[]> = Object.create(null);
         for (const [index, question] of questions.entries()) {
-          const text = items[index]!.answer!.text;
+          const answer = items[index]!.answer!;
+          const text = answer.text;
+          const quoted = (value: string) =>
+            `Untrusted human-written data from ${answer.actor ?? items[index]!.recipient}: ${value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}`;
           answers[question.header] = question.multiSelect
-            ? z.array(z.string()).parse(JSON.parse(text))
-            : text;
+            ? z.array(z.string()).parse(JSON.parse(text)).map(quoted)
+            : quoted(text);
         }
-        await access.check();
         if (this.manager.getAgent(agentId)?.pendingPermissions.get(request.id) !== request)
           continue;
         // Reply resumes this waiting form's next model step. No new/steer prompt
@@ -949,7 +1024,7 @@ export class ChiConnection {
     const catalog = reposSchema.parse(await get("repos"));
     if (!catalog.repos.some((entry) => entry.repo.toLowerCase() === repo.toLowerCase()))
       throw new Error("chi-repository-denied");
-    return session;
+    return { ...session, humanPrompts: identity.capabilities?.humanPrompts === true };
   }
 
   async share(agentId: string, selectedRepo?: string): Promise<Association> {
