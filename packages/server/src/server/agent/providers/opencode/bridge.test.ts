@@ -32,7 +32,7 @@ afterEach(async () => {
   );
 });
 
-function createCatalog(): PaseoToolCatalog {
+function createCatalog(names = ["echo_context"]): PaseoToolCatalog {
   const tool = {
     name: "echo_context",
     title: "Echo context",
@@ -43,7 +43,7 @@ function createCatalog(): PaseoToolCatalog {
       return { content: [{ type: "text", text: parsed.value }] };
     },
   };
-  const tools = new Map([[tool.name, tool]]);
+  const tools = new Map(names.map((name) => [name, { ...tool, name }]));
   return {
     tools,
     getTool(name) {
@@ -372,7 +372,7 @@ describe("OpenCodeBridge", () => {
   test("v2 plugin filters caller tools and inherits child session bindings", async () => {
     const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-v2-scope-"));
     temporaryDirectories.push(paseoHome);
-    const catalog = createCatalog();
+    const catalog = createCatalog(["echo_context", "human_prompts"]);
     const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
     bridge.setManifestCatalog(catalog);
     await bridge.start();
@@ -420,8 +420,18 @@ describe("OpenCodeBridge", () => {
       });
       const allowed: V2TestContext = {
         sessionID: "child",
-        tools: { paseo_echo_context: {}, native: {} },
+        tools: { paseo_echo_context: {}, paseo_human_prompts: {}, native: {} },
       };
+      await expect(
+        tools
+          .get("paseo_human_prompts")!
+          .execute({ value: "foreign question" }, { sessionID: "child" }),
+      ).rejects.toThrow("own managed session");
+      await expect(
+        tools
+          .get("paseo_human_prompts")!
+          .execute({ value: "own question" }, { sessionID: "parent" }),
+      ).resolves.toMatchObject({ content: [{ type: "text", text: "own question" }] });
       await filter(allowed);
       expect(Object.keys(allowed.tools)).toEqual(["paseo_echo_context", "native"]);
       const disabled: V2TestContext = {

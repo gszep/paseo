@@ -41,6 +41,10 @@ export default {
           options: { codemode: false },
           async execute(input, call) {
             const binding = await scope(call.sessionID);
+            // Human-prompt receipts pin the managed native session, not an
+            // unregistered child that happens to inherit its ordinary tools.
+            if (definition.name === "human_prompts" && binding.sessionID !== call.sessionID)
+              throw new Error("human_prompts requires its own managed session");
             const result = await request(
               `/sessions/${encodeURIComponent(binding.sessionID)}/tools/${encodeURIComponent(definition.name)}`,
               input,
@@ -53,6 +57,7 @@ export default {
     const filtering = await context.session.hook("context", async (input) => {
       const binding = await scope(input.sessionID);
       const allowed = new Set(binding.tools.map((name) => `paseo_${name}`));
+      if (binding.sessionID !== input.sessionID) allowed.delete("paseo_human_prompts");
       for (const name of Object.keys(input.tools)) {
         if (name !== STRUCTURED_OUTPUT_TOOL && name.startsWith("paseo_") && !allowed.has(name))
           delete input.tools[name];

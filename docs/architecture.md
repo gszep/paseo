@@ -314,7 +314,8 @@ that day's quota. Checked-work resolution remains a separate human action.
 **Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
 answers resolve local receipts; a later answer can correct an invalid form answer.
 Every read reauthorizes the exact handoff. Pending owner-session question forms may
-resume with those answers; child forms and runtime permissions cannot.
+resume with those answers; child forms and runtime permissions cannot. Unregistered
+native children cannot inherit the parent's human-prompts tool or receipts.
 Queued native items stop dispatching or retrying once their form closes locally;
 retirement retains the immutable receipt and never invents a recipient answer.
 Other answers appear as quoted data in a change-only, 600-character reminder before a foreground

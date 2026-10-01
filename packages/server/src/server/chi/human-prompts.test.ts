@@ -207,8 +207,16 @@ describe("human prompt delivery receipts", () => {
     await f.flush(last);
     expect(f.remote.size).toBe(9);
     const quota = join(f.home, "chi", "human-prompts", "quota.json");
-    expect((await stat(quota)).mode & 0o777).toBe(0o600);
     expect(await readFile(quota, "utf8")).not.toContain("Which option?");
+  });
+
+  it.skipIf(process.platform === "win32")("keeps quota receipts owner-only on POSIX", async () => {
+    const f = await fixture();
+    await f.add("q");
+    await f.flush();
+    expect((await stat(join(f.home, "chi", "human-prompts", "quota.json"))).mode & 0o777).toBe(
+      0o600,
+    );
   });
 
   it("serializes simultaneous dispatches across service instances before spending recipient quota", async () => {
