@@ -1813,6 +1813,13 @@ describe("automatic sync destinations", () => {
     );
   });
 
+  it("an empty human-prompt boundary does not acquire credentials or start repository work", async () => {
+    const f = await humanFixture();
+    const login = vi.spyOn(f.authority, "login");
+    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+    expect(login).not.toHaveBeenCalled();
+  });
+
   it("human question routing resumes only its pending owner form with exact multi-select answers", async () => {
     const f = await humanFixture();
     const request = {

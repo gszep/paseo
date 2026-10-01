@@ -155,6 +155,10 @@ export class HumanPrompts {
     await mkdir(join(this.home, "chi", "human-prompts"), { recursive: true, mode: 0o700 });
     await writeConversationReceipt(this.path(scope.agentId), stateSchema.parse(state));
   }
+  async hasItems(agentId: string): Promise<boolean> {
+    const raw = await readConversationReceipt(this.path(agentId));
+    return raw !== null && stateSchema.parse(raw).items.length > 0;
+  }
   async operate(
     scope: HumanPromptScope,
     operation: HumanPromptOperation,

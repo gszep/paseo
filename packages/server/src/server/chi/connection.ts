@@ -638,6 +638,7 @@ export class ChiConnection {
 
   async humanPromptBoundary(agentId: string, remind = true): Promise<string | null> {
     try {
+      if (!(await this.humanPrompts.hasItems(agentId))) return null;
       const access = await this.humanPromptAccess(agentId);
       const { association } = access;
       const source =
