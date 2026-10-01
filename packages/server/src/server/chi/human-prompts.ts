@@ -304,7 +304,12 @@ export class HumanPrompts {
           const selected: typeof queued = [];
           let text = "";
           for (const item of queued
-            .filter((i) => i.recipient === first.recipient && i.turnId === first.turnId)
+            .filter(
+              (i) =>
+                i.recipient === first.recipient &&
+                i.turnId === first.turnId &&
+                i.nativeQuestionId === first.nativeQuestionId,
+            )
             .slice(0, 5)) {
             try {
               text = encodeHumanPrompts({

@@ -360,6 +360,31 @@ describe("human prompt delivery receipts", () => {
     expect(f.attempts).toHaveLength(1);
   });
 
+  it("keeps native forms out of generic batches so closing a form cannot replay it with another item", async () => {
+    const f = await fixture();
+    const active = { ...f.scope, pendingQuestionIds: ["form"] };
+    await f.add("generic", {}, active);
+    await f.service.operate(
+      active,
+      {
+        action: "add",
+        dedupeKey: "native",
+        recipient: "github:recipient",
+        kind: "question",
+        priority: "blocking",
+        text: "Native question",
+      },
+      f.transport,
+      "form",
+    );
+    await f.flush(active);
+    const h = [...f.remote.values()][0]!;
+    expect(readHumanPrompts(h.text)!.items.map((i) => i.text)).toEqual(["Which option?"]);
+    f.advance(300000);
+    await f.flush();
+    expect(f.attempts).toHaveLength(1);
+  });
+
   it("puts recipient answers ahead of local notes in a bounded reminder", async () => {
     const f = await fixture();
     for (let i = 0; i < 10; i++) await f.add(`note${i}`, { kind: "note" });
