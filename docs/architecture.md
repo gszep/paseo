@@ -70,8 +70,10 @@ retryable once installed. Findings only in omitted content warn without blocking
 the minimised upload. Full-export attribution over budget surfaces a warning;
 the projection's byte/node limits, exact-upload scan and cut-window scan still
 fail closed. Complete cut windows are scanned in at most 1 MiB batches with an
-8 MiB total cap. A surviving secret prefix or private-key BEGIN without a matching
-END in the same window rejects even when full-export attribution is over budget.
+8 MiB total cap. A surviving secret prefix or private-key BEGIN (PEM or PGP PRIVATE
+KEY BLOCK) starting before the cut without a matching END in the same window
+rejects even when full-export attribution is over budget. Headers wholly in the
+removed tail are attribution-only and do not stop syncing.
 Exhaustion is terminal `capture-local-cut-scan-limit`; sync status and capture
 errors explain the capacity limit without claiming a secret was found.
 The server scan remains the authority.
