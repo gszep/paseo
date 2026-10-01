@@ -5,6 +5,7 @@ import { Readable } from "node:stream";
 import path from "node:path";
 import { sandboxCommand } from "./backends.js";
 import { prepareWritePolicy, type WriteConfinementPolicy } from "./policy.js";
+import { openLinuxMounts, closeLinuxMounts, type LinuxMount } from "./linux-mounts.js";
 
 export interface ExecutionIdentity {
   agentId: string;
@@ -69,12 +70,14 @@ export async function spawnConfinedExecution(input: {
     ...fields,
   });
   let launch;
+  let mounts: LinuxMount[] = [];
   try {
     // Recheck at each execution. This does not close the external-writer race.
     const checked = await prepareWritePolicy({
       worktreeRoot: input.policy.worktreeRoot,
       mode: input.policy.mode,
       scratchRoots: input.policy.writableRoots,
+      readableRoots: input.policy.readableRoots,
     });
     if (checked.digest !== input.policy.digest)
       throw new Error("Write roots changed since policy preparation");
@@ -89,9 +92,11 @@ export async function spawnConfinedExecution(input: {
     }
     // Apply caller environment only AFTER sandbox entry. In particular,
     // LD_PRELOAD must never execute inside the unsandboxed bubblewrap loader.
+    if (process.platform === "linux") mounts = await openLinuxMounts(checked);
     launch = sandboxCommand({
-      policy: input.policy,
+      policy: checked,
       executionId,
+      mounts,
       command: "/usr/bin/env",
       args: [
         "-i",
@@ -102,6 +107,7 @@ export async function spawnConfinedExecution(input: {
       ],
     });
   } catch (error) {
+    await closeLinuxMounts(mounts);
     input.record(
       event({
         pid: null,
@@ -113,15 +119,24 @@ export async function spawnConfinedExecution(input: {
     );
     throw error;
   }
-  // Only new pipes cross the boundary. Never inherit terminal, log, writable
-  // file, socket or caller-supplied descriptors (including standard streams).
-  const child = spawn(launch.command, launch.args, {
-    cwd,
-    env: { PATH: "/usr/bin:/bin", LANG: "C" },
-    shell: false,
-    detached: false,
-    stdio: launch.seccomp ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
-  });
+  // The target receives only new standard-stream pipes. Bubblewrap additionally
+  // receives the policy and pinned mount sources, which it consumes before exec.
+  // Never inherit caller-provided descriptors, including standard streams.
+  let child: ChildProcess;
+  try {
+    child = spawn(launch.command, launch.args, {
+      cwd,
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      shell: false,
+      detached: false,
+      stdio: launch.seccomp
+        ? ["pipe", "pipe", "pipe", "pipe", ...mounts.map((mount) => mount.handle.fd)]
+        : ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    await closeLinuxMounts(mounts);
+    throw error;
+  }
   if (launch.seccomp) {
     const fd = child.stdio[3];
     if (!fd || !("write" in fd)) throw new Error("Missing seccomp pipe");
@@ -173,5 +188,6 @@ export async function spawnConfinedExecution(input: {
       ),
     );
   });
+  await closeLinuxMounts(mounts);
   return { executionId, process: child, rootExited };
 }

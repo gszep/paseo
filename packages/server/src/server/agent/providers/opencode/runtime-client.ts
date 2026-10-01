@@ -141,9 +141,11 @@ export class OpenCodeRuntimeClient implements AgentClient {
     return (await this.client()).fetchCatalog(options, context);
   }
   async listCommands(config: AgentSessionConfig) {
+    await assertWriteConfinementAvailable({ config, logger: this.logger });
     return (await this.client()).listCommands(config);
   }
   async listFeatures(config: AgentSessionConfig) {
+    await assertWriteConfinementAvailable({ config, logger: this.logger });
     return (await this.client()).listFeatures(config);
   }
   async listImportableSessions(options?: ListImportableSessionsOptions) {

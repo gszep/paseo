@@ -1,5 +1,8 @@
 import type { WriteConfinementPolicy } from "./policy.js";
 import { ConfinementRefusal } from "./policy.js";
+import { existsSync, realpathSync } from "node:fs";
+import path from "node:path";
+import type { LinuxMount } from "./linux-mounts.js";
 
 export interface SandboxCommand {
   command: string;
@@ -14,9 +17,27 @@ export function sandboxCommand(input: {
   args: readonly string[];
   platform?: NodeJS.Platform;
   arch?: string;
+  mounts?: readonly LinuxMount[];
 }): SandboxCommand {
   const platform = input.platform ?? process.platform;
   if (platform === "darwin") {
+    const ancestors = new Set<string>();
+    for (const root of [...input.policy.readableRoots, realpathSync(process.execPath)]) {
+      let parent = path.dirname(root);
+      while (parent !== path.dirname(parent)) {
+        ancestors.add(parent);
+        parent = path.dirname(parent);
+      }
+    }
+    const reads = [
+      "/System/Library",
+      "/usr/lib",
+      "/usr/bin",
+      "/bin",
+      "/sbin",
+      "/Library/Apple/System/Library",
+      ...input.policy.readableRoots,
+    ].map((root) => `(allow file-read* (subpath ${JSON.stringify(root)}))`);
     const grants = input.policy.writableRoots.map(
       (root) => `(allow file-write* (subpath ${JSON.stringify(root)}))`,
     );
@@ -27,7 +48,17 @@ export function sandboxCommand(input: {
     const profile = [
       "(version 1)",
       `(deny default (with message ${JSON.stringify(`PASEO_GUARD_${input.executionId}`)}))`,
-      "(allow file-read*)",
+      ...reads,
+      ...[...ancestors].map(
+        (root) => `(allow file-read-metadata (literal ${JSON.stringify(root)}))`,
+      ),
+      '(allow file-read* (literal "/"))',
+      `(allow file-read* (literal ${JSON.stringify(realpathSync(process.execPath))}))`,
+      '(allow file-read* (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))',
+      ...input.policy.credentialRoots.map(
+        (root) => `(deny file-read* (subpath ${JSON.stringify(root)}))`,
+      ),
+      '(deny mach-lookup (global-name "com.apple.securityd") (global-name "com.apple.securityd.xpc") (global-name "com.apple.secd"))',
       "(allow process-exec process-fork)",
       "(allow process-info* (target same-sandbox))",
       "(allow signal (target same-sandbox))",
@@ -48,6 +79,8 @@ export function sandboxCommand(input: {
     };
   }
   if (platform === "linux") {
+    if (!input.mounts?.length)
+      throw new ConfinementRefusal("invalid-root", "Linux mount sources must be pinned");
     return {
       command: "/usr/bin/bwrap",
       args: [
@@ -58,14 +91,21 @@ export function sandboxCommand(input: {
         "--disable-userns",
         "--cap-drop",
         "ALL",
-        "--ro-bind",
-        "/",
-        "/",
+        ...input.mounts.flatMap((mount, index) => [
+          mount.writable ? "--bind-fd" : "--ro-bind-fd",
+          String(index + 4),
+          mount.path,
+        ]),
+        // Preserve merged-/usr aliases without exposing the host root.
+        ...["/bin", "/sbin", "/lib", "/lib64"]
+          .filter(existsSync)
+          .flatMap((root) =>
+            realpathSync(root) === root ? [] : ["--symlink", realpathSync(root), root],
+          ),
         "--proc",
         "/proc",
         "--dev",
         "/dev",
-        ...input.policy.writableRoots.flatMap((root) => ["--bind", root, root]),
         "--seccomp",
         "3",
         "--",

@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -101,4 +101,41 @@ describe("write confinement admission", () => {
     expect(records).toHaveLength(4);
     await client.shutdown();
   });
+
+  it.each(["listCommands", "listFeatures"] as const)(
+    "guards %s before an unconfined provider probe can execute",
+    async (operation) => {
+      const marker = path.join(cwd, "unconfined-probe");
+      const executable = path.join(cwd, "provider.cjs");
+      await writeFile(
+        executable,
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed'); console.log('probe executed');`,
+      );
+      const client = new OpenCodeRuntimeClient(logger, {
+        command: { mode: "replace", argv: [process.execPath, executable] },
+      });
+      try {
+        await expect(
+          client[operation]({
+            provider: "opencode",
+            cwd,
+            featureValues: { writeConfinement: { mode: "worktree" } },
+          }),
+        ).rejects.toMatchObject({ reason: "integration-unavailable" });
+        await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+        const guardrails = records.filter(
+          (record) =>
+            typeof record === "object" &&
+            record !== null &&
+            "type" in record &&
+            record.type === "guardrail",
+        );
+        expect(guardrails).toEqual([
+          expect.objectContaining({ outcome: "launch-refused", reason: "integration-unavailable" }),
+        ]);
+      } finally {
+        await client.shutdown();
+      }
+    },
+  );
 });

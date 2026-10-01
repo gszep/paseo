@@ -11,6 +11,7 @@ import {
   link,
   stat,
   open,
+  rename,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +19,8 @@ import net from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { prepareWritePolicy, type WriteConfinementPolicy } from "./policy.js";
 import { spawnConfinedExecution, type GuardrailEvent } from "./execution.js";
+import { openLinuxMounts, closeLinuxMounts } from "./linux-mounts.js";
+import { sandboxCommand } from "./backends.js";
 
 const identity = { agentId: "builder", sessionId: "session", turnId: "turn", toolCallId: "tool" };
 const supported = process.platform === "darwin" || process.platform === "linux";
@@ -43,6 +46,7 @@ describe.skipIf(!supported)("experimental OS write boundary", () => {
       worktreeRoot: worktree,
       mode: "worktree",
       scratchRoots: [scratch],
+      readableRoots: [outside],
     });
     events = [];
   });
@@ -112,6 +116,7 @@ describe.skipIf(!supported)("experimental OS write boundary", () => {
       worktreeRoot: alias,
       mode: "worktree",
       scratchRoots: [scratch],
+      readableRoots: [outside],
     });
     expect(canonical).toEqual(policy);
   });
@@ -337,4 +342,211 @@ describe.skipIf(!supported)("experimental OS write boundary", () => {
     expect(result.stderr).toMatch(/(EPERM|EROFS|EACCES)/u);
     await expect(stat(path.join(worktree, "forbidden"))).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it.each([
+    ".config/gh/hosts.yml",
+    ".ssh/id_ed25519",
+    ".git-credentials",
+    "Library/Keychains/login.keychain-db",
+    ".local/share/keyrings/login.keyring",
+  ])("denies reading the synthetic credential store %s", async (relative) => {
+    // Never use the operator's credential stores, even as negative-test targets.
+    const store = path.join(root, "credential-fixture", relative);
+    await mkdir(path.dirname(store), { recursive: true });
+    await writeFile(store, "synthetic-test-secret");
+    await symlink(store, path.join(worktree, "credential-alias"));
+    const result = await run(process.execPath, [
+      "-e",
+      `
+      const fs = require('node:fs');
+      for (const name of [${JSON.stringify(store)}, 'credential-alias']) {
+        try { fs.readFileSync(name); throw Error('credential read escaped'); }
+        catch (e) {
+          if (!['EPERM', 'EACCES', 'ENOENT'].includes(e.code)) throw e;
+          console.log('denied');
+        }
+      }
+    `,
+    ]);
+    expect(result.outcome.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toBe("denied\ndenied\n");
+  });
+
+  it("confines a synthetic credential-helper subprocess", async () => {
+    const store = path.join(root, "credential-fixture", "git-token");
+    await mkdir(path.dirname(store));
+    await writeFile(store, "synthetic-test-secret");
+    const helper = path.join(worktree, "git-credential-fixture.cjs");
+    await writeFile(
+      helper,
+      `
+      try { require('node:fs').readFileSync(${JSON.stringify(store)}); process.exit(90); }
+      catch (e) { console.log(e.code); }
+    `,
+    );
+    const result = await run(process.execPath, [
+      "-e",
+      `
+      const helper = require('node:child_process').spawnSync(process.execPath, [${JSON.stringify(helper)}, 'get'], { encoding: 'utf8' });
+      process.stdout.write(helper.stdout); process.stderr.write(helper.stderr); process.exit(helper.status);
+    `,
+    ]);
+    expect(result.outcome.exitCode, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toMatch(/^(EPERM|EACCES|ENOENT)$/u);
+  });
+
+  it("allows only explicitly sanctioned fixture directories", async () => {
+    const fixture = path.join(root, "sanctioned-fixture");
+    await mkdir(fixture);
+    await writeFile(path.join(fixture, "token"), "synthetic-fixture-token");
+    const allowed = await prepareWritePolicy({
+      worktreeRoot: worktree,
+      mode: "worktree",
+      scratchRoots: [],
+      readableRoots: [fixture],
+    });
+    const result = await run(
+      process.execPath,
+      [
+        "-e",
+        `
+      console.log(require('node:fs').readFileSync(${JSON.stringify(path.join(fixture, "token"))}, 'utf8'));
+    `,
+      ],
+      allowed,
+    );
+    expect(result.outcome.exitCode, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("synthetic-fixture-token");
+  });
+
+  it("refuses a broad home grant without opening credential files", async () => {
+    await expect(
+      prepareWritePolicy({
+        worktreeRoot: worktree,
+        mode: "worktree",
+        scratchRoots: [],
+        readableRoots: [os.homedir()],
+      }),
+    ).rejects.toMatchObject({ reason: "invalid-root" });
+  });
+
+  it.skipIf(process.platform !== "linux").each(["read-only", "writable"])(
+    "pins %s mount sources across a synchronized outside symlink swap",
+    async (mode) => {
+      const sourceDirectory = mode === "writable" ? scratch : outside;
+      const sourceFile = path.join(sourceDirectory, "sentinel");
+      await writeFile(sourceFile, "unchanged");
+      const mounts = await openLinuxMounts(policy);
+      try {
+        const replacement = path.join(root, "credential-fixture");
+        await mkdir(replacement);
+        await writeFile(path.join(replacement, "sentinel"), "synthetic-test-secret");
+        const original = path.join(root, "original-source");
+        await rename(sourceDirectory, original);
+        await symlink(replacement, sourceDirectory);
+        const launch = sandboxCommand({
+          policy,
+          executionId: "pinned-fixture",
+          command: process.execPath,
+          args: [
+            "-e",
+            `const fs = require('node:fs'); console.log(fs.readFileSync(${JSON.stringify(sourceFile)}, 'utf8'));
+             if (${JSON.stringify(mode)} === 'writable') fs.writeFileSync(${JSON.stringify(sourceFile)}, 'changed');`,
+          ],
+          mounts,
+        });
+        const child = spawn(launch.command, launch.args, {
+          cwd: worktree,
+          env: {},
+          stdio: ["ignore", "pipe", "pipe", "pipe", ...mounts.map((mount) => mount.handle.fd)],
+        });
+        const filter = child.stdio[3];
+        if (!filter || !("write" in filter)) throw Error("Missing seccomp pipe");
+        filter.end(launch.seccomp);
+        let stdout = "";
+        let stderr = "";
+        child.stdout!.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
+        child.stderr!.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
+        const [code] = await once(child, "close");
+        expect(code, stderr).toBe(0);
+        expect(stdout.trim()).toBe("unchanged");
+        expect(await readFile(path.join(replacement, "sentinel"), "utf8")).toBe(
+          "synthetic-test-secret",
+        );
+        expect(await readFile(path.join(original, "sentinel"), "utf8")).toBe(
+          mode === "writable" ? "changed" : "unchanged",
+        );
+      } finally {
+        await closeLinuxMounts(mounts);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "refuses a replacement root before pinning mount sources",
+    async () => {
+      await rename(outside, path.join(root, "original-outside"));
+      await mkdir(outside);
+      await expect(openLinuxMounts(policy)).rejects.toMatchObject({ reason: "invalid-root" });
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "does not pass host mount descriptors into the confined process",
+    async () => {
+      const result = await run(process.execPath, [
+        "-e",
+        `
+      const fs = require('node:fs');
+      const roots = ${JSON.stringify(policy.rootIdentities)};
+      for (let fd = 0; fd < 256; fd++) {
+          let info; try { info = fs.fstatSync(fd, { bigint: true }); } catch { continue; }
+          if (roots.some(root => root.device === String(info.dev) && root.inode === String(info.ino))) throw Error('host mount descriptor inherited');
+      }
+      console.log('host mount descriptors closed');
+    `,
+      ]);
+      expect(result.outcome.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("host mount descriptors closed");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "denies the keychain Mach endpoint without querying credentials",
+    async () => {
+      const source = path.join(worktree, "keychain-endpoint.c");
+      const binary = path.join(worktree, "keychain-endpoint");
+      await writeFile(
+        source,
+        `
+      #include <mach/mach.h>
+      #include <servers/bootstrap.h>
+      #include <stdio.h>
+      int main(void) {
+        mach_port_t service = MACH_PORT_NULL;
+        kern_return_t result = bootstrap_look_up(bootstrap_port, "com.apple.securityd", &service);
+        if (result == KERN_SUCCESS) { mach_port_deallocate(mach_task_self(), service); return 90; }
+        printf("%d\\n", result);
+        return result == BOOTSTRAP_NOT_PRIVILEGED ? 0 : 91;
+      }
+    `,
+      );
+      const compiler = spawn("/usr/bin/clang", [source, "-o", binary], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let errors = "";
+      compiler.stderr.on("data", (chunk) => {
+        errors += chunk.toString();
+      });
+      const [code] = await once(compiler, "close");
+      expect(code, errors).toBe(0);
+      const result = await run(binary, []);
+      expect(result.outcome.exitCode, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("1100");
+    },
+  );
 });

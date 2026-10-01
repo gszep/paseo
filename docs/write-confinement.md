@@ -19,7 +19,7 @@ confined agent. The runtime needs a host-service network broker: allowing access
 to the daemon's loopback/Unix sockets would restore unconfined execution.
 
 The production OpenCode runtime adapter recognizes this per-agent request in
-`featureValues` on create, resume and import:
+`featureValues` on create, resume, import, command listing and feature listing:
 
 ```json
 {
@@ -47,10 +47,11 @@ session, turn and tool coordinates with cwd, worktree, digest, launcher PID and
 outcome. Calls sharing a tool ID receive distinct execution IDs. No identity is
 taken from child environment variables or output.
 
-The macOS backend uses `/usr/bin/sandbox-exec`, unrestricted filesystem reads,
+The macOS backend uses `/usr/bin/sandbox-exec`, an explicit read allowlist,
 explicit write roots and default-denied host IPC/network access. It denies
 hardlink creation, moving write roots and the read-FD-mutating fcntls 80/110.
-The Linux backend uses `/usr/bin/bwrap`, a read-only host, writable root binds,
+The Linux backend uses `/usr/bin/bwrap`, a minimal filesystem with read-only
+system/runtime mounts, explicit readable roots and writable root binds,
 private PID/user/network/IPC namespaces, no capabilities, disabled nested user
 namespaces and an architecture-checked seccomp filter. The filter blocks socket
 creation, hardlinks, ptrace, process-memory writes, handle-based opens, BPF and
@@ -58,8 +59,37 @@ io_uring setup. Linux's private `/proc` and `/dev` replace host process/device
 interfaces. Neither backend grants network access; this cannot yet run the
 model-connected OpenCode service.
 
-The launcher supplies fresh standard-stream pipes and no caller file descriptors.
-The Linux policy pipe is consumed by bubblewrap before target exec. The launcher
+### Credential reads
+
+The launcher admits reads of the worktree, scratch roots, runtime executable and
+system libraries/tools. Additional directories require the trusted caller's
+`prepareWritePolicy({ readableRoots: [...] })` allowlist. The agent feature schema
+does not accept this grant. Tests use synthetic, explicitly sanctioned directories;
+they never query the operator's credentials.
+
+Host credential stores receive no default read grant, including `.config/gh`,
+`.ssh`, Git credential files/config, user keychains, and provider configuration.
+Admission rejects directory grants overlapping the host's enumerated credential
+stores. macOS also denies keychain Mach endpoints. Its exact-root read grant is
+needed by dyld; exact ancestor metadata grants let Node resolve admitted scripts.
+These expose directory names/metadata, not their descendant file contents.
+
+Linux mount sources are opened before launch and passed through bubblewrap's
+`--bind-fd` / `--ro-bind-fd`. Admission records full-width device/inode identities;
+replacement roots are refused. A pathname bind would reopen a directory swapped
+after validation and could expose the replacement's contents. Bubblewrap must
+consume the source descriptors before target exec: retaining a host directory FD
+would undermine the minimal filesystem. The tests exercise both obligations.
+These flags are required; a distribution without them refuses launch. Artemis
+validation used Ubuntu's `0.9.0-1ubuntu0.3`, which includes the FD-bind backport;
+the upstream version string alone is insufficient to establish support.
+
+This is launcher-level hardening, **not whole-agent credential isolation**. The
+external shared-inode race below also applies to reads through a newly introduced
+alias. The production gate stays closed.
+
+The target receives fresh standard-stream pipes and no caller file descriptors.
+Bubblewrap consumes the Linux policy pipe and pinned source FDs before target exec. The launcher
 itself receives a minimal environment; caller loader variables are only applied
 after sandbox entry. Neither output nor exit status is trusted denial evidence.
 
@@ -106,8 +136,11 @@ Before opening production admission:
    A pre-existing hardlink is rejected in userspace today, **not refused by the OS
    at mutation time**. The requested hardlink acceptance is therefore incomplete.
 4. **Complete denial collection:** the Seatbelt profile tags kernel messages with
-   its execution UUID, but no trusted collector ingests them here. An unprivileged
-   `log show` probe on the validation host returned no tagged sandbox denials.
+   its execution UUID, but no trusted collector ingests them here. A subsequent
+   live `log stream` probe on October 1, 2026 UTC captured tagged kernel denials
+   without privilege elevation. The earlier empty `log show` result did not
+   establish that collection was unavailable. `(with report)` on a deny rule is
+   rejected by this host; it must not be used as an enforcement workaround.
    Read-only bubblewrap mounts do not emit an application audit stream. Add a
    privileged/entitled collector or equivalent kernel evidence path, including
    loss reporting and process attribution. Do not parse stderr as proof or treat
@@ -119,6 +152,37 @@ Before opening production admission:
    arbitrary orphan completion have not passed.
 
 ## Validation
+
+The October 1, 2026 UTC continuation rebased the draft on `a7675c52c`. It adds
+synthetic gh-token, SSH, Git credential-helper and keychain-file read probes, a
+keychain Mach endpoint lookup (no credential query), explicit fixture read grants,
+and Linux synchronized mount-source replacement and descriptor-lifetime probes.
+It also reproduces and guards command/feature discovery executing a provider
+version probe before confined-agent admission. These tests do not satisfy the
+whole-agent acceptance gate.
+
+The focused execution suite passed **31 tests on macOS** (four Linux-only cases
+skipped) and **34 on Artemis/Linux** (one macOS-only case skipped). Seven admission
+tests passed. Revert/bypass probes failed as expected for both discovery gates,
+the macOS read allowlist, sanctioned read grants on both OSes, ancestor metadata,
+home-grant rejection, keychain IPC, Linux minimal-root mounts, pinned sources and
+root-identity validation.
+
+The synchronized post-start hardlink probe **still failed on both OSes**: an
+unconfined fixture writer introduced an alias after launch; the confined process
+read the synthetic secret and changed its outside inode. Do not interpret the
+focused suite or CI as passing the full escape matrix.
+
+An isolated APFS sparse-image probe successfully created, attached and detached a
+separate writable filesystem without restarting a daemon. Use independently
+backed writable storage for the remaining inode fix: copying into an ordinary
+same-filesystem directory leaves the post-admission hardlink race open. Volume
+allocation, confined copy admission, durable results and descendant-aware teardown
+are not integrated. The real OpenCode service was also tried with an empty private
+home and the read allowlist; startup failed in Bun's Segmenter initialization.
+Per-agent service and daemon-tool execution are still not implemented.
+
+### Historical baseline
 
 On September 30 UTC / October 1 JST, 2026, the same 22 kernel/admission-boundary
 tests passed on macOS (Darwin 24.6.0 x64) and via SSH on Linux
