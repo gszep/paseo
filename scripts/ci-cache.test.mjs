@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { docsOnly, classify } from "./ci-docs-only.mjs";
-import { hashFiles, installInputs, validInstall } from "./ci-cache.mjs";
+import { hashFiles, installInputs, pruneGeneratedCaches, validInstall } from "./ci-cache.mjs";
 import { inputs, keyFor, outputs, targets, validBuild } from "./ci-build.mjs";
 
 function fixture(t) {
@@ -194,5 +194,29 @@ test("a new workspace dependency cannot silently escape a task's build-input clo
         `${target} is missing ${name}; expand the cache inputs`,
       );
     }
+  }
+});
+
+test("main dependency snapshots exclude generated test caches but preserve dependency files", (t) => {
+  const { cwd, put } = fixture(t);
+  put("package.json", JSON.stringify({ workspaces: ["packages/app"] }));
+  for (const workspace of [".", "packages/app"]) {
+    put(`${workspace}/node_modules/.vite/vitest/results.json`, "generated test output");
+    put(`${workspace}/node_modules/.cache/tool/cache`, "generated tool cache");
+    put(`${workspace}/node_modules/dependency/package.json`, '{"version":"1.0.0"}');
+  }
+  pruneGeneratedCaches(cwd);
+  for (const workspace of [".", "packages/app"]) {
+    assert.throws(
+      () => readFileSync(join(cwd, workspace, "node_modules/.vite/vitest/results.json")),
+      { code: "ENOENT" },
+    );
+    assert.throws(() => readFileSync(join(cwd, workspace, "node_modules/.cache/tool/cache")), {
+      code: "ENOENT",
+    });
+    assert.equal(
+      readFileSync(join(cwd, workspace, "node_modules/dependency/package.json"), "utf8"),
+      '{"version":"1.0.0"}',
+    );
   }
 });

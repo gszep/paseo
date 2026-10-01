@@ -10,6 +10,9 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Exclude generated test and tool caches from dependency snapshots
+      shell: bash
+      run: node scripts/ci-cache.mjs prune
     - id: keys
       shell: bash
       run: node scripts/ci-cache.mjs keys

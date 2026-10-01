@@ -9,6 +9,7 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -108,6 +109,18 @@ export function output(name, value) {
   console.log(`${name}=${value}`);
 }
 
+export function pruneGeneratedCaches(cwd = root) {
+  const { workspaces } = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
+  // Successful jobs save dependency bytes, not Vite/Vitest/Astro test results or
+  // tool caches created while exercising them. Runtime homes/results are outside
+  // these allowlisted dependency trees and are never archived.
+  for (const workspace of [".", ...workspaces]) {
+    for (const name of [".cache", ".vite", ".vitest", ".astro"]) {
+      rmSync(join(cwd, workspace, "node_modules", name), { recursive: true, force: true });
+    }
+  }
+}
+
 export function treeFiles(paths, cwd = root) {
   const files = [];
   function visit(path) {
@@ -174,5 +187,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(
       `CI dependencies: ${hit ? "validated snapshot" : "frozen install"}, ${Date.now() - started}ms`,
     );
-  } else throw new Error("expected keys or install");
+  } else if (process.argv[2] === "prune") {
+    pruneGeneratedCaches();
+  } else throw new Error("expected keys, install or prune");
 }
