@@ -14,7 +14,12 @@ import {
   unitFiles,
 } from "./ci-selection.mjs";
 import { critical, criticalCli, criticalServerIntegration } from "./ci-test-policy.mjs";
-import { commands } from "./ci-run-tests.mjs";
+import {
+  commands,
+  runCommands,
+  verifyCriticalCollection,
+  criticalCollectionArgs,
+} from "./ci-run-tests.mjs";
 import { cliFiles, partition } from "./ci-partition.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
@@ -131,6 +136,113 @@ test("documentation skips unrelated jobs but cannot suppress the critical set", 
   assert.equal(result.full, false);
   assertCritical(result);
   assert.deepEqual(enabled(result), ["app", "cli", "sdk", "server"]);
+});
+
+test("critical inventory cannot lose the named security contracts", () => {
+  const required = {
+    server: [
+      "src/server/auth.test.ts",
+      "src/server/bootstrap-auth.test.ts",
+      "src/server/config-auth.test.ts",
+      "src/server/agent/permission-response.test.ts",
+      "src/server/agent/agent-manager.test.ts",
+      "src/server/chi/connection.test.ts",
+      "src/server/chi/destinations.test.ts",
+      "src/server/chi/mentions.test.ts",
+      "src/server/chi/provenance.test.ts",
+      "src/server/message-receipts/index.test.ts",
+    ],
+    app: [
+      "src/utils/scanned-pairing-offer.test.ts",
+      "src/chi/continuation-state.test.ts",
+      "src/chi/mention-submission.test.ts",
+      "src/chi/mention-context.test.ts",
+      "src/chi/mention-errors.test.ts",
+      "src/chi/reply-model.test.ts",
+      "src/chi/inbox-model.test.ts",
+      "src/chi/inbox-query.test.ts",
+      "src/chi/mentions-unavailable.browser.test.tsx",
+      "src/composer/actions.test.ts",
+      "src/runtime/host-runtime.test.ts",
+    ],
+    client: ["src/daemon-client.test.ts"],
+  };
+  for (const [pkg, files] of Object.entries(required))
+    for (const file of files) assert.ok(critical[pkg].includes(file), `${pkg}/${file}`);
+  assert.ok(
+    criticalServerIntegration.includes("src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts"),
+  );
+  for (const file of [
+    "12-permit-ls.test.ts",
+    "13-permit-allow-deny.test.ts",
+    "32-daemon-set-password.test.ts",
+    "34-daemon-status-auth.test.ts",
+  ])
+    assert.ok(criticalCli.includes(file));
+});
+
+test("critical paths excluded by runner config cannot turn a job green", () => {
+  const listed = [...critical.server, ...criticalServerIntegration].map((file) => ({
+    file: join(root, "packages/server", file),
+  }));
+  verifyCriticalCollection("server", listed, root);
+  assert.throws(
+    () => verifyCriticalCollection("server", listed.slice(1), root),
+    /Critical test excluded/,
+  );
+  assert.throws(
+    () => verifyCriticalCollection("server", listed.slice(0, -1), root),
+    /Critical test excluded/,
+  );
+});
+
+test("real Vitest critical collection is complete and read-only (optional --json argument last)", () => {
+  for (const pkg of Object.keys(critical)) {
+    const args = criticalCollectionArgs(pkg);
+    // Assert BEFORE launching: reverting this order could overwrite a source file.
+    assert.equal(args.at(-1), "--json");
+    assert.ok(args.includes("--filesOnly"));
+    const paths = [...critical[pkg], ...(pkg === "server" ? criticalServerIntegration : [])].map(
+      (file) => join(root, "packages", pkg, file),
+    );
+    const before = paths.map((file) => readFileSync(file, "utf8"));
+    const listed = JSON.parse(
+      execFileSync("npm", args, { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }),
+    );
+    verifyCriticalCollection(pkg, listed, root);
+    assert.deepEqual(
+      paths.map((file) => readFileSync(file, "utf8")),
+      before,
+    );
+  }
+});
+
+test("failed unit commands cannot bypass later critical integration commands or mask failure", () => {
+  const tasks = [["unit"], ["integration"], ["critical"]];
+  const ran = [];
+  assert.throws(
+    () =>
+      runCommands(tasks, (args) => {
+        ran.push(args);
+        if (args[0] === "unit") throw new Error("failure");
+      }),
+    AggregateError,
+  );
+  assert.deepEqual(ran, tasks);
+  assert.doesNotThrow(() => runCommands([], () => assert.fail("empty shard launched a test")));
+});
+
+test("large Windows related sets fall back to the full command rather than truncated argv", () => {
+  const result = {
+    full: false,
+    packages: [],
+    tests: { server: Array.from({ length: 500 }, (_, index) => `src/test-${index}.test.ts`) },
+  };
+  assert.deepEqual(
+    commands("server", result, "win32"),
+    commands("server", fullSelection("full"), "win32"),
+  );
+  assert.ok(commands("server", result, "linux")[0].includes("src/test-499.test.ts"));
 });
 
 test("every workspace has a CI suite owner, including website units and audio's consuming app", () => {

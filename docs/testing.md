@@ -286,6 +286,9 @@ Required matrix legs are declared as statically named jobs. Their shared steps u
 Critical Chi capture/scan/minimisation/provenance, auth and mention contracts are
 unioned with related unit files before invoking the runner. Never combine a
 critical file filter with `--changed` or `--related`: that intersects the sets.
+The runner also checks Vitest's actual file collection: an existing critical
+path excluded by project configuration fails the check. A unit failure does not
+prevent later critical integration commands from running; failures are aggregated.
 The server admission/durability integration regression runs explicitly because
 the pre-existing integration allowlist did not include it. The CLI runner unions
 its permission/auth contracts before creating disjoint shards; an empty shard

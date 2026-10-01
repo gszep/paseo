@@ -44,4 +44,9 @@ export const critical = {
 // Run it explicitly on BOTH selected and full paths.
 export const criticalServerIntegration = ["src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts"];
 
-export const criticalCli = ["13-permit-allow-deny.test.ts", "34-daemon-status-auth.test.ts"];
+export const criticalCli = [
+  "12-permit-ls.test.ts",
+  "13-permit-allow-deny.test.ts",
+  "32-daemon-set-password.test.ts",
+  "34-daemon-status-auth.test.ts",
+];
