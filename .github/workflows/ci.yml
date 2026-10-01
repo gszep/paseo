@@ -140,6 +140,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/ci-restore
         id: cache
@@ -151,8 +153,7 @@ jobs:
         run: npm run typecheck
 
       - name: Run website unit contracts
-        # Fail open if this checkout has no base; website tests were previously
-        # absent from the package's test:e2e command.
+        # These were previously absent from the package's test:e2e command.
         run: node scripts/ci-run-tests.mjs website
         env:
           CI_FORCE_FULL: ${{ needs.changes.outputs.full != 'false' }}

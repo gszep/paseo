@@ -21,7 +21,18 @@ export function commands(pkg, selected, platform = process.platform) {
   const result = [];
   if (pkg === "website")
     return all || files.length
-      ? [["exec", workspace, "--", "vitest", "run", ...(all ? ["src"] : files)]]
+      ? [
+          [
+            "exec",
+            workspace,
+            "--",
+            "vitest",
+            "run",
+            "--config",
+            "../../vitest.config.ts",
+            ...(all ? ["src"] : files),
+          ],
+        ]
       : [];
   if (all || files.length) {
     const script = pkg === "server" || pkg === "cli" ? "test:unit" : "test";

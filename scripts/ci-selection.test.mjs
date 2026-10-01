@@ -260,7 +260,16 @@ test("every workspace has a CI suite owner, including website units and audio's 
     "website",
   ]);
   assert.deepEqual(commands("website", fullSelection("main")), [
-    ["exec", "--workspace=@getpaseo/website", "--", "vitest", "run", "src"],
+    [
+      "exec",
+      "--workspace=@getpaseo/website",
+      "--",
+      "vitest",
+      "run",
+      "--config",
+      "../../vitest.config.ts",
+      "src",
+    ],
   ]);
 });
 
