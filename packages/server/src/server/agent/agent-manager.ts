@@ -2674,21 +2674,23 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
-      const start = async () => {
+      const start = () => {
         if (pendingRun.settled || this.agents.get(agentId) !== agent)
           throw new Error(`Agent ${agentId} run was canceled before its turn started`);
-        const reminder = await this.chi?.humanPromptBoundary(agentId);
-        if (pendingRun.settled || this.agents.get(agentId) !== agent)
-          throw new Error(`Agent ${agentId} run was canceled before its turn started`);
-        return agent.session.startTurn(prompt, {
-          ...options,
-          ...(reminder
-            ? {
-                humanPromptReminder: reminder,
-                onHumanPromptReminder: () =>
-                  this.chi!.acknowledgeHumanPromptReminder(agentId, reminder),
-              }
-            : {}),
+        if (!this.chi) return agent.session.startTurn(prompt, options);
+        return this.chi.humanPromptBoundary(agentId).then((reminder) => {
+          if (pendingRun.settled || this.agents.get(agentId) !== agent)
+            throw new Error(`Agent ${agentId} run was canceled before its turn started`);
+          return agent.session.startTurn(prompt, {
+            ...options,
+            ...(reminder
+              ? {
+                  humanPromptReminder: reminder,
+                  onHumanPromptReminder: () =>
+                    this.chi!.acknowledgeHumanPromptReminder(agentId, reminder),
+                }
+              : {}),
+          });
         });
       };
       const result = this.chi ? await this.chi.withPromptAdmission(agentId, start) : await start();
