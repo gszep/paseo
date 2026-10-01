@@ -314,6 +314,8 @@ Recipient inbox mute and one-hour snooze actions persist in backend policy stora
 independent of agent receipts and source deletion. These session controls only tighten;
 mute lasts for that session. The agent tool can also tighten local suppression but
 cannot clear either policy. Checked-work resolution remains a separate human action.
+Mute requires confirmation. Mute, snooze and replies keep separate immutable pending
+operations; retrying a control cannot resend a pending answer or another control.
 
 **Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
 answers resolve local receipts; a later answer can correct an invalid form answer.
@@ -329,11 +331,18 @@ change-only and limited to 600 characters, with answered items first; acknowledg
 follows successful injection. Steering never injects them. Resumed/forked sessions
 remove the retired `chi-human-prompts` instruction entry. The minimiser omits private
 user reminders and legacy system deltas; the backend rejects un-omitted captures.
+The provider filters tagged reminders from the owner timeline. `/compact` and
+`/summarize` admit fresh reminders after compaction, retaining the untrusted label
+for compacted answers even when no new reminder is pending.
 Automatic reconciliation polls at most eight pending batches per boundary with a
-durable rotating cursor and one authority bracket. Cached answers exposed by the
+durable rotating cursor and one authority bracket. Each completed read saves its
+cursor and answers independently. Reads run outside the dispatch lock, and queued
+sends precede reads. A lost create response stays uncertain until an exact read
+proves delivery; recovery does not require a second send. Cached answers exposed by the
 bounded reminder get exact ACL verification without polling for corrections. The
 foreground step has a two-second deadline; expiration withholds the reminder and
-prevents subsequent dispatch. Explicit list/resolve may read the full bounded receipt.
+prevents subsequent dispatch while the bounded reader continues for the next turn.
+Explicit list/resolve may read the full bounded receipt.
 Dispatch requires the backend's scanner capability; recipient controls require its
 optional handoff capability. Old clients still parse ordinary discussion.
 

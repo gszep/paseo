@@ -58,6 +58,20 @@ export async function startMentionActor(
   if (!credentials)
     throw new Error("Set CHI_MENTION_TEST_ACTORS_DIR to the private test-account token directory");
   const token = (await readFile(join(credentials, `${actor}.chi-token`), "utf8")).trim();
+  // The live repository catalog can be cold after deployment. Establish its
+  // readiness before the rendered scenario; real capture still reauthorizes it.
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(append(endpointUrl(DEFAULT_BACKEND_URL), "repos"), {
+      redirect: "error",
+      signal: AbortSignal.timeout(20000),
+      headers: { authorization: `Bearer ${token}` },
+    });
+    await response.body?.cancel();
+    if (response.ok) break;
+    if (response.status !== 503 || attempt === 2)
+      throw new Error(`Synthetic repository readiness failed: ${response.status}`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
   async function removeSource(sourceId: string) {
     const url = append(endpointUrl(DEFAULT_BACKEND_URL), "evidence");
     url.searchParams.set("sourceId", sourceId);

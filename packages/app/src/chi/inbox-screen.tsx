@@ -30,6 +30,7 @@ import { HighlightedText } from "@/components/ui/highlighted-text";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
 import { formatDateSectionLabel } from "@/components/date-sections";
 import { formatTimeAgo } from "@/utils/time";
+import { confirmDialog } from "@/utils/confirm-dialog";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { openReplyForm } from "./reply-model";
 import { readHumanPrompts } from "@getpaseo/protocol/chi-mentions";
@@ -726,33 +727,117 @@ function PinnedContext({
   );
 }
 
-function HumanPromptControls({
+function HumanPromptControl({
   handoff,
-  actor,
-  form,
-  locked,
+  context,
+  onSuccess,
+  control,
 }: {
   handoff: ChiHandoff;
-  actor: string;
-  form: ReturnType<typeof openReplyForm>;
-  locked: boolean;
+  context: InboxContext;
+  onSuccess(): void;
+  control: "mute" | "snooze";
 }) {
-  const mute = useCallback(() => void form.send("reply", undefined, "mute"), [form]);
-  const snooze = useCallback(() => void form.send("reply", undefined, "snooze"), [form]);
+  const [form] = useState(() =>
+    openReplyForm({
+      handoff,
+      context: { ...context.identity, repo: handoff.repo },
+      key: `chi-reply:${JSON.stringify([context.identity.deployment, handoff.repo, context.identity.actor, handoff.id])}`,
+      storage: AsyncStorage,
+      control,
+      confirmMute: () =>
+        confirmDialog({
+          title: "Mute prompts from this session?",
+          message:
+            "This permanently stops new human prompts from this session. You cannot undo this mute.",
+          confirmLabel: "Mute prompts",
+          destructive: true,
+        }),
+      execute: (operation) => {
+        if (operation.action !== "reply") throw new Error("chi-invalid-operation");
+        return context.execute({ ...operation, repo: handoff.repo });
+      },
+      uuid: () => crypto.randomUUID(),
+      onSuccess,
+    }),
+  );
+  useEffect(() => () => form.close(), [form]);
+  const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
+  const send = useCallback(() => void form.send("reply"), [form]);
+  const reauthorize = useCallback(() => void form.reauthorize(), [form]);
+  const discard = useCallback(
+    () =>
+      void form.discardConflict().then((changed) => {
+        return changed ? onSuccess() : undefined;
+      }),
+    [form, onSuccess],
+  );
+  const label = control === "mute" ? "Mute prompts from this session" : "Snooze prompts for 1 hour";
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={
+          state.status === "loading" ||
+          state.status === "blocked" ||
+          state.status === "pending" ||
+          state.status === "sent"
+        }
+        onPress={send}
+      >
+        {state.operation ? `Retry ${control}` : label}
+      </Button>
+      {state.status === "pending" ? (
+        <Text style={styles.hint}>
+          {control === "mute" ? "Muting prompts…" : "Snoozing prompts…"}
+        </Text>
+      ) : null}
+      {state.status === "sent" ? (
+        <Alert
+          variant="success"
+          title={
+            control === "mute" ? "Prompts muted for this session" : "Prompts snoozed for 1 hour"
+          }
+        />
+      ) : null}
+      {state.status === "failed" || state.status === "blocked" ? (
+        <Alert
+          variant="error"
+          title={`${control === "mute" ? "Mute" : "Snooze"} not confirmed`}
+          description={mentionError(state.error)}
+        >
+          {state.canDiscard ? (
+            <Button size="sm" variant="outline" onPress={discard}>
+              Refresh rejected {control}
+            </Button>
+          ) : null}
+          {state.canReauthorize ? (
+            <Button size="sm" variant="outline" onPress={reauthorize}>
+              Authorize saved {control} with current credentials
+            </Button>
+          ) : null}
+        </Alert>
+      ) : null}
+    </>
+  );
+}
+
+function HumanPromptControls(props: {
+  handoff: ChiHandoff;
+  context: InboxContext;
+  onSuccess(): void;
+}) {
   if (
-    !readHumanPrompts(handoff.text) ||
-    handoff.humanPromptControls !== true ||
-    handoff.recipient !== actor
+    !readHumanPrompts(props.handoff.text) ||
+    props.handoff.humanPromptControls !== true ||
+    props.handoff.recipient !== props.context.identity.actor
   )
     return null;
   return (
     <>
-      <Button size="sm" variant="outline" disabled={locked} onPress={mute}>
-        Mute prompts from this session
-      </Button>
-      <Button size="sm" variant="outline" disabled={locked} onPress={snooze}>
-        Snooze prompts for 1 hour
-      </Button>
+      <HumanPromptControl {...props} control="mute" />
+      <HumanPromptControl {...props} control="snooze" />
     </>
   );
 }
@@ -833,12 +918,7 @@ function ReplyForm({
           ))
         : null}
       {state.status === "pending" ? <Text style={styles.hint}>Sending…</Text> : null}
-      <HumanPromptControls
-        handoff={handoff}
-        actor={context.identity.actor}
-        form={form}
-        locked={locked}
-      />
+      <HumanPromptControls handoff={handoff} context={context} onSuccess={onSuccess} />
       {state.status === "sent" ? <Alert variant="success" title="Reply delivered" /> : null}
       {state.status === "failed" || state.status === "blocked" ? (
         <Alert

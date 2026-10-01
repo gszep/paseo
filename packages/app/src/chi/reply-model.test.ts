@@ -3,6 +3,7 @@ import type { ChiHandoff, ChiMentionOperation } from "@getpaseo/protocol/chi-men
 import {
   ChiOperationError,
   encodeHumanPrompts,
+  encodeHumanAnswers,
   readHumanAnswers,
 } from "@getpaseo/protocol/chi-mentions";
 import { openReplyForm } from "./reply-model";
@@ -108,6 +109,8 @@ test.each(["mute", "snooze"] as const)(
       context,
       key: "control",
       storage: storage(),
+      control,
+      confirmMute: async () => true,
       uuid: () => handoff.id,
       onSuccess: () => undefined,
       execute: async (op: ChiMentionOperation) => {
@@ -116,21 +119,21 @@ test.each(["mute", "snooze"] as const)(
       },
     };
     const form = openReplyForm(options);
-    await form.send("reply", undefined, control);
+    await form.send("reply");
     expect(sent[0]).toMatchObject({
       action: "reply",
       text:
         "Human prompt controls (v1)\n" +
         JSON.stringify({ action: control, ...(control === "snooze" ? { minutes: 60 } : {}) }),
     });
-    await form.send("reply", undefined, control === "mute" ? "snooze" : "mute");
+    await form.send("reply");
     expect(sent[1]).toEqual(sent[0]);
     const author = openReplyForm({
       ...options,
       storage: storage(),
       context: { ...context, actor: handoff.author },
     });
-    await author.send("reply", undefined, control);
+    await author.send("reply");
     expect(sent).toHaveLength(2);
     expect(author.getState().error).toBe("chi-human-prompt-recipient-required");
     const oldBackend = openReplyForm({
@@ -138,7 +141,7 @@ test.each(["mute", "snooze"] as const)(
       storage: storage(),
       handoff: { ...prompt, humanPromptControls: undefined },
     });
-    await oldBackend.send("reply", undefined, control);
+    await oldBackend.send("reply");
     expect(sent).toHaveLength(2);
     expect(oldBackend.getState().error).toBe("chi-human-prompt-recipient-required");
     form.close();
@@ -146,6 +149,78 @@ test.each(["mute", "snooze"] as const)(
     oldBackend.close();
   },
 );
+
+test("mute and snooze keep separate immutable operations from an uncertain answer, and mute requires confirmation", async () => {
+  const prompt = {
+    ...handoff,
+    humanPromptControls: true,
+    text: encodeHumanPrompts({
+      sessionId: "ses",
+      turnId: "msg",
+      items: [{ id: handoff.id, kind: "question", priority: "blocking", text: "Pick" }],
+    }),
+  };
+  const disk = storage();
+  const sent: ChiMentionOperation[] = [];
+  let confirmed = false,
+    confirmations = 0;
+  const options = {
+    handoff: prompt,
+    context,
+    key: `chi-reply:${JSON.stringify(["https://chi.example", handoff.repo, context.actor, handoff.id])}`,
+    storage: disk,
+    uuid: () => crypto.randomUUID(),
+    onSuccess: () => undefined,
+    execute: async (op: ChiMentionOperation) => {
+      sent.push(op);
+      throw new Error("lost response");
+    },
+  };
+  const reply = openReplyForm(options);
+  reply.setText("Blue");
+  await reply.send("reply", handoff.id);
+  const mute = openReplyForm({
+    ...options,
+    control: "mute",
+    confirmMute: async () => {
+      confirmations++;
+      return confirmed;
+    },
+  });
+  const snooze = openReplyForm({ ...options, control: "snooze" });
+  await mute.send("reply");
+  expect(sent).toHaveLength(1);
+  confirmed = true;
+  await mute.send("reply");
+  await snooze.send("reply");
+  expect(sent).toHaveLength(3);
+  expect(sent[0]).toMatchObject({ text: encodeHumanAnswers([{ id: handoff.id, text: "Blue" }]) });
+  expect(sent[1]).toMatchObject({ text: 'Human prompt controls (v1)\n{"action":"mute"}' });
+  expect(sent[2]).toMatchObject({
+    text: 'Human prompt controls (v1)\n{"action":"snooze","minutes":60}',
+  });
+  expect(new Set(sent.map((op) => ("operationId" in op ? op.operationId : null))).size).toBe(3);
+  mute.close();
+  snooze.close();
+  reply.close();
+  const restoredReply = openReplyForm(options);
+  await restoredReply.send("reply", handoff.id);
+  expect(sent.at(-1)).toEqual(sent[0]);
+  restoredReply.close();
+  for (const control of ["mute", "snooze"] as const) {
+    const restored = openReplyForm({
+      ...options,
+      control,
+      confirmMute: async () => {
+        throw new Error("Already confirmed");
+      },
+    });
+    await restored.send("reply");
+    expect(sent.at(-1)).toEqual(sent[control === "mute" ? 1 : 2]);
+    restored.close();
+  }
+  expect(confirmations).toBe(2);
+});
 
 test.each(["reply", "acknowledge"] as const)(
   "discovers legacy uncertain %s and requires explicit same-actor reauthorization before immutable retry",

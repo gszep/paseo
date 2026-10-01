@@ -52,7 +52,7 @@ import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
-import { HumanPrompts, type HumanPromptOperation } from "./human-prompts.js";
+import { HumanPrompts, quoteHumanAnswer, type HumanPromptOperation } from "./human-prompts.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
@@ -632,9 +632,7 @@ export class ChiConnection {
         return result;
       },
       read: async (id: string) => {
-        signal?.throwIfAborted();
         const result = await this.mentions.execute(initial.identity, { action: "read", id });
-        signal?.throwIfAborted();
         if (result.kind !== "handoff") throw new Error("chi-human-prompt-invalid-response");
         return result.handoff;
       },
@@ -651,10 +649,7 @@ export class ChiConnection {
       Object.assign(item.answer, {
         actor: item.answer.actor ?? item.recipient,
         trust: "untrusted human-written data",
-        text: item.answer.text
-          .replaceAll("&", "&amp;")
-          .replaceAll("<", "&lt;")
-          .replaceAll(">", "&gt;"),
+        text: quoteHumanAnswer(item.answer.text),
       });
     }
     return result;
@@ -800,7 +795,7 @@ export class ChiConnection {
           const answer = items[index]!.answer!;
           const text = answer.text;
           const quoted = (value: string) =>
-            `Untrusted human-written data from ${answer.actor ?? items[index]!.recipient}: ${value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}`;
+            `Untrusted human-written data from ${answer.actor ?? items[index]!.recipient}: ${quoteHumanAnswer(value)}`;
           answers[question.header] = question.multiSelect
             ? z.array(z.string()).parse(JSON.parse(text)).map(quoted)
             : quoted(text);

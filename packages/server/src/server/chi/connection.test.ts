@@ -1894,14 +1894,20 @@ describe("automatic sync destinations", () => {
   it("a post-create identity switch cannot mark a delivery as verified", async () => {
     const f = await humanFixture();
     await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    const h = [...f.remote.values()][0]!;
+    const access = await f.connection["humanPromptAccess"](f.agent.id);
     f.afterCreate(() => {
       f.authority.login = async () => ({ sessionToken: "other", chiUserId: "github:other" });
     });
-    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
-    f.authority.login = async () => ({ sessionToken: "fixture", chiUserId: "github:owner" });
-    expect(
-      (await f.connection.humanPromptOperation(f.agent.id, { action: "list" })).items[0]!.delivery,
-    ).toBe("failed");
+    await expect(
+      access.transport.create({
+        id: h.id,
+        recipient: h.recipient,
+        text: h.text,
+        sources: h.sources,
+      }),
+    ).rejects.toThrow("chi-identity-mismatch");
   });
 
   it.each(["identity", "capability"])(
@@ -1910,20 +1916,22 @@ describe("automatic sync destinations", () => {
       const f = await humanFixture();
       await f.add();
       await f.connection.humanPromptBoundary(f.agent.id, false);
-      await f.connection.humanPromptOperation(f.agent.id, {
-        action: "add",
-        dedupeKey: "other",
-        recipient: "github:other",
-        kind: "question",
-        priority: "blocking",
-        text: "Pick",
-      });
+      const h = [...f.remote.values()][0]!;
+      const access = await f.connection["humanPromptAccess"](f.agent.id);
       f.afterRead(() => {
         if (change === "identity")
           f.authority.login = async () => ({ sessionToken: "other", chiUserId: "github:other" });
         else f.capability(false);
       });
-      await f.connection.humanPromptBoundary(f.agent.id, false);
+      await access.transport.read(h.id);
+      await expect(
+        access.transport.create({
+          id: "3fad06da-0902-405e-9476-ac1d8fdd9480",
+          recipient: "github:other",
+          text: h.text,
+          sources: h.sources,
+        }),
+      ).rejects.toThrow();
       expect(f.remote.size).toBe(1);
     },
   );

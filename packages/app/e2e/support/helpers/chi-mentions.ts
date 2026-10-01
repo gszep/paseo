@@ -66,7 +66,7 @@ export async function startMentionActor(
   const ready = await new Promise<z.infer<typeof readySchema>>((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`Mention fixture startup timed out: ${diagnostics}`)),
-      45000,
+      90000,
     );
     child.once("exit", (code) => {
       clearTimeout(timer);

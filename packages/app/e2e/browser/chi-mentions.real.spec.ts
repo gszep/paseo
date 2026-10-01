@@ -45,10 +45,22 @@ async function plainChat(page: Page) {
   await expect(page.locator('[data-testid^="worktree-setup-callout-"]')).toHaveCount(0);
 }
 
+async function inboxRevision(page: Page, revision: number) {
+  // Live catalog reads can transiently fail while another settled capture
+  // changes the repository fence. Exercise the rendered recovery action.
+  await expect(async () => {
+    const retry = page.getByRole("button", { name: "Retry", exact: true });
+    if (await retry.isVisible()) await retry.click();
+    await expect(page.getByText(`open · revision ${revision}`, { exact: true })).toBeVisible({
+      timeout: 1000,
+    });
+  }).toPass({ timeout: 60000, intervals: [1000, 2000, 5000] });
+}
+
 test("agent question is answered in the real-account inbox and resumes the waiting agent", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(240000);
+  test.setTimeout(420000);
   const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
   const runId = randomUUID();
   const actor = await startMentionActor("mochi-the-kitty", origin, runId, { chi: CHI_CONFIG });
@@ -61,12 +73,12 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     await page.goto(session);
     await composerLocator(page).fill("Establish the settled synthetic evidence pin");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    await expect.poll(async () => (await actor.sources()).length).toBe(1);
+    await expect.poll(async () => (await actor.sources()).length, { timeout: 90000 }).toBe(1);
     await composerLocator(page).fill("Ask an inbox question");
     await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.goto(`${origin}/chi?view=inbox`);
     const mention = page.getByRole("button", {
-      name: new RegExp(`Open mention Agent-initiated.*${runId}`),
+      name: new RegExp(`Discuss mention Agent-initiated.*${runId}`),
     });
     await expect(mention).toBeVisible({ timeout: 90000 });
     await mention.click();
@@ -96,6 +108,32 @@ test("agent question is answered in the real-account inbox and resumes the waiti
     expect(sent.recipient).toBe("github:mochi-the-kitty");
     expect(sent.text).toContain("Synthetic human prompt");
     expect(sent.text).not.toContain("Establish the settled");
+    await page.goto(`${origin}/chi?view=inbox`);
+    await mention.click();
+    const mute = page.getByRole("button", { name: "Mute prompts from this session", exact: true });
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await mute.click();
+    expect((await actor.attempts()).replyAttempts).toHaveLength(1);
+    await page.getByRole("button", { name: "Snooze prompts for 1 hour", exact: true }).click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(2);
+    await inboxRevision(page, 4);
+    page.once("dialog", (dialog) => {
+      expect(dialog.message()).toContain("permanently");
+      return dialog.accept();
+    });
+    await mute.click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(3);
+    await inboxRevision(page, 5);
+    const controls = (await actor.attempts()).replyAttempts.slice(1).map((raw) => JSON.parse(raw));
+    expect(controls.map((op) => JSON.parse(op.text.split("\n")[1]).action)).toEqual([
+      "snooze",
+      "mute",
+    ]);
+    expect(controls[0].operationId).not.toBe(controls[1].operationId);
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-recipient-controls.png"),
+      fullPage: true,
+    });
   } finally {
     await context.close();
     await actor.close();
