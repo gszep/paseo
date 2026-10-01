@@ -215,6 +215,9 @@ export interface AgentRunOptions {
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
   clientMessageId?: string;
+  /** Runtime-only, caller-bound historical data; never persisted as user text. */
+  humanPromptReminder?: string;
+  onHumanPromptReminder?: () => Promise<void>;
 }
 
 export interface AgentSteerOptions extends AgentRunOptions {
@@ -680,6 +683,8 @@ export interface AgentSession {
     response: AgentPermissionResponse,
   ): Promise<AgentPermissionResult | void>;
   describePersistence(): AgentPersistenceHandle | null;
+  /** Exact current native message coordinate, never a Paseo presentation turn ID. */
+  humanPromptTurnId?(): Promise<string | null>;
   /**
    * Resolve once every foreground turn that predates this call can no longer run or become active.
    * Calling while already idle is a successful no-op. Reject only when foreground ownership is

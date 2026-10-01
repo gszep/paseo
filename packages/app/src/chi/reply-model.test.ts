@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
 import type { ChiHandoff, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
-import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import {
+  ChiOperationError,
+  encodeHumanPrompts,
+  readHumanAnswers,
+} from "@getpaseo/protocol/chi-mentions";
 import { openReplyForm } from "./reply-model";
 
 const handoff: ChiHandoff = {
@@ -31,6 +35,60 @@ function storage() {
     },
   };
 }
+
+test("inbox answers use the immutable reply receipt and recipient-only item selection", async () => {
+  const id = "fb2aed79-8a81-46f4-bf03-311f9a61337e";
+  const prompt = {
+    ...handoff,
+    text: encodeHumanPrompts({
+      sessionId: "ses_native",
+      turnId: "msg_native",
+      items: [{ id, kind: "question", priority: "blocking", text: "Which colour?" }],
+    }),
+  };
+  const sent: ChiMentionOperation[] = [];
+  let lost = true;
+  const form = openReplyForm({
+    handoff: prompt,
+    context,
+    key: "answer",
+    storage: storage(),
+    uuid: () => "3fad06da-0902-405e-9476-ac1d8fdd9480",
+    onSuccess: () => undefined,
+    execute: async (op) => {
+      sent.push(op);
+      if (lost) throw new Error("lost reply");
+      return { kind: "handoff", actor: context.actor, handoff: prompt };
+    },
+  });
+  form.setText("Blue");
+  await form.send("reply", id);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]!.action).toBe("reply");
+  expect(
+    readHumanAnswers((sent[0] as Extract<ChiMentionOperation, { action: "reply" }>).text),
+  ).toEqual([{ id, text: "Blue" }]);
+  form.setText("Forged correction");
+  lost = false;
+  await form.send("reply", "other");
+  expect(sent[1]).toEqual(sent[0]);
+  const author = openReplyForm({
+    handoff: prompt,
+    context: { ...context, actor: handoff.author },
+    key: "author",
+    storage: storage(),
+    uuid: () => id,
+    onSuccess: () => undefined,
+    execute: async () => {
+      throw new Error("must not call");
+    },
+  });
+  author.setText("Approval");
+  await author.send("reply", id);
+  expect(author.getState().error).toBe("chi-human-prompt-recipient-required");
+  form.close();
+  author.close();
+});
 
 test.each(["reply", "acknowledge"] as const)(
   "discovers legacy uncertain %s and requires explicit same-actor reauthorization before immutable retry",

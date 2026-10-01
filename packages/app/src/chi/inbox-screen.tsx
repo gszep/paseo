@@ -32,6 +32,7 @@ import { formatDateSectionLabel } from "@/components/date-sections";
 import { formatTimeAgo } from "@/utils/time";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { openReplyForm } from "./reply-model";
+import { readHumanPrompts } from "@getpaseo/protocol/chi-mentions";
 import { mentionError } from "./mention-errors";
 import { useInbox, useInboxTransport } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
@@ -479,13 +480,16 @@ function Discussion({
     if (!h.readAt && h.recipient === context.identity.actor && isIdle) markViewed();
   }, [h.readAt, h.recipient, context.identity.actor, isIdle, markViewed]);
   const canReply = h.author === context.identity.actor || h.recipient === context.identity.actor;
+  const prompts = readHumanPrompts(h.text);
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.hint}>
         @{h.author.slice(7)} → @{h.recipient.slice(7)}
       </Text>
       <Text selectable style={styles.text}>
-        {h.text}
+        {prompts
+          ? `Agent-initiated · ${prompts.sessionId} · ${prompts.turnId}\n${prompts.items.map((item) => `${item.kind}: ${item.text}`).join("\n\n")}`
+          : h.text}
       </Text>
       <Text style={styles.hint}>
         {h.state} · revision {h.revision}
@@ -756,6 +760,8 @@ function ReplyForm({
     state.operation !== null;
   const acknowledge = useCallback(() => void form.send("acknowledge"), [form]);
   const reply = useCallback(() => void form.send("reply"), [form]);
+  const prompts = readHumanPrompts(handoff.text);
+  const answer = useCallback((id: string) => void form.send("reply", id), [form]);
   const reauthorize = useCallback(() => void form.reauthorize().catch(() => undefined), [form]);
   const refresh = useCallback(
     () => void form.discardConflict().then((discarded) => (discarded ? onSuccess() : undefined)),
@@ -783,6 +789,18 @@ function ReplyForm({
       <Button size="sm" disabled={locked || !state.text.trim()} onPress={reply}>
         Send reply
       </Button>
+      {handoff.recipient === context.identity.actor
+        ? prompts?.items.map((item, index) => (
+            <ChoiceButton
+              key={item.id}
+              value={item.id}
+              disabled={locked || !state.text.trim()}
+              onSelect={answer}
+            >
+              Answer prompt {index + 1}
+            </ChoiceButton>
+          ))
+        : null}
       {state.status === "pending" ? <Text style={styles.hint}>Sending…</Text> : null}
       {state.status === "sent" ? <Alert variant="success" title="Reply delivered" /> : null}
       {state.status === "failed" || state.status === "blocked" ? (

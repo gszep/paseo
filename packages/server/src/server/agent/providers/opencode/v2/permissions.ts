@@ -98,6 +98,7 @@ export class SessionPermissions {
         name: "question",
         kind: "question",
         title: form.title,
+        metadata: { source: "opencode_question", sessionId: form.sessionID },
         input: {
           questions: form.fields.map((field) => ({
             header: field.key,

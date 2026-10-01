@@ -15,6 +15,11 @@ import { classifyMentionFailure } from "./mention-failure.js";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
 import type { MentionIdentity } from "./mentions.js";
+import {
+  encodeHumanAnswers,
+  readHumanPrompts,
+  type ChiHandoff,
+} from "@getpaseo/protocol/chi-mentions";
 
 const homes: string[] = [];
 function barrier() {
@@ -1709,6 +1714,168 @@ describe("automatic sync destinations", () => {
       capturePending: false,
     });
     expect(f.evidence.at(-1)?.visibility).toBe("shared");
+  });
+
+  async function humanFixture() {
+    const f = await syncFixture();
+    await f.register();
+    const agent = f.agents[0]!;
+    Object.assign(agent, {
+      session: { humanPromptTurnId: async () => "msg_native_question" },
+      pendingPermissions: new Map(),
+    });
+    f.manager.getAgent = (id) => f.agents.find((candidate) => candidate.id === id)!;
+    const remote = new Map<string, ChiHandoff>();
+    const request = f.authority.request;
+    let deny = false;
+    let afterRead: (() => void) | undefined;
+    f.authority.request = async (url, init) => {
+      const parsed = new URL(String(url));
+      if (parsed.pathname !== "/handoffs") return request(url, init);
+      if (deny) return new Response("PRIVATE ERROR", { status: 404 });
+      if (init?.method === "POST") {
+        const input = JSON.parse(String(init.body));
+        const handoff: ChiHandoff = {
+          ...input,
+          schemaVersion: 1,
+          author: "github:owner",
+          repo: "github:fixture/repo",
+          state: "open",
+          revision: 1,
+          createdAt: "now",
+          updatedAt: "now",
+          events: [],
+        };
+        remote.set(handoff.id, handoff);
+        return Response.json({ ok: true, handoff });
+      }
+      const result = Response.json({
+        ok: true,
+        handoff: remote.get(parsed.searchParams.get("id")!),
+      });
+      afterRead?.();
+      return result;
+    };
+    const connection = f.connect();
+    await connection.capture(agent.id);
+    const add = () =>
+      connection.humanPromptOperation(agent.id, {
+        action: "add",
+        dedupeKey: "stable",
+        kind: "question",
+        priority: "blocking",
+        recipient: "github:owner",
+        text: "Which colour?",
+      });
+    return {
+      ...f,
+      agent,
+      remote,
+      connection,
+      add,
+      deny: () => {
+        deny = true;
+      },
+      afterRead: (fn: () => void) => {
+        afterRead = fn;
+      },
+    };
+  }
+
+  it("human prompts require a live mapping and refuse revoked or late-switched answer reads", async () => {
+    const f = await humanFixture();
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect(f.remote.size).toBe(1);
+    const h = [...f.remote.values()][0]!;
+    expect(h.sources).toEqual([
+      { kind: "neutral", id: f.sourceId, snapshot: "b".repeat(64), entryId: "msg_fork" },
+    ]);
+    expect(readHumanPrompts(h.text)).toMatchObject({
+      sessionId: "ses_fork",
+      turnId: "msg_native_question",
+    });
+    await expect(
+      f.connect(null).humanPromptOperation(f.agent.id, { action: "list" }),
+    ).rejects.toThrow("mapping-required");
+    f.afterRead(() => {
+      f.authority.login = async () => ({ sessionToken: "other", chiUserId: "github:other" });
+    });
+    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+    await expect(
+      f.connection.humanPromptOperation(f.agent.id, { action: "list" }),
+    ).rejects.toThrow();
+    f.authority.login = async () => ({ sessionToken: "fixture", chiUserId: "github:owner" });
+    f.deny();
+    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+    await expect(f.connection.humanPromptOperation(f.agent.id, { action: "list" })).rejects.toThrow(
+      "404",
+    );
+  });
+
+  it("human question routing resumes only its pending owner form with exact multi-select answers", async () => {
+    const f = await humanFixture();
+    const request = {
+      id: "form-question",
+      provider: "opencode",
+      name: "question",
+      kind: "question" as const,
+      metadata: { source: "opencode_question", sessionId: "ses_fork" },
+      input: {
+        questions: [
+          {
+            header: "Choice",
+            question: "Pick colours",
+            options: [{ label: "Blue, green" }],
+            multiSelect: true,
+          },
+        ],
+      },
+    };
+    f.agent.pendingPermissions.set(request.id, request);
+    f.manager.respondToPermission = vi.fn(async () => undefined);
+    f.connection.isHumanPromptViewed = () => true;
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    expect(f.remote.size).toBe(0);
+    f.connection.isHumanPromptViewed = () => false;
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    const h = [...f.remote.values()][0]!;
+    const item = readHumanPrompts(h.text)!.items[0]!;
+    h.replies = [
+      {
+        id: "3fad06da-0902-405e-9476-ac1d8fdd9480",
+        actor: "github:owner",
+        at: "now",
+        revision: 2,
+        text: encodeHumanAnswers([{ id: item.id, text: "Blue, green" }]),
+      },
+    ];
+    await expect(f.connection.reconcileHumanQuestions(f.agent.id)).rejects.toThrow();
+    expect(f.manager.respondToPermission).not.toHaveBeenCalled();
+    h.replies.push({
+      ...h.replies[0]!,
+      id: "6854fb53-9eaa-45db-8b60-a87669af0494",
+      revision: 3,
+      text: encodeHumanAnswers([{ id: item.id, text: '["Blue, green"]' }]),
+    });
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    expect(f.manager.respondToPermission).toHaveBeenCalledWith(f.agent.id, request.id, {
+      behavior: "allow",
+      updatedInput: { answers: { Choice: ["Blue, green"] } },
+    });
+    f.agent.pendingPermissions.clear();
+    f.agent.pendingPermissions.set("tool", { ...request, id: "tool", kind: "tool" });
+    f.agent.pendingPermissions.set("child", {
+      ...request,
+      id: "child",
+      metadata: { source: "opencode_question", sessionId: "ses_child" },
+    });
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    expect(f.manager.respondToPermission).toHaveBeenCalledTimes(1);
+    expect(f.remote.size).toBe(1);
+    expect(
+      (await f.connection.humanPromptOperation(f.agent.id, { action: "list" })).items,
+    ).toHaveLength(1);
   });
 
   it("captures after a settled turn without a manual share", async () => {

@@ -8,6 +8,8 @@ import {
   ChiMentionOperationSchema,
   ChiMentionContextSchema,
   ChiOperationError,
+  readHumanPrompts,
+  encodeHumanAnswers,
 } from "@getpaseo/protocol/chi-mentions";
 import { z } from "zod";
 import { sameMentionContext } from "./mention-context";
@@ -151,13 +153,35 @@ export function openReplyForm(input: {
       error: "Unable to restore the pending reply. Refresh and try again.",
     }),
   );
-  async function send(action: "reply" | "acknowledge") {
+  function replyText(promptId?: string): string | null {
+    let text = state.text.trim();
+    if (promptId && !state.operation) {
+      const batch = readHumanPrompts(input.handoff.text);
+      if (
+        input.context.actor.toLowerCase() !== input.handoff.recipient.toLowerCase() ||
+        !batch?.items.some((item) => item.id === promptId)
+      ) {
+        publish({ status: "failed", error: "chi-human-prompt-recipient-required" });
+        return null;
+      }
+      try {
+        text = encodeHumanAnswers([{ id: promptId, text }]);
+      } catch {
+        publish({ status: "failed", error: "chi-mention-text-too-long" });
+        return null;
+      }
+    }
+    return text;
+  }
+  async function send(action: "reply" | "acknowledge", promptId?: string) {
     await ready;
     if (closed || state.status === "pending" || state.status === "blocked") return;
     if (!state.operation && action === "reply" && state.text.trim().length > 8000) {
       publish({ status: "failed", error: "chi-mention-text-too-long" });
       return;
     }
+    const text = replyText(promptId);
+    if (text === null) return;
     const operation =
       state.operation ??
       (action === "reply"
@@ -166,7 +190,7 @@ export function openReplyForm(input: {
             id: input.handoff.id,
             operationId: input.uuid(),
             revision: input.handoff.revision,
-            text: state.text.trim(),
+            text,
           }
         : {
             action,

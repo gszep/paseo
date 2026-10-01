@@ -54,6 +54,8 @@ interface Deferred<T> {
 }
 
 interface FakeAgentSessionOptions {
+  humanPromptTurnId?: (sessionId: string) => Promise<string | null>;
+  questionForPrompt?: (prompt: string) => Record<string, unknown> | null;
   providerName: string;
   config: AgentSessionConfig;
   supportsMcpServers?: boolean;
@@ -69,6 +71,8 @@ interface FakeAgentSessionOptions {
 }
 
 export interface TestAgentClientOptions {
+  humanPromptTurnId?: (sessionId: string) => Promise<string | null>;
+  questionForPrompt?: (prompt: string) => Record<string, unknown> | null;
   nativeRuntime?: NativeRuntime;
   beforeCreateSession?: () => Promise<void>;
   closeSession?: () => Promise<void>;
@@ -357,6 +361,8 @@ class FakeAgentSession implements AgentSession {
   private readonly closeSession: (() => Promise<void>) | undefined;
   private readonly onStartTurn: TestAgentClientOptions["onStartTurn"];
   private readonly holdTurnFor: TestAgentClientOptions["holdTurnFor"];
+  private readonly nativeTurn: TestAgentClientOptions["humanPromptTurnId"];
+  private readonly questionForPrompt: TestAgentClientOptions["questionForPrompt"];
 
   constructor(options: FakeAgentSessionOptions) {
     this.capabilities = {
@@ -370,6 +376,8 @@ class FakeAgentSession implements AgentSession {
     this.closeSession = options.closeSession;
     this.onStartTurn = options.onStartTurn;
     this.holdTurnFor = options.holdTurnFor;
+    this.nativeTurn = options.humanPromptTurnId;
+    this.questionForPrompt = options.questionForPrompt;
     this.historyPath = path.join(
       tmpdir(),
       "paseo-fake-provider-history",
@@ -589,12 +597,14 @@ class FakeAgentSession implements AgentSession {
   private async resolveToolPermission(tool: {
     name: string;
     input?: Record<string, unknown>;
-  }): Promise<{ denied: boolean; interrupted: boolean }> {
+    question?: boolean;
+  }): Promise<{ denied: boolean; interrupted: boolean; response: AgentPermissionResponse }> {
     const request: AgentPermissionRequest = {
       id: randomUUID(),
       provider: this.providerName,
       name: tool.name,
-      kind: "tool",
+      kind: tool.question ? "question" : "tool",
+      ...(tool.question ? { metadata: { source: "opencode_question", sessionId: this.id } } : {}),
       title: "Permission required",
       description: "Test permission request",
       input: tool.input ?? {},
@@ -632,6 +642,7 @@ class FakeAgentSession implements AgentSession {
     this.notifySubscribers(permissionResolved);
 
     return {
+      response,
       denied: response.behavior === "deny",
       interrupted: response.behavior === "deny" && response.interrupt === true,
     };
@@ -816,7 +827,13 @@ class FakeAgentSession implements AgentSession {
         }
       }
 
-      const assistantText = this.buildAssistantText(textPrompt);
+      const question = this.questionForPrompt?.(textPrompt);
+      const answer = question
+        ? await this.resolveToolPermission({ name: "question", question: true, input: question })
+        : null;
+      const assistantText = answer
+        ? `Continued with human answer: ${JSON.stringify(answer.response.updatedInput?.answers)}`
+        : this.buildAssistantText(textPrompt);
       const assistantChunkA: AgentStreamEvent = {
         type: "timeline",
         provider: this.providerName,
@@ -874,6 +891,9 @@ class FakeAgentSession implements AgentSession {
       model: this.config.model ?? null,
       modeId: this.config.modeId ?? null,
     };
+  }
+  async humanPromptTurnId() {
+    return this.nativeTurn?.(this.id) ?? null;
   }
 
   async getAvailableModes(): Promise<AgentMode[]> {
@@ -1265,6 +1285,8 @@ class FakeAgentClient implements AgentClient {
       closeSession: this.options.closeSession,
       onStartTurn: this.options.onStartTurn,
       holdTurnFor: this.options.holdTurnFor,
+      humanPromptTurnId: this.options.humanPromptTurnId,
+      questionForPrompt: this.options.questionForPrompt,
     });
   }
 
@@ -1291,6 +1313,8 @@ class FakeAgentClient implements AgentClient {
       closeSession: this.options.closeSession,
       onStartTurn: this.options.onStartTurn,
       holdTurnFor: this.options.holdTurnFor,
+      humanPromptTurnId: this.options.humanPromptTurnId,
+      questionForPrompt: this.options.questionForPrompt,
     });
   }
 

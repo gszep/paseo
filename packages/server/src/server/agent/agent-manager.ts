@@ -2674,10 +2674,22 @@ export class AgentManager {
   }): Promise<string> {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
-      const start = () => {
+      const start = async () => {
         if (pendingRun.settled || this.agents.get(agentId) !== agent)
           throw new Error(`Agent ${agentId} run was canceled before its turn started`);
-        return agent.session.startTurn(prompt, options);
+        const reminder = await this.chi?.humanPromptBoundary(agentId);
+        if (pendingRun.settled || this.agents.get(agentId) !== agent)
+          throw new Error(`Agent ${agentId} run was canceled before its turn started`);
+        return agent.session.startTurn(prompt, {
+          ...options,
+          ...(reminder
+            ? {
+                humanPromptReminder: reminder,
+                onHumanPromptReminder: () =>
+                  this.chi!.acknowledgeHumanPromptReminder(agentId, reminder),
+              }
+            : {}),
+        });
       };
       const result = this.chi ? await this.chi.withPromptAdmission(agentId, start) : await start();
       if (pendingRun.settled) {
@@ -4820,6 +4832,7 @@ export class AgentManager {
   ): void {
     const hadPendingPermissions = agent.pendingPermissions.size > 0;
     agent.pendingPermissions.set(event.request.id, event.request);
+    void this.chi?.reconcileHumanQuestions(agent.id).catch(() => undefined);
     this.refreshSessionPersistence(agent);
     if (!hadPendingPermissions && !agent.internal) {
       this.broadcastAgentAttention(agent, "permission");

@@ -300,21 +300,12 @@ export class ChiMentions {
     for (const delivery of receipt.deliveries) {
       if (delivery.status === "delivered") continue;
       try {
-        const response = handoffSchema.parse(
-          await this.call(identity, "handoffs", "POST", {
-            id: delivery.handoffId,
-            recipient: delivery.recipient.ownerId,
-            text: receipt.text,
-            sources: [receipt.source],
-          }),
-        );
-        if (
-          response.handoff.id !== delivery.handoffId ||
-          response.handoff.author !== identity.actor ||
-          response.handoff.recipient !== delivery.recipient.ownerId ||
-          response.handoff.repo !== identity.repo
-        )
-          throw new Error("chi-mention-invalid-response");
+        await this.createHandoff(identity, {
+          id: delivery.handoffId,
+          recipient: delivery.recipient.ownerId,
+          text: receipt.text,
+          sources: [receipt.source],
+        });
         delivery.status = "delivered";
         delivery.error = null;
       } catch (error) {
@@ -323,6 +314,25 @@ export class ChiMentions {
       }
       await writeConversationReceipt(this.path(receipt.agentId, receipt.messageId), receipt);
     }
+  }
+  async createHandoff(
+    identity: MentionIdentity,
+    input: {
+      id: string;
+      recipient: string;
+      text: string;
+      sources: z.infer<typeof ChiSourceSchema>[];
+    },
+  ) {
+    const { handoff } = handoffSchema.parse(await this.call(identity, "handoffs", "POST", input));
+    if (
+      handoff.id !== input.id ||
+      handoff.author !== identity.actor ||
+      handoff.recipient !== input.recipient ||
+      handoff.repo !== identity.repo
+    )
+      throw new Error("chi-mention-invalid-response");
+    return handoff;
   }
   async retry(agentId: string, identity: MentionIdentity) {
     return this.exclusive(agentId, async () => {

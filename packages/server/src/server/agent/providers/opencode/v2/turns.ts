@@ -91,6 +91,18 @@ export class SessionTurns {
     await Promise.resolve();
     this.options.emit({ type: "turn_started", provider: "opencode", turnId: id });
     try {
+      if (options?.humanPromptReminder) {
+        // The caller only supplies this on foreground admission, never steer.
+        // Instruction entries use OpenCode's next-step system-update boundary.
+        await this.options.client.session.instructions.entry
+          .put({
+            sessionID: this.options.id,
+            key: "chi-human-prompts",
+            value: options.humanPromptReminder,
+          })
+          .then(() => options.onHumanPromptReminder?.())
+          .catch(() => undefined);
+      }
       await this.dispatch(input, options, output);
       accept();
       await this.finish(id);

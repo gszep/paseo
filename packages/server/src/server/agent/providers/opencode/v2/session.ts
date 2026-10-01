@@ -297,6 +297,10 @@ export class OpenCodeV2Session implements AgentSession {
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions) {
     return this.turns.startTurn(prompt, options);
   }
+  async humanPromptTurnId() {
+    const page = await this.client.message.list({ sessionID: this.id, order: "desc", limit: 1 });
+    return page.data[0]?.id ?? null;
+  }
   steerActiveTurn(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult> {
     return this.turns.steerActiveTurn(prompt, options);
   }

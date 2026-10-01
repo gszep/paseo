@@ -77,6 +77,62 @@ export const ChiHandoffSchema = z.object({
     .optional(),
 });
 export type ChiHandoff = z.infer<typeof ChiHandoffSchema>;
+
+// These envelopes travel as ordinary scanned handoff/reply text. They convey
+// provenance, not authority; readers still verify the authenticated reply actor.
+const promptItem = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(["question", "approval", "decision", "note"]),
+    priority: z.enum(["blocking", "fyi"]),
+    text: z.string().min(1).max(2000),
+  })
+  .strict();
+export const HumanPromptBatchSchema = z
+  .object({
+    sessionId: id,
+    turnId: id,
+    items: z.array(promptItem).min(1).max(5),
+  })
+  .strict();
+export type HumanPromptBatch = z.infer<typeof HumanPromptBatchSchema>;
+const promptPrefix = "Agent-initiated human prompts (v1)\n";
+const answerPrefix = "Human prompt answers (v1)\n";
+const answerSchema = z
+  .object({
+    answers: z
+      .array(z.object({ id: z.string().uuid(), text: z.string().min(1).max(2000) }).strict())
+      .min(1)
+      .max(5),
+  })
+  .strict();
+export function encodeHumanPrompts(batch: HumanPromptBatch): string {
+  const value = promptPrefix + JSON.stringify(HumanPromptBatchSchema.parse(batch));
+  if (value.length > 8000) throw new Error("chi-human-prompt-batch-limit");
+  return value;
+}
+export function readHumanPrompts(value: string): HumanPromptBatch | null {
+  if (!value.startsWith(promptPrefix) || value.length > 8000) return null;
+  try {
+    return HumanPromptBatchSchema.parse(JSON.parse(value.slice(promptPrefix.length)));
+  } catch {
+    return null;
+  }
+}
+export function encodeHumanAnswers(answers: Array<{ id: string; text: string }>): string {
+  const value = answerPrefix + JSON.stringify(answerSchema.parse({ answers }));
+  if (value.length > 8000) throw new Error("chi-human-prompt-batch-limit");
+  return value;
+}
+export function readHumanAnswers(value: string): Array<{ id: string; text: string }> {
+  if (!value.startsWith(answerPrefix) || value.length > 8000) return [];
+  try {
+    const { answers } = answerSchema.parse(JSON.parse(value.slice(answerPrefix.length)));
+    return new Set(answers.map((a) => a.id)).size === answers.length ? answers : [];
+  } catch {
+    return [];
+  }
+}
 export const ChiDeliverySchema = z.object({
   messageId: id,
   recipient: ChiParticipantSchema,

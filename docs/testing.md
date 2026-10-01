@@ -187,6 +187,14 @@ At startup the fixture collects all evidence pages and purges only sources owned
 by its test actor with the `Synthetic human mention acceptance` title prefix;
 completion purges the current run's captured sources too. Run this shared-account
 fixture serially so startup cleanup cannot delete another active acceptance run.
+The `agent question is answered` case sends a pending synthetic OpenCode form through
+the real-account inbox, answers it with **Answer prompt 1**, and observes the waiting
+agent continue. It asserts exact outgoing fields/pins and absence of unrelated prose.
+Run it with `--grep 'agent question is answered'` after changing human prompt routing.
+Deterministic policy, mapping, answer ownership and model-boundary regressions live in
+`human-prompts.test.ts`, `connection.test.ts`, V2 `streaming.test.ts` and app
+`reply-model.test.ts`. Chi's handoff and minimiser suites own decoded-envelope scanning
+and reminder-capture exclusion. These checks do not establish installed-host rollout.
 Its provider is synthetic:
 this checks rendered desktop/compact Tab completion and mention delivery, exact/context reads,
 acknowledgement, lost-response retries, an actual Sava author reply observed by

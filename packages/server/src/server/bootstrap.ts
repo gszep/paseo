@@ -1786,6 +1786,7 @@ export async function createPaseoDaemon(
       // Retry any capture that was outstanding when the daemon last stopped.
       void agentManager.chi?.reconcilePending().catch(() => undefined);
       agentManager.chi?.startProvenanceSweep();
+      agentManager.chi?.startHumanPromptSweep();
       // Start speech service after listening so synchronous Sherpa native
       // model loading doesn't block the server from accepting connections.
       speechService.start();
@@ -1805,6 +1806,7 @@ export async function createPaseoDaemon(
 
   const stop = async () => {
     agentManager.chi?.stopProvenanceSweep();
+    agentManager.chi?.stopHumanPromptSweep();
     await pluginRuntime.stopAllPlugins();
     unsubscribePluginProviders();
     await hubRelationships.stop();

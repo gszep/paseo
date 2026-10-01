@@ -76,7 +76,15 @@ describe("OpenCodeBridge", () => {
     const logger = createTestLogger();
     const clients = createTestAgentClients();
     const agentStorage = new AgentStorage(path.join(paseoHome, "agents"), logger);
-    const agentManager = new AgentManager({ clients, registry: agentStorage, logger });
+    const agentManager = new AgentManager({
+      clients,
+      registry: agentStorage,
+      logger,
+      chi: { home: paseoHome, serverId: "fixture" },
+    });
+    const humanPrompts = vi
+      .spyOn(agentManager.chi!, "humanPromptOperation")
+      .mockResolvedValue({ items: [], muted: false, snoozedUntil: 0 });
     const providerSnapshotManager = new ProviderSnapshotManager({ logger, extraClients: clients });
     const dependencies = { agentManager, agentStorage, providerSnapshotManager, logger };
     const bridge = new OpenCodeBridge({ paseoHome, logger });
@@ -109,8 +117,21 @@ describe("OpenCodeBridge", () => {
       const definitions = new Map(manifest.tools.map((tool) => [tool.name, tool]));
       const createDefinition = definitions.get("create_agent")!;
       const sendDefinition = definitions.get("send_agent_prompt")!;
+      const humanDefinition = definitions.get("human_prompts")!;
+      expect(humanDefinition).toMatchObject({
+        inputSchema: { type: "object", required: ["operation"] },
+      });
+      expect(createPaseoToolCatalog(dependencies).getTool("human_prompts")).toBeUndefined();
       // A model can send every advertised default, including a field absent from the input below.
       const ajv = new Ajv({ useDefaults: true, strict: false });
+      expect(ajv.compile(humanDefinition.inputSchema)({ operation: { action: "list" } })).toBe(
+        true,
+      );
+      expect(
+        ajv.compile(humanDefinition.inputSchema)({
+          operation: { action: "list", agentId: "other" },
+        }),
+      ).toBe(false);
       const createInput = {
         title: "Bridge child",
         provider: "codex/gpt-5.4",
@@ -147,6 +168,16 @@ describe("OpenCodeBridge", () => {
         },
       });
       try {
+        await tools
+          .get("paseo_human_prompts")!
+          .execute({ operation: { action: "list" } }, { sessionID: "bound" });
+        expect(humanPrompts).toHaveBeenCalledWith(parent.id, { action: "list" });
+        await expect(
+          catalog.executeTool("human_prompts", {
+            operation: { action: "list", sessionId: "foreign" },
+          }),
+        ).rejects.toThrow();
+        expect(humanPrompts).toHaveBeenCalledTimes(1);
         const created = await tools
           .get("paseo_create_agent")!
           .execute(createInput, { sessionID: "bound" });

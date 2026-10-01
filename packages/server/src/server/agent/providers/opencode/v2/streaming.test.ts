@@ -6,6 +6,7 @@ import { OpenCodeV2AgentClient } from "./agent.js";
 import { V2Harness } from "../test-utils/v2-harness.js";
 import { createTestLogger } from "../../../../../test-utils/test-logger.js";
 import type { AgentStreamEvent, AgentUsage } from "../../../agent-sdk-types.js";
+import { SessionTurns } from "./turns.js";
 
 function collectAssistantText(session: {
   subscribe: (cb: (e: AgentStreamEvent) => void) => () => void;
@@ -19,6 +20,69 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
+  test("human-prompt reminders precede foreground dispatch, never steer or user metadata", async () => {
+    const harness = new V2Harness();
+    const writes: string[] = [];
+    const put = vi
+      .spyOn(harness.api.session.instructions.entry, "put")
+      .mockImplementation(async (input) => {
+        writes.push(`reminder:${input.key}:${input.value}`);
+      });
+    const prompt = vi.spyOn(harness.api.session, "prompt").mockImplementation(async (input) => {
+      writes.push(`prompt:${input.text}`);
+    });
+    let finish!: () => void;
+    harness.wait = () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    const turns = new SessionTurns({
+      client: harness.api,
+      id: "session",
+      cwd: "/fixture",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+      reconcile: async () => ({ info: harness.info, history: [] }),
+      clearPermissions: async () => undefined,
+    });
+    const acknowledged = vi.fn();
+    const { turnId } = await turns.startTurn("human request", {
+      humanPromptReminder: "quoted answer",
+      onHumanPromptReminder: acknowledged,
+    });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    expect(writes).toEqual(["reminder:chi-human-prompts:quoted answer", "prompt:human request"]);
+    expect(JSON.stringify(prompt.mock.calls)).not.toContain("quoted answer");
+    expect(acknowledged).toHaveBeenCalledTimes(1);
+    await turns.steerActiveTurn("steer", {
+      expectedTurnId: turnId,
+      humanPromptReminder: "MUST NOT INJECT",
+    });
+    expect(put).toHaveBeenCalledTimes(1);
+    finish();
+  });
+
+  test("failed reminder injection does not block the foreground prompt", async () => {
+    const harness = new V2Harness();
+    vi.spyOn(harness.api.session.instructions.entry, "put").mockRejectedValue(new Error("offline"));
+    const prompt = vi.spyOn(harness.api.session, "prompt");
+    const turns = new SessionTurns({
+      client: harness.api,
+      id: "session",
+      cwd: "/fixture",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+      reconcile: async () => ({ info: harness.info, history: [] }),
+      clearPermissions: async () => undefined,
+    });
+    const acknowledged = vi.fn();
+    await turns.startTurn("human request", {
+      humanPromptReminder: "quoted answer",
+      onHumanPromptReminder: acknowledged,
+    });
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    expect(acknowledged).not.toHaveBeenCalled();
+  });
   test("restores each same-directory agent environment on reconnect and resume", async () => {
     const first = new V2Harness();
     const second = new V2Harness();

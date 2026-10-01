@@ -297,6 +297,33 @@ backend routes and sanitized failures. No notification transport or account stor
 is added. Pi/artifact handoffs remain visible, but in-app exact context browsing is
 currently limited to native evidence.
 
+Mapped OpenCode V2 agents use the caller-bound `human_prompts` tool for questions,
+approvals, decisions and local notes. The authenticated session owner authors the
+ordinary handoff; its scanned text identifies agent initiation and pins the native
+session/message. A waiting form uses the last settled source/snapshot/entry, because
+an active native export is not capturable. A first-turn question without settled
+evidence stays local. No surrounding conversation is attached or visibility widened.
+
+Private receipts enforce immutable dedupe keys, 100 items per session, 2,000
+characters per item, at most five items per batch, and eight batches per recipient
+per UTC day across one daemon home, spaced five minutes apart. This quota is not
+cross-host. FYI/notes, mute, snooze and recent focused viewing suppress dispatch.
+Lost deliveries require explicit retry of the same batch; later-day retries reserve
+that day's quota. Checked-work resolution remains a separate human action.
+
+**Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
+answers resolve local receipts; a later answer can correct an invalid form answer.
+Every read reauthorizes the exact handoff. Pending owner-session question forms may
+resume with those answers; child forms and runtime permissions cannot.
+Queued native items stop dispatching or retrying once their form closes locally;
+retirement retains the immutable receipt and never invents a recipient answer.
+Other answers appear as quoted data in a change-only, 600-character reminder before a foreground
+model dispatch, with answered items first. Native instruction-entry acknowledgement
+follows successful injection; steering never injects it. The private minimiser omits
+the entire `api/chi-human-prompts` system delta, including mixed updates and metadata.
+Deploy Chi's decoded prompt/answer envelope scanner before enabling this host feature.
+The envelope adds no WebSocket fields or RPCs; old clients retain ordinary discussion.
+
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.
 - **CLI:** Terminal interface for agent workflows that can also start and manage the daemon.

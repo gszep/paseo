@@ -745,6 +745,19 @@ export class VoiceAssistantWebSocketServer {
         this.logger.warn({ err, agentId: params.agentId }, "Failed to broadcast agent attention");
       });
     });
+    if (this.agentManager.chi)
+      this.agentManager.chi.isHumanPromptViewed = (agentId) => {
+        const now = Date.now();
+        return [...this.sessions].some(([ws, connection]) => {
+          const state = this.getClientActivityState(connection.session, ws);
+          return (
+            state.appVisible &&
+            state.focusedAgentId === agentId &&
+            state.lastActivityAtMs !== null &&
+            now - Math.min(now, state.lastActivityAtMs) <= 180000
+          );
+        });
+      };
 
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,

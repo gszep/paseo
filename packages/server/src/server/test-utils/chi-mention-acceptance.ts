@@ -174,6 +174,22 @@ export async function startMentionActor(
   };
   const agentClient = createTestAgentClient("opencode", {
     nativeRuntime: runtime,
+    humanPromptTurnId: async (sessionId) => messages.get(sessionId)?.at(-1)?.id ?? null,
+    questionForPrompt: (prompt) =>
+      prompt.startsWith("Ask an inbox question")
+        ? {
+            questions: [
+              {
+                header: "Choice",
+                question: `Synthetic human prompt ${runId}: choose a colour`,
+                options: [
+                  { label: "Blue", description: "Use blue" },
+                  { label: "Green", description: "Use green" },
+                ],
+              },
+            ],
+          }
+        : null,
     onStartTurn(prompt, options, sessionId) {
       if (!options?.clientMessageId || typeof prompt !== "string")
         throw new Error("Synthetic fixture requires a correlated text prompt");
@@ -322,12 +338,15 @@ export async function startMentionActor(
     },
     async close() {
       try {
-        for (const sourceId of createdSources) await removeSource(sourceId);
-      } finally {
+        // The rendered continuation can finish before its settled capture. Drain
+        // that writer and stop the isolated host before purging its evidence.
+        await host.daemon.agentManager.chi?.capture(agent.id).catch(() => undefined);
         await client.removeProject(project.project!.projectId).catch(() => undefined);
         await client.removeProject(localProject.project!.projectId).catch(() => undefined);
         await client.close().catch(() => undefined);
         await host.close();
+        for (const sourceId of createdSources) await removeSource(sourceId);
+      } finally {
         await rm(cwd, { recursive: true, force: true });
         await rm(localCwd, { recursive: true, force: true });
         await rm(paseoHomeRoot, { recursive: true, force: true });

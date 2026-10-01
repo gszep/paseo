@@ -52,6 +52,7 @@ import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
+import { HumanPrompts, type HumanPromptOperation } from "./human-prompts.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
@@ -101,6 +102,7 @@ const associationSchema = z.object({
   provenanceError: z.string().nullable().optional(),
   // Non-blocking capture warning (e.g. a secret only in minimised-away content).
   warning: z.string().nullable().optional(),
+  promptEntryId: z.string().optional(),
   adopt: z.object({ id: z.string(), sourceId: hash, expectedHead: hash }).optional(),
   reserve: z
     .object({
@@ -229,6 +231,8 @@ function createDeployment(endpoint = DEFAULT_BACKEND_URL): ChiAuthority {
 
 export class ChiConnection {
   readonly mentions: ChiMentions;
+  readonly humanPrompts: HumanPrompts;
+  isHumanPromptViewed: (agentId: string) => boolean = () => false;
   private readonly participants = new ParticipantCache();
   private readonly registrationPermits = new WeakMap<
     object,
@@ -419,6 +423,7 @@ export class ChiConnection {
         return response;
       },
     });
+    this.humanPrompts = new HumanPrompts(options.home);
   }
 
   private chiConfig(): ChiDestinationsConfig | null {
@@ -549,6 +554,219 @@ export class ChiConnection {
         )
         .digest("hex"),
     };
+  }
+
+  private async humanPromptAuthority(agentId: string) {
+    const agent = this.manager.getAgent(agentId);
+    if (!agent || agent.provider !== "opencode") throw new Error("chi-native-agent-required");
+    const mapping = await this.resolveForCwd(agent.cwd);
+    const association = this.association(agent);
+    if (
+      !mapping ||
+      !association ||
+      association.paused ||
+      association.blocked ||
+      mapping.endpoint !== this.authority.endpoint ||
+      this.endpointFor(association.endpoint) !== mapping.endpoint
+    )
+      throw new Error("chi-human-prompt-mapping-required");
+    const identity = await this.mentionIdentity(agent.cwd);
+    if (
+      association.repo.toLowerCase() !== identity.repo ||
+      association.actor?.toLowerCase() !== identity.actor
+    )
+      throw new Error("chi-human-prompt-mapping-required");
+    await this.assertCurrent(agent);
+    const sessionId = agent.persistence?.nativeHandle ?? agent.persistence?.sessionId;
+    if (!sessionId) throw new Error("chi-native-agent-required");
+    const turnId = "session" in agent ? await agent.session?.humanPromptTurnId?.() : null;
+    if (!turnId) throw new Error("chi-human-prompt-native-turn-required");
+    const scope = {
+      agentId,
+      sessionId,
+      turnId,
+      context: this.mentionContext(identity),
+      pendingQuestionIds: [...agent.pendingPermissions.values()]
+        .filter(
+          (r) =>
+            r.kind === "question" &&
+            r.metadata?.source === "opencode_question" &&
+            r.metadata.sessionId === sessionId,
+        )
+        .map((r) => r.id),
+    };
+    return { scope, identity, association };
+  }
+
+  private async humanPromptAccess(agentId: string) {
+    const initial = await this.humanPromptAuthority(agentId);
+    const check = async () => {
+      const current = await this.humanPromptAuthority(agentId);
+      if (current.scope.sessionId !== initial.scope.sessionId)
+        throw new Error("chi-human-prompt-context-changed");
+      this.requireMentionContext(current.identity, initial.scope.context);
+      return current.identity;
+    };
+    const transport = {
+      create: async (batch: Parameters<ChiMentions["createHandoff"]>[1]) => {
+        const result = await this.mentions.createHandoff(await check(), batch);
+        await check();
+        return result;
+      },
+      read: async (id: string) => {
+        const result = await this.mentions.execute(await check(), { action: "read", id });
+        await check();
+        if (result.kind !== "handoff") throw new Error("chi-human-prompt-invalid-response");
+        return result.handoff;
+      },
+    };
+    return { ...initial, transport, check };
+  }
+
+  async humanPromptOperation(agentId: string, operation: HumanPromptOperation) {
+    const access = await this.humanPromptAccess(agentId);
+    const result = await this.humanPrompts.operate(
+      access.scope,
+      operation.action === "retry" && this.isHumanPromptViewed(agentId)
+        ? { action: "list" }
+        : operation,
+      access.transport,
+    );
+    await access.check();
+    return result;
+  }
+
+  async humanPromptBoundary(agentId: string, remind = true): Promise<string | null> {
+    try {
+      const access = await this.humanPromptAccess(agentId);
+      const { association } = access;
+      const source =
+        association.sourceId && association.head && association.promptEntryId
+          ? {
+              kind: "neutral" as const,
+              id: association.sourceId,
+              snapshot: association.head,
+              entryId: association.promptEntryId,
+            }
+          : null;
+      const reminder = await this.humanPrompts.boundary(access.scope, access.transport, {
+        source,
+        viewed: this.isHumanPromptViewed(agentId),
+        remind,
+      });
+      await access.check();
+      return reminder;
+    } catch {
+      // A segment failure withholds data and never blocks an unrelated model turn.
+      return null;
+    }
+  }
+
+  private readonly questionLanes = new Set<string>();
+  async acknowledgeHumanPromptReminder(agentId: string, rendered: string) {
+    const { scope } = await this.humanPromptAccess(agentId);
+    await this.humanPrompts.acknowledgeReminder(scope, rendered);
+  }
+  async reconcileHumanQuestions(agentId: string): Promise<void> {
+    if (this.questionLanes.has(agentId)) return;
+    this.questionLanes.add(agentId);
+    try {
+      const agent = this.manager.getAgent(agentId);
+      if (!agent || agent.provider !== "opencode") return;
+      const requests = [...agent.pendingPermissions.values()].filter(
+        (r) => r.kind === "question" && r.metadata?.source === "opencode_question",
+      );
+      if (!requests.length) return;
+      const access = await this.humanPromptAccess(agentId);
+      for (const request of requests) {
+        // Child forms remain child-owned; never relay their content under a parent's pin.
+        if (request.metadata?.sessionId !== access.scope.sessionId) continue;
+        const questions = z
+          .array(
+            z.object({
+              header: z.string().min(1),
+              question: z.string().min(1),
+              options: z.array(z.unknown()),
+              multiSelect: z.boolean().optional(),
+            }),
+          )
+          .min(1)
+          .max(5)
+          .parse(request.input?.questions);
+        const keys = questions.map((_, index) => `question/${request.id}/${index}`);
+        for (const [index, question] of questions.entries()) {
+          await this.humanPrompts.operate(
+            access.scope,
+            {
+              action: "add",
+              dedupeKey: keys[index]!,
+              recipient: access.identity.actor,
+              kind: "question",
+              priority: "blocking",
+              text: `${question.question}\nOptions: ${JSON.stringify(question.options)}${question.multiSelect ? "\nAnswer with a JSON array of selected labels." : ""}`,
+            },
+            access.transport,
+            request.id,
+          );
+        }
+        await this.humanPromptBoundary(agentId, false);
+        const result = await this.humanPrompts.operate(
+          access.scope,
+          { action: "resolve" },
+          access.transport,
+        );
+        const items = keys.map((key) =>
+          result.items.find(
+            (item) => item.dedupeKey === key && item.recipient === access.identity.actor,
+          ),
+        );
+        if (!items.every((item) => item?.answer)) continue;
+        const answers: Record<string, string | string[]> = Object.create(null);
+        for (const [index, question] of questions.entries()) {
+          const text = items[index]!.answer!.text;
+          answers[question.header] = question.multiSelect
+            ? z.array(z.string()).parse(JSON.parse(text))
+            : text;
+        }
+        await access.check();
+        if (this.manager.getAgent(agentId)?.pendingPermissions.get(request.id) !== request)
+          continue;
+        // Reply resumes this waiting form's next model step. No new/steer prompt
+        // and no runtime permission approval is synthesized from human prose.
+        await this.manager.respondToPermission(agentId, request.id, {
+          behavior: "allow",
+          updatedInput: { answers },
+        });
+      }
+    } finally {
+      this.questionLanes.delete(agentId);
+    }
+  }
+
+  private humanPromptTimer: ReturnType<typeof setTimeout> | null = null;
+  private humanPromptStopped = true;
+  startHumanPromptSweep() {
+    if (!this.humanPromptStopped) return;
+    this.humanPromptStopped = false;
+    const sweep = async () => {
+      try {
+        for (const agent of this.manager.listAgents()) {
+          if (this.humanPromptStopped) break;
+          await this.reconcileHumanQuestions(agent.id).catch(() => undefined);
+        }
+      } finally {
+        if (!this.humanPromptStopped) {
+          this.humanPromptTimer = setTimeout(() => void sweep(), 30000);
+          this.humanPromptTimer.unref();
+        }
+      }
+    };
+    void sweep();
+  }
+  stopHumanPromptSweep() {
+    this.humanPromptStopped = true;
+    if (this.humanPromptTimer) clearTimeout(this.humanPromptTimer);
+    this.humanPromptTimer = null;
   }
 
   private requireMentionContext(identity: MentionIdentity, expected?: ChiMentionContext) {
@@ -960,6 +1178,7 @@ export class ChiConnection {
           error: null,
           capturePending: false,
           warning,
+          promptEntryId: parsed.entries.at(-1)?.nativeId,
         });
         // Mentions stay on the primary deployment; a peer destination's mentions
         // are out of P1 scope and are never cross-posted.
@@ -1221,7 +1440,9 @@ export class ChiConnection {
     // Capture runs after manager turn reconciliation; the pending map coalesces
     // duplicate lifecycle notifications without polling or a second process.
     queueMicrotask(() => {
-      void this.capture(agentId).catch(() => undefined);
+      void this.capture(agentId)
+        .then(() => this.humanPromptBoundary(agentId, false))
+        .catch(() => undefined);
     });
   }
 

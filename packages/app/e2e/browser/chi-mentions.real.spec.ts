@@ -45,6 +45,60 @@ async function plainChat(page: Page) {
   await expect(page.locator('[data-testid^="worktree-setup-callout-"]')).toHaveCount(0);
 }
 
+test("agent question is answered in the real-account inbox and resumes the waiting agent", async ({
+  browser,
+}, testInfo) => {
+  test.setTimeout(240000);
+  const origin = `http://localhost:${process.env.E2E_METRO_PORT}`;
+  const runId = randomUUID();
+  const actor = await startMentionActor("mochi-the-kitty", origin, runId, { chi: CHI_CONFIG });
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1080 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(45000);
+  try {
+    await actor.seed(page);
+    const session = `${origin}/h/${actor.serverId}/agent/${actor.agentId}`;
+    await page.goto(session);
+    await composerLocator(page).fill("Establish the settled synthetic evidence pin");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await expect.poll(async () => (await actor.sources()).length).toBe(1);
+    await composerLocator(page).fill("Ask an inbox question");
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
+    await page.goto(`${origin}/chi?view=inbox`);
+    const mention = page.getByRole("button", {
+      name: new RegExp(`Open mention Agent-initiated.*${runId}`),
+    });
+    await expect(mention).toBeVisible({ timeout: 90000 });
+    await mention.click();
+    await expect(page.getByText("open · revision 2", { exact: true })).toBeVisible();
+    await page.getByLabel("Reply to mention", { exact: true }).fill("Blue");
+    await page.getByRole("button", { name: "Answer prompt 1", exact: true }).click();
+    await expect.poll(async () => (await actor.attempts()).replyAttempts.length).toBe(1);
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-inbox-answer.png"),
+      fullPage: true,
+    });
+    await page.goto(session);
+    await expect(
+      page.getByText('Continued with human answer: {"Choice":"Blue"}', { exact: true }),
+    ).toBeVisible({ timeout: 90000 });
+    await page.screenshot({
+      path: testInfo.outputPath("human-prompt-agent-continued.png"),
+      fullPage: true,
+    });
+    const attempts = await actor.attempts();
+    expect(attempts.createAttempts).toHaveLength(1);
+    const sent = JSON.parse(attempts.createAttempts[0]!);
+    expect(Object.keys(sent).sort()).toEqual(["id", "recipient", "sources", "text"]);
+    expect(sent.recipient).toBe("github:mochi-the-kitty");
+    expect(sent.text).toContain("Synthetic human prompt");
+    expect(sent.text).not.toContain("Establish the settled");
+  } finally {
+    await context.close();
+    await actor.close();
+  }
+});
+
 test("flat deployment inbox, unread first-view, exact deep link, clean chat and immutable replies on desktop and compact web", async ({
   browser,
 }, testInfo) => {
