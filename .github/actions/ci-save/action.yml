@@ -1,0 +1,51 @@
+name: Save successful main CI snapshots
+description: Immutable per-SHA backups are the rolling main cache; no delete/save gap
+inputs:
+  key:
+    required: true
+    description: Exact installation environment key
+  npm:
+    required: true
+    description: npm download cache path
+runs:
+  using: composite
+  steps:
+    - name: Exclude generated test and tool caches from dependency snapshots
+      shell: bash
+      run: node scripts/ci-cache.mjs prune
+    - id: keys
+      shell: bash
+      run: node scripts/ci-cache.mjs keys
+    - uses: actions/cache/save@v4
+      if: github.ref == 'refs/heads/main' && github.job == 'typecheck'
+      with:
+        path: ${{ steps.keys.outputs.browser }}
+        key: browsers-${{ inputs.key }}-${{ github.sha }}
+    # Only one writer per OS, after tests succeed. PRs never populate caches.
+    - uses: actions/cache/save@v4
+      if: github.ref == 'refs/heads/main' && (github.job == 'typecheck' || github.job == 'desktop-tests-windows')
+      with:
+        path: ${{ inputs.npm }}
+        key: npm-${{ inputs.key }}-${{ github.sha }}
+    - uses: actions/cache/save@v4
+      if: github.ref == 'refs/heads/main' && (github.job == 'typecheck' || github.job == 'desktop-tests-windows')
+      with:
+        path: |
+          node_modules
+          packages/*/node_modules
+        key: deps-${{ inputs.key }}-${{ github.sha }}
+    - uses: actions/cache/save@v4
+      if: github.ref == 'refs/heads/main' && github.job != 'format' && github.job != 'lint'
+      with:
+        path: |
+          .ci-build
+          packages/highlight/dist
+          packages/relay/dist
+          packages/protocol/dist
+          packages/protocol/src/generated/validation/ws-outbound.aot.ts
+          packages/client/dist
+          packages/plugin/dist
+          packages/server/dist
+          packages/cli/dist
+          packages/expo-two-way-audio/build
+        key: build-${{ inputs.key }}-${{ github.job }}-${{ github.sha }}
