@@ -181,6 +181,12 @@ export class ChiMentions {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
+      if (path === "handoffs/inbox" && response.status === 400) {
+        const error = await boundedText(response, 4096)
+          .then((text) => JSON.parse(text))
+          .catch(() => null);
+        if (error?.reason === "invalid-cursor") throw new Error("chi-inbox-invalid-cursor");
+      }
       await response.body?.cancel();
       throw new Error(`chi-mentions-http-${response.status}`);
     }
@@ -478,6 +484,7 @@ export class ChiMentions {
         handoffs: z.array(ChiHandoffSchema),
         nextCursor: z.string().nullable(),
         unreadCount: z.number().int().nonnegative(),
+        unavailableRepos: z.array(z.string()).optional(),
       })
       .parse(
         await this.call(identity, "handoffs/inbox", "GET", undefined, {
@@ -496,6 +503,7 @@ export class ChiMentions {
       handoffs: result.handoffs,
       nextCursor: result.nextCursor,
       unreadCount: result.unreadCount,
+      ...(result.unavailableRepos ? { unavailableRepos: result.unavailableRepos } : {}),
     };
   }
 }

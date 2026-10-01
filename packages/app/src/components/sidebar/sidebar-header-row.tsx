@@ -30,6 +30,7 @@ interface SidebarHeaderRowProps {
   variant?: SidebarHeaderRowVariant;
   shortcutKeys?: ShortcutKey[][] | null;
   badge?: number;
+  badgeIncomplete?: boolean;
 }
 
 export function SidebarHeaderRow({
@@ -43,6 +44,7 @@ export function SidebarHeaderRow({
   variant = "header",
   shortcutKeys = null,
   badge,
+  badgeIncomplete = false,
 }: SidebarHeaderRowProps) {
   const ThemedIcon = useMemo(() => withUnistyles(Icon), [Icon]);
 
@@ -70,9 +72,13 @@ export function SidebarHeaderRow({
             uniProps={isHighlighted ? foregroundColorMapping : foregroundMutedColorMapping}
           />
           <SidebarHeaderRowLabel label={label} isHighlighted={isHighlighted} />
-          {badge ? (
-            <Text accessibilityLabel={`${badge} unread mentions`} style={styles.label}>
-              {badge}
+          {badge || badgeIncomplete ? (
+            <Text
+              accessibilityLabel={`${badge ?? 0} unread mentions${badgeIncomplete ? ", count incomplete" : ""}`}
+              style={styles.label}
+            >
+              {badge ?? 0}
+              {badgeIncomplete ? "+" : ""}
             </Text>
           ) : null}
           {shortcutKeys && Boolean(state.hovered) ? (
@@ -81,7 +87,7 @@ export function SidebarHeaderRow({
         </>
       );
     },
-    [ThemedIcon, isActive, label, shortcutKeys, badge],
+    [ThemedIcon, isActive, label, shortcutKeys, badge, badgeIncomplete],
   );
 
   return (

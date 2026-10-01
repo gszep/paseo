@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useFetchInfiniteQuery } from "@/data/query";
 import { useShallow } from "zustand/react/shallow";
 import {
   useHosts,
@@ -13,7 +12,7 @@ import { useMentionScope } from "./use-mention-scope";
 import { mentionQueryKey } from "./mention-context";
 import { inboxAuthority } from "./inbox-identity";
 import { inboxHostsSettled } from "./inbox-authority";
-import { inboxQueryOptions } from "./inbox-query";
+import { useInboxQuery } from "./inbox-query";
 
 export function useInboxTransport() {
   const hosts = useHosts();
@@ -80,13 +79,11 @@ export function useInboxTransport() {
 
 export function useInbox(transport: ReturnType<typeof useInboxTransport>, inbox = true) {
   const { scope, state, host, queryKey } = transport;
-  return useFetchInfiniteQuery(
-    inboxQueryOptions({
-      queryKey,
-      inbox,
-      enabled: Boolean(host && state.context),
-      context: state.context ?? undefined,
-      run: scope.run,
-    }),
-  );
+  return useInboxQuery({
+    queryKey,
+    inbox,
+    enabled: Boolean(host && state.context),
+    context: state.context ?? undefined,
+    run: scope.run,
+  });
 }

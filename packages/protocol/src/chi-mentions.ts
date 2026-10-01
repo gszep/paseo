@@ -203,6 +203,7 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
     handoffs: z.array(ChiHandoffSchema),
     nextCursor: z.string().nullable(),
     unreadCount: z.number().int().nonnegative(),
+    unavailableRepos: z.array(z.string()).optional(),
   }),
   z.object({
     kind: z.literal("participants"),

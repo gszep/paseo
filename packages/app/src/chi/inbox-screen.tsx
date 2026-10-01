@@ -39,6 +39,7 @@ import { useInbox, useInboxTransport } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
 import { RepositoryFilter } from "./repository-filter";
 import { inboxDetailQueryOptions } from "./inbox-query";
+import { InboxCoverageNotice } from "./inbox-coverage";
 import {
   ALL_REPOSITORIES_OPTION_ID,
   buildInboxRows,
@@ -233,6 +234,9 @@ function Inbox({
         </Alert>
       ) : null}
       {refreshing ? <Text style={styles.empty}>Refreshing mentions…</Text> : null}
+      {!query.isError ? (
+        <InboxCoverageNotice unavailableRepos={query.data?.pages[0]?.unavailableRepos} />
+      ) : null}
       {query.data && !query.isError ? (
         <View style={compact ? styles.screen : styles.split}>
           {!compact || !selected ? (

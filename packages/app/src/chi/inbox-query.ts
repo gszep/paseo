@@ -6,6 +6,27 @@ import type {
 } from "@getpaseo/protocol/chi-mentions";
 import type { MentionScope } from "./mention-context";
 import { mentionRefreshIntervalMs } from "./use-mention-scope";
+import { useEffect } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useFetchInfiniteQuery } from "@/data/query";
+
+export function useInboxQuery(input: Parameters<typeof inboxQueryOptions>[0]) {
+  const cache = useQueryClient();
+  const options = inboxQueryOptions(input);
+  const query = useFetchInfiniteQuery(options);
+  const key = JSON.stringify(options.queryKey);
+  useEffect(() => {
+    if (query.error instanceof Error && query.error.message === "chi-inbox-invalid-cursor") {
+      // Discard every old page before restarting; never append a fresh first page
+      // to a walk acquired from a different repository-availability set.
+      const queryKey = JSON.parse(key);
+      if (cache.getQueryState(queryKey)?.error === query.error) {
+        void cache.resetQueries({ queryKey, exact: true });
+      }
+    }
+  }, [cache, key, query.error]);
+  return query;
+}
 
 /**
  * The inbox read's automatic-refresh contract, kept as data so it can be

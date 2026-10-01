@@ -258,7 +258,11 @@ host GitHub logout) clear the scope on mutations as well as reads. Loading and
 transient read failures do not become access-loss warnings. Read-only HTTP 409
 requests reacquire the backend fence with bounded retries; mutations retain their
 explicit recovery flow. This is pull-based access reacquisition, not recall of data
-already downloaded.
+already downloaded. A partially acquired inbox retains the backend's
+`unavailableRepos`, shows an incomplete-inbox notice, and marks the unread badge
+with `+` (including `0+`) and an accessible incomplete-count label. Deployment
+cursors bind that unavailable set; `invalid-cursor` clears the whole cached walk
+and restarts at page one rather than mixing coverage from different pages.
 
 First view saves the recipient's durable `readAt` marker without acknowledging the
 handoff. Native source navigation maps the provider entry ID to a canonical timeline
