@@ -90,7 +90,7 @@ test("install keys include vendored bytes, nested manifests, patches and lifecyc
 test("a snapshot needs the exact patch stamp, pinned versions and valid workspace links", (t) => {
   const { cwd, put } = fixture(t);
   put(
-    "package-lock.json",
+    "node_modules/.package-lock.json",
     JSON.stringify({
       packages: {
         "": {},
@@ -101,10 +101,17 @@ test("a snapshot needs the exact patch stamp, pinned versions and valid workspac
   );
   put("node_modules/dependency/package.json", '{"version":"1.0.0"}');
   put("packages/workspace/package.json", '{"name":"workspace"}');
-  put("node_modules/.ci-install-key", "exact");
+  put(
+    "node_modules/.ci-install-key",
+    JSON.stringify({ key: "exact", layout: hashFiles(["node_modules/.package-lock.json"], cwd) }),
+  );
   symlinkSync(join(cwd, "packages/workspace"), join(cwd, "node_modules/workspace"), "junction");
   assert.equal(validInstall("exact", cwd), true);
   assert.equal(validInstall("different", cwd), false);
+  const layout = readFileSync(join(cwd, "node_modules/.package-lock.json"), "utf8");
+  put("node_modules/.package-lock.json", '{"packages":{}}');
+  assert.equal(validInstall("exact", cwd), false);
+  put("node_modules/.package-lock.json", layout);
   put("node_modules/dependency/package.json", '{"version":"2.0.0"}');
   assert.equal(validInstall("exact", cwd), false);
   put("node_modules/dependency/package.json", '{"version":"1.0.0"}');

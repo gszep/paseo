@@ -17,11 +17,19 @@ const gatedCiJobs = new Map([
   ["typecheck", { name: "typecheck", contract: "quality" }],
   [
     "server-tests-ubuntu",
-    { name: "server-tests (ubuntu-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+    { name: "server-tests (ubuntu-latest, opencode-ai@1.14.46)", contracts: ["server", "hub"] },
+  ],
+  [
+    "server-tests-ubuntu-v2",
+    { name: "server-tests (ubuntu-latest, @opencode/cli@2.0.10)", contracts: ["server", "hub"] },
   ],
   [
     "server-tests-windows",
-    { name: "server-tests (windows-latest, ${{ matrix.opencode }})", contracts: ["server", "hub"] },
+    { name: "server-tests (windows-latest, opencode-ai@1.14.46)", contracts: ["server", "hub"] },
+  ],
+  [
+    "server-tests-windows-v2",
+    { name: "server-tests (windows-latest, @opencode/cli@2.0.10)", contracts: ["server", "hub"] },
   ],
   ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
   ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
@@ -90,14 +98,13 @@ test("gated checks are statically named jobs with real job-level gating", () => 
   const trigger = workflowSource.split("jobs:", 1)[0];
 
   assert.match(trigger, /^\s+merge_group:\s*$/m);
-  assert.doesNotMatch(workflowSource, /strategy:\s*\n\s+matrix:/);
+  assert.doesNotMatch(workflowSource, /matrix:/);
   assert.doesNotMatch(workflowSource, /RUN_TESTS|Skip unaffected|No .* changes detected/);
 
   for (const [jobId, expected] of gatedCiJobs) {
     const job = jobs.get(jobId)?.join("\n");
     assert.ok(job, `missing static job ${jobId}`);
-    // Literal match: matrix expressions (`${{ ... }}`) make the job name
-    // dynamic, so a regex would have to escape far more than parentheses.
+    // Static names must survive job-level skips, before matrix expansion.
     assert.ok(
       job.split("\n").includes(`    name: ${expected.name}`),
       `job ${jobId} name drifted: expected "    name: ${expected.name}"`,

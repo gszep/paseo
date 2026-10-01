@@ -76,8 +76,12 @@ export function environmentKey(cwd = root, env = process.env) {
 
 export function validInstall(key, cwd = root) {
   try {
-    if (readFileSync(join(cwd, "node_modules/.ci-install-key"), "utf8") !== key) return false;
-    const lock = JSON.parse(readFileSync(join(cwd, "package-lock.json"), "utf8"));
+    const stamp = JSON.parse(readFileSync(join(cwd, "node_modules/.ci-install-key"), "utf8"));
+    if (stamp.key !== key || stamp.layout !== hashFiles(["node_modules/.package-lock.json"], cwd))
+      return false;
+    // npm's successful frozen install may deduplicate placements from the input
+    // lock. Verify its actual installed layout, bound to the exact input key.
+    const lock = JSON.parse(readFileSync(join(cwd, "node_modules/.package-lock.json"), "utf8"));
     for (const [path, info] of Object.entries(lock.packages)) {
       if (!path.includes("node_modules/")) continue;
       const installed = join(cwd, path);
@@ -160,7 +164,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       });
       if (result.status !== 0) process.exit(result.status ?? 1);
       mkdirSync(join(root, "node_modules"), { recursive: true });
-      writeFileSync(join(root, "node_modules/.ci-install-key"), key);
+      writeFileSync(
+        join(root, "node_modules/.ci-install-key"),
+        JSON.stringify({ key, layout: hashFiles(["node_modules/.package-lock.json"]) }),
+      );
     }
     console.log(
       `CI dependencies: ${hit ? "validated snapshot" : "frozen install"}, ${Date.now() - started}ms`,

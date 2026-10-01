@@ -153,14 +153,13 @@ jobs:
           npm: ${{ steps.cache.outputs.npm }}
 
   server-tests-ubuntu:
-    name: server-tests (ubuntu-latest, ${{ matrix.opencode }})
+    name: server-tests (ubuntu-latest, opencode-ai@1.14.46)
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        opencode: ["opencode-ai@1.14.46", "@opencode/cli@2.0.10"]
+    # Static names also exist when job-level draft/docs gating skips execution.
+    env:
+      OPENCODE_PACKAGE: "opencode-ai@1.14.46"
     steps: &server_test_steps
       - uses: actions/checkout@v4
         with:
@@ -175,7 +174,7 @@ jobs:
 
       - name: Install agent CLIs for provider tests
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
-        run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code ${{ matrix.opencode }}
+        run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code ${{ env.OPENCODE_PACKAGE }}
 
       - name: Build server dependencies
         run: node scripts/ci-build.mjs build:server-deps
@@ -198,18 +197,34 @@ jobs:
           key: ${{ steps.cache.outputs.key }}
           npm: ${{ steps.cache.outputs.npm }}
 
+  server-tests-ubuntu-v2:
+    name: server-tests (ubuntu-latest, @opencode/cli@2.0.10)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    runs-on: ubuntu-latest
+    env:
+      OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
+    steps: *server_test_steps
+
   server-tests-windows:
-    name: server-tests (windows-latest, ${{ matrix.opencode }})
+    name: server-tests (windows-latest, opencode-ai@1.14.46)
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-        opencode: ["opencode-ai@1.14.46", "@opencode/cli@2.0.10"]
+    env:
+      OPENCODE_PACKAGE: "opencode-ai@1.14.46"
     # native Windows deferred; WSL supported
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    continue-on-error: true
+    steps: *server_test_steps
+
+  server-tests-windows-v2:
+    name: server-tests (windows-latest, @opencode/cli@2.0.10)
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    runs-on: windows-latest
+    env:
+      OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
+    continue-on-error: true
     steps: *server_test_steps
 
   desktop-tests-ubuntu:
