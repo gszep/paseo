@@ -103,9 +103,28 @@ test("gated checks are statically named jobs with real job-level gating", () => 
       `job ${jobId} name drifted: expected "    name: ${expected.name}"`,
     );
     assert.match(job, /needs\.changes\.outputs\.full != 'false'/);
+    assert.match(job, /needs\.changes\.outputs\.docs-only != 'true'/);
+    assert.match(job, /!github\.event\.pull_request\.draft/);
     for (const contract of expected.contracts ?? [expected.contract]) {
       assert.match(job, new RegExp(`needs\\.changes\\.outputs\\.${contract} != 'false'`));
     }
+  }
+});
+
+test("docs classification preserves required contexts and main-only cache writers", () => {
+  const source = readFileSync(ciWorkflowPath, "utf8");
+  assert.doesNotMatch(source.split("jobs:", 1)[0], /paths-ignore/);
+  assert.match(source, /scripts\/ci-docs-only\.mjs/);
+  assert.match(source, /steps\.docs\.outputs\.full != 'false'/);
+  assert.match(source, /cancel-in-progress:.*github\.ref != 'refs\/heads\/main'/);
+  for (const action of ["ci-restore", "ci-save"]) {
+    const content = readFileSync(new URL(`.github/actions/${action}/action.yml`, repoRoot), "utf8");
+    assert.doesNotMatch(content, /actions\/cache@/);
+    if (action === "ci-save")
+      assert.equal(
+        (content.match(/uses: actions\/cache\/save/g) ?? []).length,
+        (content.match(/if: github\.ref == 'refs\/heads\/main'/g) ?? []).length,
+      );
   }
 });
 

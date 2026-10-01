@@ -5,12 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   merge_group:
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # CI does not use the CUDA execution provider, and the onnxruntime-node
@@ -25,7 +26,8 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      full: ${{ github.event_name != 'pull_request' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
+      docs-only: ${{ steps.docs.outputs.skip }}
+      full: ${{ github.event_name != 'pull_request' || steps.docs.outputs.full != 'false' || steps.filter.outputs.routing != 'false' || steps.filter.outputs.workspace != 'false' || steps.filter.outputs.ci != 'false' }}
       format: ${{ steps.filter.outputs.format }}
       quality: ${{ steps.filter.outputs.quality }}
       hub: ${{ steps.filter.outputs.hub }}
@@ -47,47 +49,49 @@ jobs:
 
       - name: Detect affected CI contracts
         id: filter
+        continue-on-error: true
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
           filters: .github/ci-paths.yml
 
+      - name: Classify Markdown-only changes
+        id: docs
+        continue-on-error: true
+        run: node scripts/ci-docs-only.mjs
+
       - name: Validate CI contracts
-        run: node --test scripts/ci-workflow.test.mjs scripts/daemon-launch-contract.test.mjs scripts/sync-fdroid-changelogs.test.mjs scripts/upload-release-assets.test.mjs scripts/lockfile-file-deps.test.mjs
+        run: node --test scripts/ci-workflow.test.mjs scripts/ci-cache.test.mjs scripts/daemon-launch-contract.test.mjs scripts/sync-fdroid-changelogs.test.mjs scripts/upload-release-assets.test.mjs scripts/lockfile-file-deps.test.mjs
 
   format:
     name: format
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.format != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.format != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Check formatting
         run: npm run format:check
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   lint:
     name: lint
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Lint lockfile
         # The private `@henkaku-center/chi-native` dependency is a vendored
@@ -107,24 +111,25 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   typecheck:
     name: typecheck
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Build server stack
-        run: npm run build:server
+        run: node scripts/ci-build.mjs build:server
 
       - name: Typecheck all packages
         run: npm run typecheck
@@ -141,10 +146,16 @@ jobs:
           npm pack --dry-run --ignore-scripts --workspace=@getpaseo/client
           npm pack --dry-run --ignore-scripts --workspace=@getpaseo/server
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   server-tests-ubuntu:
     name: server-tests (ubuntu-latest, ${{ matrix.opencode }})
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -155,24 +166,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Fetch origin/main (worktree tests)
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
         run: git fetch --no-tags origin main:refs/remotes/origin/main
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
 
       - name: Install agent CLIs for provider tests
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code ${{ matrix.opencode }}
 
       - name: Build server dependencies
-        run: npm run build:server-deps
+        run: node scripts/ci-build.mjs build:server-deps
 
       - name: Run server tests
         if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
@@ -186,10 +192,16 @@ jobs:
         if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.hub != 'false' }}
         run: npm run test:hub-cli-contract --workspace=@getpaseo/server
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   server-tests-windows:
     name: server-tests (windows-latest, ${{ matrix.opencode }})
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -203,7 +215,7 @@ jobs:
   desktop-tests-ubuntu:
     name: desktop-tests (ubuntu-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -211,16 +223,11 @@ jobs:
     steps: &desktop_test_steps
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with retry
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Build server stack
-        run: npm run build:server
+        run: node scripts/ci-build.mjs build:server
 
       - name: Run desktop tests
         run: npm run test --workspace=@getpaseo/desktop
@@ -275,10 +282,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   desktop-tests-windows:
     name: desktop-tests (windows-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
@@ -288,50 +301,46 @@ jobs:
   app-tests:
     name: app-tests
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with retry
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Install Playwright browsers
         timeout-minutes: 10
         run: npx playwright install chromium
 
       - name: Build app dependencies
-        run: npm run build:app-deps
+        run: node scripts/ci-build.mjs build:app-deps
 
       - name: Run app unit tests
         run: npm run test --workspace=@getpaseo/app
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   sdk-tests:
     name: sdk-tests
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Build client dependencies
-        run: npm run build:relay && npm run build:client
+        run: node scripts/ci-build.mjs build:relay && node scripts/ci-build.mjs build:client
 
       - name: Build plugin SDK
-        run: npm run build:plugin
+        run: node scripts/ci-build.mjs build:plugin
 
       - name: Run plugin SDK tests
         run: npm run test --workspace=@getpaseo/plugin
@@ -348,10 +357,16 @@ jobs:
       - name: Typecheck client examples
         run: npm run typecheck:examples --workspace=@getpaseo/client
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   playwright-1:
     name: playwright (shard 1/4)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SHARD: "1/4"
@@ -359,23 +374,18 @@ jobs:
     steps: &playwright_test_steps
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies with retry
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Install Playwright browsers
         timeout-minutes: 10
         run: npx playwright install chromium
 
       - name: Build server stack
-        run: npm run build:server
+        run: node scripts/ci-build.mjs build:server
 
       - name: Build native app dependency
-        run: npm run build --workspace=@getpaseo/expo-two-way-audio
+        run: node scripts/ci-build.mjs build:audio
 
       - name: Install agent CLIs for provider tests
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai@1.14.46
@@ -398,10 +408,16 @@ jobs:
             packages/app/playwright-report/
           retention-days: 7
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   playwright-2:
     name: playwright (shard 2/4)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SHARD: "2/4"
@@ -411,7 +427,7 @@ jobs:
   playwright-3:
     name: playwright (shard 3/4)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SHARD: "3/4"
@@ -421,7 +437,7 @@ jobs:
   playwright-4:
     name: playwright (shard 4/4)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
       PLAYWRIGHT_SHARD: "4/4"
@@ -431,29 +447,30 @@ jobs:
   relay-tests:
     name: relay-tests
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Build relay
-        run: npm run build:relay
+        run: node scripts/ci-build.mjs build:relay
 
       - name: Run relay tests
         run: npm run test --workspace=@getpaseo/relay
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   cli-tests-1:
     name: cli-tests (shard 1/3)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -464,13 +481,8 @@ jobs:
     steps: &cli_test_steps
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-
-      - name: Install dependencies
-        run: node scripts/npm-retry.mjs ci
+      - uses: ./.github/actions/ci-restore
+        id: cache
 
       - name: Install agent CLIs for provider tests
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code @openai/codex@0.105.0 opencode-ai@1.14.46
@@ -485,10 +497,16 @@ jobs:
         if: ${{ env.PASEO_CLI_TEST_SHARD == '3' }}
         run: npm run test:unit --workspace=@getpaseo/cli
 
+      - uses: ./.github/actions/ci-save
+        if: github.ref == 'refs/heads/main'
+        with:
+          key: ${{ steps.cache.outputs.key }}
+          npm: ${{ steps.cache.outputs.npm }}
+
   cli-tests-2:
     name: cli-tests (shard 2/3)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -501,7 +519,7 @@ jobs:
   cli-tests-3:
     name: cli-tests (shard 3/3)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"

@@ -1,0 +1,57 @@
+name: Restore CI dependencies and build candidates
+description: Main-written immutable SHA snapshots with rolling prefix restoration
+outputs:
+  key:
+    value: ${{ steps.keys.outputs.key }}
+    description: Exact installation environment key
+  npm:
+    value: ${{ steps.keys.outputs.npm }}
+    description: Download cache path without npm credentials or logs
+  browser:
+    value: ${{ steps.keys.outputs.browser }}
+    description: Playwright browser downloads
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+    - id: keys
+      shell: bash
+      run: node scripts/ci-cache.mjs keys
+    - uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.keys.outputs.npm }}
+        key: npm-${{ steps.keys.outputs.key }}-${{ github.sha }}
+        restore-keys: npm-${{ steps.keys.outputs.key }}-
+    - uses: actions/cache/restore@v4
+      with:
+        path: |
+          node_modules
+          packages/*/node_modules
+        key: deps-${{ steps.keys.outputs.key }}-${{ github.sha }}
+        restore-keys: deps-${{ steps.keys.outputs.key }}-
+    - name: Validate snapshot or install frozen dependencies
+      shell: bash
+      run: node scripts/ci-cache.mjs install
+    - uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.keys.outputs.browser }}
+        key: browsers-${{ steps.keys.outputs.key }}-${{ github.sha }}
+        restore-keys: browsers-${{ steps.keys.outputs.key }}-
+    - uses: actions/cache/restore@v4
+      with:
+        # Stamps validate each task's full source key and output bytes before use.
+        path: |
+          .ci-build
+          packages/highlight/dist
+          packages/relay/dist
+          packages/protocol/dist
+          packages/protocol/src/generated/validation/ws-outbound.aot.ts
+          packages/client/dist
+          packages/plugin/dist
+          packages/server/dist
+          packages/cli/dist
+          packages/expo-two-way-audio/build
+        key: build-${{ steps.keys.outputs.key }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: build-${{ steps.keys.outputs.key }}-${{ github.job }}-

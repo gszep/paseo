@@ -65,6 +65,27 @@ it("returns timeout error when provider times out", async () => {
 
 Never remove a test because it's flaky. Find the variance source (time, randomness, race condition, shared state, non-deterministic output, environment drift) and fix it.
 
+## CI fast paths
+
+All 17 required contexts remain present. Draft PRs and changes containing only
+untested Markdown skip heavy jobs at job level. Changelogs, public documentation
+read by tests, and runtime skills keep their tests. HTML and SVG are not
+Markdown-only changes. Classification errors run the full matrix; main pushes
+and non-PR runs never use the docs-only skip.
+
+Only successful main jobs write dependency/build snapshots. PRs restore the
+latest compatible immutable SHA snapshot, keeping the previous main snapshot
+available while its replacement uploads. Installed trees require the exact
+runner image, architecture, Node/ABI, npm, lockfile, workspace manifests, vendor
+and lifecycle inputs; invalid stamps, versions, patches or workspace links fall
+back to the frozen installer. Build archives are candidates, not proof of a
+valid build: each task verifies its transitive inputs and output bytes before
+reusing it. A miss removes old outputs and runs the existing npm build command.
+
+Cache timings must distinguish cold install/build, archive transfer, validated
+hits and changed-source misses. A PR cannot seed the main cache, so the first
+warm measurement requires a successful main run after merge.
+
 ## Real dependencies over mocks
 
 Mocks are not the default. They require an explicit decision.

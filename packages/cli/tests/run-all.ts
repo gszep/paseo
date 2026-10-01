@@ -179,7 +179,7 @@ const failures: Failure[] = [];
 
 await runCommand(
   "Building server stack",
-  `npm --prefix ${JSON.stringify(repoRoot)} run build:server`,
+  `node ${JSON.stringify(join(repoRoot, "scripts/ci-build.mjs"))} build:server`,
 );
 
 type TestOutcome =
