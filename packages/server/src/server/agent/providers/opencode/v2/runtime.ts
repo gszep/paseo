@@ -34,7 +34,7 @@ interface Generation {
   stop(): Promise<void>;
   exited: Promise<Error>;
 }
-export interface V2RuntimeOptions {
+interface V2RuntimeOptions {
   logger: Logger;
   settings?: ProviderRuntimeSettings;
   managedProcesses?: ManagedProcessRegistry;

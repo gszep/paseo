@@ -10,7 +10,6 @@ import {
 import {
   blameProvenanceFile,
   formatProvenanceBlame,
-  walkProvenanceChain,
   type ProvenanceBlameRow,
 } from "@henkaku-center/chi-native/provenance-blame";
 
@@ -23,7 +22,7 @@ import {
  * prompt or the event loop.
  */
 
-export interface CaptureEvidence {
+interface CaptureEvidence {
   nativeSessionId: string;
   nativeParent: { kind: "session-id" | "session-path"; value: string } | null;
   entries: ReadonlyArray<{ nativeId: string; type: string; parentId: string | null }>;
@@ -150,7 +149,7 @@ export async function removeProvenance(input: ProvenanceRemoveInput): Promise<Pr
   }
 }
 
-export interface BlameResult {
+interface BlameResult {
   rows: ProvenanceBlameRow[];
   rendered: string;
   ref: string;
@@ -185,6 +184,3 @@ export async function blameProvenance(input: {
     ref: input.ref,
   };
 }
-
-export { walkProvenanceChain };
-export type { ProvenanceBlameRow };

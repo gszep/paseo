@@ -24,7 +24,7 @@ const envelopeSchema = z.object({
   legacy: z.boolean().optional(),
 });
 
-export interface ReplyState {
+interface ReplyState {
   text: string;
   status: "loading" | "editing" | "pending" | "failed" | "sent" | "blocked";
   error: string | null;

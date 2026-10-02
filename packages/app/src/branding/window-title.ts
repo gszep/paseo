@@ -1,6 +1,6 @@
 import type { BrandConfig } from "./brand";
 
-export interface WindowTitleInput {
+interface WindowTitleInput {
   /** The brand's title prefix, or null to leave the label unprefixed. */
   titleMark: Pick<BrandConfig, "titleMark">["titleMark"];
   /** The mark shown for this frame (the title mark when idle, a spinner frame while working). */
