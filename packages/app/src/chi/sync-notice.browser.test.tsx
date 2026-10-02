@@ -14,6 +14,7 @@ import {
   syncNoticeReason,
   OMITTED_CONTENT_WARNING,
 } from "./sync-notice-view";
+import { isTerminalSyncError } from "./sync-destination";
 
 const errorRef = { current: null as string | null };
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
@@ -55,6 +56,37 @@ afterEach(() => {
 });
 
 describe("SyncNoticeView", () => {
+  it("explains divergence recovery and hides Retry without leaking a head or server diagnostic", () => {
+    const error = "capture-head-diverged";
+    const { container } = mount(
+      <SyncNoticeView
+        error={error}
+        terminal={isTerminalSyncError(error)}
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain("preserve both histories");
+    expect(container.textContent).toContain("OpenCode Fork");
+    expect(button(container, "Retry")).toBeUndefined();
+    expect(container.textContent).not.toContain(error);
+  });
+  it("explains an uncertain timeout and offers a safe Retry", () => {
+    const error = "chi-operation-timeout";
+    const retry = vi.fn();
+    const { container } = mount(
+      <SyncNoticeView
+        error={error}
+        terminal={isTerminalSyncError(error)}
+        onDismiss={vi.fn()}
+        onRetry={retry}
+      />,
+    );
+    expect(container.textContent).toContain("may already have committed");
+    expect(container.textContent).toContain("same request");
+    act(() => button(container, "Retry")!.click());
+    expect(retry).toHaveBeenCalledOnce();
+  });
   it("explains destination setup and paused history without exposing diagnostics", () => {
     const { container } = mount(
       <SyncNoticeView error="chi-destination-required" onDismiss={vi.fn()} onRetry={vi.fn()} />,

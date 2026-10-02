@@ -56,13 +56,15 @@ export function syncAudienceLabel(audience: ChiAudience): string {
   return audience === "shared" ? "Shared with repository readers" : "Private";
 }
 
-/**
- * Secret rejections and cut-scan limits are terminal: nothing was uploaded and retrying cannot
- * succeed until the local history changes, so the notice hides Retry. A missing
- * local scanner stays retryable (install it and retry), so it is not terminal.
- */
+export const CAPTURE_HEAD_DIVERGED_MESSAGE =
+  "The archived session differs from this host's history. Sync stopped to preserve both histories. Compare the archive and other hosts; continue from the canonical session, or use OpenCode Fork to preserve this host's work as a new source.";
+export const CHI_OPERATION_TIMEOUT_MESSAGE =
+  "Chi timed out before confirming the operation. A capture may already have committed. Retry to check the archived head safely; keep the same request when retrying Continue.";
+
+/** Rejections that require human recovery rather than an automatic retry. */
 export function isTerminalSyncError(code: string | null | undefined): boolean {
   return (
+    code === "capture-head-diverged" ||
     code === "capture-local-secret-rejected" ||
     code === "capture-local-cut-scan-limit" ||
     code === "evidence-http-422-server-secret-scan-rejected"

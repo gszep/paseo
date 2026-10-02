@@ -38,3 +38,9 @@ test("a cut-scan limit explains capacity without claiming a secret was found", (
   );
   expect(isTerminalSyncError(code)).toBe(true);
 });
+test.each([
+  ["capture-head-diverged", "OpenCode Fork"],
+  ["chi-operation-timeout", "may already have committed"],
+])("%s explains the recovery path", (code, text) => {
+  expect(mentionError(new Error(code))).toContain(text);
+});

@@ -3,6 +3,7 @@ import { View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { CAPTURE_HEAD_DIVERGED_MESSAGE, CHI_OPERATION_TIMEOUT_MESSAGE } from "./sync-destination";
 
 const NOTICE_TITLE =
   "For others to see this session and for its mentions to appear, sync needs to succeed.";
@@ -19,6 +20,8 @@ export function syncWarningReason(code: string): string {
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {
   if (!code) return "Sync did not complete. Retry when this host is back online.";
+  if (code === "capture-head-diverged") return CAPTURE_HEAD_DIVERGED_MESSAGE;
+  if (code === "chi-operation-timeout") return CHI_OPERATION_TIMEOUT_MESSAGE;
   if (code === "chi-destination-required")
     return "Configure a Chi destination and repository mapping on this host before Share, Continue or mentions. Existing history stays paused until its original endpoint is configured.";
   if (code === "capture-local-cut-scan-limit")

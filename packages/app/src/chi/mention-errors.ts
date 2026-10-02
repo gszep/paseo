@@ -1,6 +1,10 @@
+import { CAPTURE_HEAD_DIVERGED_MESSAGE, CHI_OPERATION_TIMEOUT_MESSAGE } from "./sync-destination";
+
 export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
   const copy: Record<string, string> = {
+    "capture-head-diverged": CAPTURE_HEAD_DIVERGED_MESSAGE,
+    "chi-operation-timeout": CHI_OPERATION_TIMEOUT_MESSAGE,
     "chi-destination-required":
       "Configure a Chi destination and repository mapping on this host before Share, Continue or mentions. Inbox and mentions require one configured deployment; restart the daemon after changing it.",
     "chi-destination-changed":

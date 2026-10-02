@@ -9,7 +9,12 @@ import * as spawn from "../../utils/spawn.js";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { minimiseNativeExport, prepareNativeCapture } from "@henkaku-center/chi-native/capture";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
-import { ChiConnection, type ChiAuthority, type ChiConnectionOptions } from "./connection.js";
+import {
+  ChiConnection,
+  safeChiError,
+  type ChiAuthority,
+  type ChiConnectionOptions,
+} from "./connection.js";
 import type { ProvenanceRemover, ProvenanceWriter } from "./provenance.js";
 import type { ChiDestinationsConfig } from "./destinations.js";
 import { classifyMentionFailure } from "./mention-failure.js";
@@ -2644,6 +2649,321 @@ describe("automatic sync destinations", () => {
     await vi.waitFor(() => expect(f.evidence).toHaveLength(1));
   });
 
+  async function conflictedCapture() {
+    const f = await syncFixture();
+    const agent = await f.register();
+    type Capture = ReturnType<typeof minimiseNativeExport>["capture"];
+    const snapshots: Array<{ id: string; previous: string | null; capture: Capture }> = [];
+    const canonical = (value: unknown): string => {
+      if (!value || typeof value !== "object") return JSON.stringify(value);
+      if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+      return `{${Object.entries(value)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+        .join(",")}}`;
+    };
+    const base = f.authority.request;
+    let loseResponse = false;
+    const posts: Array<{ capture: Capture; expectedHead: string | null }> = [];
+    const reads: string[] = [];
+    f.authority.request = async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const last = snapshots.at(-1);
+      if (path === "/evidence" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        posts.push(body);
+        if (last && canonical(last.capture) === canonical(body.capture))
+          return Response.json({ sourceId: f.sourceId, head: last.id });
+        if (body.expectedHead !== (last?.id ?? null))
+          return Response.json({ ok: false, reason: "evidence-head-conflict" }, { status: 409 });
+        const previous = last?.id ?? null;
+        const id = createHash("sha256")
+          .update(canonical({ previous, capture: body.capture }))
+          .digest("hex");
+        snapshots.push({ id, previous, capture: body.capture });
+        if (loseResponse) {
+          loseResponse = false;
+          throw new DOMException("private diagnostic", "TimeoutError");
+        }
+        return Response.json({ sourceId: f.sourceId, head: id });
+      }
+      if (path.startsWith("/evidence/")) {
+        reads.push(path);
+        if (path === "/evidence/inspect")
+          return Response.json({
+            sourceId: f.sourceId,
+            head: last!.id,
+            ownerId: "github:owner",
+            nativeSessionId: "ses_fork",
+            instanceId: "server:opencode",
+            workspace: { hostId: "server", path: f.home },
+            harness: "opencode-v2",
+          });
+        if (path === "/evidence/snapshots")
+          return Response.json({
+            items: snapshots.map((s) => ({
+              id: s.id,
+              previous: s.previous,
+              blob: createHash("sha256").update(s.capture.native).digest("hex"),
+              coverage: s.capture.coverage,
+            })),
+            nextCursor: null,
+          });
+        if (path === "/evidence/native")
+          return Response.json({
+            ...last!.capture,
+            blob: createHash("sha256").update(last!.capture.native).digest("hex"),
+          });
+      }
+      return base(url, init);
+    };
+    const connection = f.connect();
+    const association = () => JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
+    const appendMessage = () =>
+      f.transfer.messages.push({
+        ...f.transfer.messages[0]!,
+        id: `msg_${f.transfer.messages.length}`,
+        text: "next",
+      });
+    return {
+      ...f,
+      agent,
+      connection,
+      posts,
+      reads,
+      snapshots,
+      association,
+      appendMessage,
+      loseResponse: () => {
+        loseResponse = true;
+      },
+    };
+  }
+
+  it("recovers a response lost after commit, then fast-forwards a later capture without rewriting history", async () => {
+    const f = await conflictedCapture();
+    await f.connection.capture(f.agent.id);
+    const cached = f.association().head;
+    f.appendMessage();
+    f.loseResponse();
+    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-operation-timeout");
+    expect(f.association()).toMatchObject({
+      head: cached,
+      capturePending: true,
+      error: "chi-operation-timeout",
+    });
+    const committed = f.snapshots.at(-1)!;
+    // An identical retry is already idempotent at the server.
+    await f.connection.capture(f.agent.id);
+    expect(f.association()).toMatchObject({
+      head: committed.id,
+      capturePending: false,
+      error: null,
+    });
+    expect(f.snapshots).toHaveLength(2);
+    f.appendMessage();
+    f.loseResponse();
+    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-operation-timeout");
+    const lost = f.snapshots.at(-1)!;
+    f.appendMessage();
+    await f.connection.capture(f.agent.id);
+    expect(f.posts.at(-1)!.expectedHead).toBe(lost.id);
+    expect(f.snapshots.at(-1)!.previous).toBe(lost.id);
+    expect(f.snapshots).toHaveLength(4);
+    expect(f.association()).toMatchObject({
+      head: f.snapshots.at(-1)!.id,
+      capturePending: false,
+      error: null,
+    });
+  });
+
+  it("workspace Retry refreshes a stale head and scans once before a bounded fast-forward", async () => {
+    const f = await conflictedCapture();
+    await f.connection.capture(f.agent.id);
+    const cached = f.association();
+    f.appendMessage();
+    await f.connection.capture(f.agent.id);
+    const remote = f.snapshots.at(-1)!.id;
+    await f.manager.updateAgentLabel(f.agent.id, "chi.native", () =>
+      JSON.stringify({
+        ...cached,
+        capturePending: true,
+        error: "evidence-http-409-evidence-head-conflict",
+      }),
+    );
+    f.appendMessage();
+    f.posts.length = 0;
+    const scan = vi.fn(async () => ({ verdict: "clean" as const }));
+    const connection = f.connect(undefined, scan);
+    await connection.syncStatus({ workspaceId: "workspace", cwd: f.home, retry: true });
+    await vi.waitFor(() => expect(f.association().capturePending).toBe(false));
+    expect(f.posts).toHaveLength(1);
+    expect(f.posts[0]!.expectedHead).toBe(remote);
+    expect(scan).toHaveBeenCalledOnce();
+    expect(f.association().error).toBeNull();
+  });
+
+  it("refuses divergent history, preserves the cached head, and stops automatic retry", async () => {
+    const f = await conflictedCapture();
+    await f.connection.capture(f.agent.id);
+    f.appendMessage();
+    f.loseResponse();
+    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-operation-timeout");
+    const cached = f.association().head;
+    f.transfer.messages[0]!.text = "another writer";
+    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("capture-head-diverged");
+    expect(f.association()).toMatchObject({
+      head: cached,
+      error: "capture-head-diverged",
+      capturePending: false,
+    });
+    const count = f.posts.length;
+    const capture = vi.spyOn(f.connection, "capture");
+    f.connection.afterTurn(f.agent.id);
+    await f.connection.reconcilePending();
+    await f.connection.onDestinationsChanged();
+    expect(capture).not.toHaveBeenCalled();
+    expect(f.posts).toHaveLength(count);
+    expect(f.snapshots).toHaveLength(2);
+  });
+
+  it("head recovery never bypasses the local scanner or a removed destination", async () => {
+    const f = await conflictedCapture();
+    await f.connection.capture(f.agent.id);
+    await f.manager.updateAgentLabel(f.agent.id, "chi.native", (current) =>
+      JSON.stringify({
+        ...JSON.parse(current!),
+        error: "evidence-http-409-evidence-head-conflict",
+        capturePending: true,
+      }),
+    );
+    const posts = f.posts.length;
+    const scanner = vi.fn(async () => {
+      throw new Error("capture-local-secret-rejected");
+    });
+    await expect(f.connect(undefined, scanner).capture(f.agent.id)).rejects.toThrow(
+      "capture-local-secret-rejected",
+    );
+    expect(f.reads).toEqual([]);
+    expect(f.posts).toHaveLength(posts);
+    await expect(f.connect(null).capture(f.agent.id)).rejects.toThrow("chi-destination-changed");
+    expect(f.reads).toEqual([]);
+    expect(f.posts).toHaveLength(posts);
+  });
+
+  it("the periodic sweep re-drives pending captures with bounded backoff and no overlapping sweeps", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    const connection = f.connect();
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    f.setFailEvidence(true);
+    await expect(connection.capture(agent.id)).rejects.toThrow();
+    connection.afterTurn(agent.id);
+    await Promise.all([connection.reconcilePending(), connection.reconcilePending()]);
+    expect(f.evidenceAttempts()).toBe(1);
+    now += 60_000;
+    await Promise.all([connection.reconcilePending(), connection.reconcilePending()]);
+    expect(f.evidenceAttempts()).toBe(2);
+    now += 119_999;
+    await connection.reconcilePending();
+    expect(f.evidenceAttempts()).toBe(2);
+    now += 1;
+    await connection.reconcilePending();
+    expect(f.evidenceAttempts()).toBe(3);
+    // Backoff saturates, so an old pending record cannot be starved forever.
+    for (let n = 0; n < 8; n++) {
+      now += 900_000;
+      await connection.reconcilePending();
+    }
+    const attempts = f.evidenceAttempts();
+    now += 900_000;
+    f.setFailEvidence(false);
+    connection.startProvenanceSweep();
+    try {
+      await vi.waitFor(() => expect(f.evidenceAttempts()).toBe(attempts + 1));
+      await vi.waitFor(() =>
+        expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).capturePending).toBe(
+          false,
+        ),
+      );
+    } finally {
+      connection.stopProvenanceSweep();
+    }
+  });
+
+  it("timeouts have a fixed public code without exposing diagnostic text", () => {
+    expect(safeChiError(new DOMException("private response", "TimeoutError"))).toBe(
+      "chi-operation-timeout",
+    );
+    expect(safeChiError(new Error("private timeout-like text"))).toBe("chi-operation-failed");
+    expect(safeChiError(new DOMException("cancelled", "AbortError"))).toBe("chi-operation-failed");
+  });
+
+  it("pending sweep caps work, rotates fairly, skips paused and terminal records, and single-flights reconnects", async () => {
+    const f = await syncFixture();
+    const pending = {
+      repo: "github:fixture/repo",
+      actor: "github:owner",
+      sourceId: f.sourceId,
+      head: "a".repeat(64),
+      error: "chi-operation-timeout",
+      capturePending: true,
+    };
+    const agent = await f.register();
+    f.agents.length = 0;
+    for (let n = 0; n < 7; n++)
+      f.agents.push({
+        ...agent,
+        id: `pending-${n}`,
+        labels: { "chi.native": JSON.stringify(pending) },
+      });
+    f.agents.push({
+      ...agent,
+      id: "paused",
+      labels: { "chi.native": JSON.stringify({ ...pending, paused: true }) },
+    });
+    f.agents.push({
+      ...agent,
+      id: "terminal",
+      labels: { "chi.native": JSON.stringify({ ...pending, error: "capture-head-diverged" }) },
+    });
+    const connection = f.connect();
+    // Fail at authorization so every attempted record retains its pending state.
+    const login = vi
+      .spyOn(f.authority, "login")
+      .mockRejectedValue(new DOMException("offline", "TimeoutError"));
+    await Promise.all([connection.reconcilePending(), connection.reconcilePending()]);
+    expect(login).toHaveBeenCalledTimes(4);
+    await connection.reconcilePending();
+    expect(login).toHaveBeenCalledTimes(7);
+    await connection.reconcilePending();
+    expect(login).toHaveBeenCalledTimes(7);
+  });
+
+  it("large-session recovery exports and scans once and keeps the minimised projection", async () => {
+    const f = await conflictedCapture();
+    f.transfer.messages.push(
+      ...Array.from({ length: 799 }, (_, n) => ({
+        id: `large_${n}`,
+        type: "user",
+        text: "x".repeat(1000),
+      })),
+    );
+    f.loseResponse();
+    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-operation-timeout");
+    f.appendMessage();
+    const scan = vi.fn(async () => ({ verdict: "clean" as const }));
+    const connection = f.connect(undefined, scan);
+    vi.mocked(f.runtime.export).mockClear();
+    await connection.capture(f.agent.id);
+    expect(f.runtime.export).toHaveBeenCalledOnce();
+    expect(scan).toHaveBeenCalledOnce();
+    expect(f.posts.at(-1)!.capture.projection).toEqual({ kind: "minimised", minimiser: "min-v1" });
+    expect(JSON.parse(f.posts.at(-1)!.capture.native).messages).toHaveLength(801);
+    expect(f.association().error).toBeNull();
+  });
+
   it("pins the audience at creation and never widens it", async () => {
     const f = await syncFixture();
     const agent = await f.register();
@@ -2974,24 +3294,29 @@ describe("automatic sync destinations", () => {
     },
   );
 
-  it("fails closed when the local scanner is unavailable and retries on the next turn", async () => {
+  it("fails closed when the local scanner is unavailable and retries after backoff", async () => {
     const f = await syncFixture();
     const agent = await f.register();
     const scanCapture = vi.fn(async () => {
       throw new Error("capture-local-scanner-unavailable");
     });
     const connection = f.connect(undefined, scanCapture);
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
     await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-scanner-unavailable");
     expect(f.evidenceAttempts()).toBe(0);
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
       error: "capture-local-scanner-unavailable",
       capturePending: true,
     });
-    // Retryable once gitleaks is installed: a settled turn retries (bounded).
+    // Missing scanner remains retryable, with the same bounded automatic backoff.
     const afterCapture = scanCapture.mock.calls.length;
+    now += 60_000;
     connection.afterTurn(agent.id);
     await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterCapture));
+    await expect(connection.capture(agent.id)).rejects.toThrow("capture-local-scanner-unavailable");
     const afterTurn = scanCapture.mock.calls.length;
+    now += 900_000;
     await connection.reconcilePending();
     await vi.waitFor(() => expect(scanCapture.mock.calls.length).toBeGreaterThan(afterTurn));
     expect(f.evidenceAttempts()).toBe(0);
