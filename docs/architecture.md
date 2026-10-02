@@ -344,16 +344,26 @@ Automatic reconciliation polls at most eight pending batches per boundary with a
 durable rotating cursor and one authority bracket. Each completed read saves its
 cursor and answers independently. Reads run outside the dispatch lock, and queued
 sends precede reads. A lost create response stays uncertain until an exact read
-proves delivery; recovery does not require a second send. Cached answers exposed by the
-bounded reminder get exact ACL verification without polling for corrections. The
-foreground wait has a two-second budget; expiration withholds the reminder while
-one detached boundary per agent continues dispatch and reconciliation across turns.
-Its two-minute deadline stops further admission; an in-flight exact read can still
-persist progress. Boundary timeouts and aborts log fixed reason codes, never content
-or credentials. Native turn pins use already-reconciled settled assistant IDs, so
-long-session history reads are absent from this path. Repository authority is cached
-for 30 seconds, with live credential/mapping checks and fresh write admission;
-context loss and configuration reload clear it, including delayed acquisitions.
+proves delivery; recovery does not require a second send. A 404 for the author's own
+unconfirmed batch proves the create never landed: the batch returns to reserved and
+the next boundary resends the same immutable ID, which the backend treats
+idempotently. A create that fails before posting (admission, viewing, 401/403) keeps
+its status for that resend; other fixed 4xx refusals record `failed`. Cached answers
+exposed by the bounded reminder get exact ACL verification without polling for
+corrections. The foreground wait has a two-second budget; expiration withholds the
+reminder while one detached boundary per agent continues dispatch and reconciliation
+across turns. A turn that joins a running boundary still gets cached answers at once,
+or the full reminder once that boundary's reads succeed. The two-minute deadline,
+shutdown, reload, and agent close or archive abort the boundary; an in-flight exact
+read can still persist progress. Timeouts and aborts log fixed reason codes, never
+content or credentials. Native turn pins use already-reconciled history: the latest
+completed assistant message or non-reminder user message, so a turn's first step pins
+its own prompt and long-session history reads are absent from this path. Repository
+authority is cached for 30 seconds per checkout, with live credential/mapping checks
+and fresh write admission. Only the agent's own session, identity or mapping aborts
+its work; another agent's failure never clears it. Access loss clears the affected
+repository (a 401, credential change or reload clears every checkout), including
+delayed acquisitions.
 Explicit list/resolve may read the full bounded receipt.
 Dispatch requires the backend's scanner capability; recipient controls require its
 optional handoff capability. Old clients still parse ordinary discussion.
