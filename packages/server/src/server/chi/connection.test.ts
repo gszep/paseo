@@ -3420,11 +3420,14 @@ describe("automatic sync destinations", () => {
     answer(f, "github:a", "A");
     answer(f, "github:b", "B");
     const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    const refresh = vi.spyOn(f.connection.humanPrompts, "refresh");
     const aborted = f.connection.humanPromptBoundary(f.agent.id, false);
     await held.entered;
     f.connection.agentClosed(f.agent.id);
     // The agent is reloaded rather than removed, so its next boundary runs.
     const next = f.connection.humanPromptBoundary(f.agent.id, false);
+    // Release only once the new worker reaches reconciliation behind the old read.
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
     held.release();
     await Promise.all([aborted, next]);
     expect(
@@ -3457,6 +3460,143 @@ describe("automatic sync destinations", () => {
         "Chi human prompt boundary wait timed out",
       ],
     ]);
+  });
+
+  it("an acquisition that fails after the remote changes is not reused once it changes back", async () => {
+    const f = await humanFixture();
+    const entered = barrier();
+    const gate = barrier();
+    const login = f.authority.login;
+    let calls = 0;
+    f.authority.login = async () => {
+      if (calls++ === 0) {
+        entered.resolve();
+        await gate.promise;
+      }
+      return login();
+    };
+    const remote = (repo: string) =>
+      execFileSync("git", [
+        "-C",
+        f.home,
+        "remote",
+        "set-url",
+        "origin",
+        `https://github.com/fixture/${repo}.git`,
+      ]);
+    const pending = f.add();
+    const rejected = expect(pending).rejects.toThrow();
+    await entered.promise;
+    // Observed under the mapped remote; the repository acquisition sees another.
+    remote("other");
+    gate.resolve();
+    await rejected;
+    remote("repo");
+    await f.add();
+    expect(await f.connection.humanPrompts.hasItems(f.agent.id)).toBe(true);
+  });
+
+  it("a create refused before posting stays reserved without needing a confirming read", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const access = await f.connection["humanPromptAccess"](f.agent.id);
+    // The backend capability disappears before fresh write admission.
+    f.capability(false);
+    const posts = vi.spyOn(f.authority, "request");
+    await f.connection.humanPrompts.dispatch(access.scope, access.transport, {
+      source: { kind: "neutral", id: f.sourceId, snapshot: "b".repeat(64), entryId: "msg_fork" },
+      viewed: false,
+    });
+    expect((await humanState(f.home, f.agent.id)).batches.map((b) => b.status)).toEqual([
+      "reserved",
+    ]);
+    expect(
+      posts.mock.calls.filter(([url, init]) =>
+        new URL(String(url)).pathname === "/handoffs" ? init?.method === "POST" : false,
+      ),
+    ).toEqual([]);
+  });
+
+  /** A second checkout of the same repository, sharing the mapped association. */
+  async function secondCheckout(f: Awaited<ReturnType<typeof humanFixture>>) {
+    const other = await realpath(await mkdtemp(join(tmpdir(), "chi-owner-")));
+    homes.push(other);
+    execFileSync("git", ["init", "--quiet", other]);
+    execFileSync("git", [
+      "-C",
+      other,
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/fixture/repo.git",
+    ]);
+    const second = {
+      ...f.agent,
+      id: "second-checkout",
+      cwd: other,
+      labels: { ...f.manager.getAgent(f.agent.id)!.labels },
+    };
+    f.agents.push(second);
+    return () =>
+      f.connection.humanPromptOperation(second.id, {
+        action: "add",
+        dedupeKey: "second",
+        kind: "question",
+        priority: "blocking",
+        recipient: "github:owner",
+        text: "Which colour?",
+      });
+  }
+
+  it("a failed acquisition in one checkout leaves another checkout's authority warm", async () => {
+    const f = await humanFixture();
+    const addSecond = await secondCheckout(f);
+    await addSecond();
+    const entered = barrier();
+    const gate = barrier();
+    const login = f.authority.login;
+    let calls = 0;
+    f.authority.login = async () => {
+      if (calls++ === 0) {
+        entered.resolve();
+        await gate.promise;
+      }
+      return login();
+    };
+    const rejected = expect(f.add()).rejects.toThrow();
+    await entered.promise;
+    execFileSync("git", [
+      "-C",
+      f.home,
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/fixture/other.git",
+    ]);
+    gate.resolve();
+    await rejected;
+    const requests = vi.spyOn(f.authority, "request");
+    await addSecond();
+    expect(requests).not.toHaveBeenCalled();
+  });
+
+  it("a timed-out stalled admission evicts only its own checkout's authority", async () => {
+    const f = await humanFixture();
+    const addSecond = await secondCheckout(f);
+    await f.add();
+    await addSecond();
+    // Fresh write admission for the first checkout stalls until the deadline.
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const stalled = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    await vi.advanceTimersByTimeAsync(120_000);
+    await stalled;
+    vi.useRealTimers();
+    const requests = vi.spyOn(f.authority, "request");
+    await addSecond();
+    expect(requests).not.toHaveBeenCalled();
+    held.release();
   });
 
   it("a backend capability upgrade applies on the next boundary, not after the cache TTL", async () => {

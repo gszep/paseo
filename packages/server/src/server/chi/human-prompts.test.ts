@@ -936,6 +936,39 @@ describe("human prompt delivery receipts", () => {
     expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
   });
 
+  it("a stale not-found read never downgrades a batch a concurrent retry delivered", async () => {
+    const f = await fixture();
+    await f.add("q");
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(new Error("network down"));
+    vi.spyOn(f.transport, "read").mockRejectedValueOnce(new Error("unavailable"));
+    await f.flush(f.scope, { remind: false });
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("uncertain");
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stale = {
+      ...f.transport,
+      // Snapshot "absent" before the retry lands, then answer after it.
+      read: async () => {
+        entered();
+        await gate;
+        return null;
+      },
+    };
+    const reading = f.service.refresh(f.scope, stale);
+    await started;
+    await f.service.operate(f.scope, { action: "retry" }, f.transport, null, false);
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+    release();
+    await reading;
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+  });
+
   it("rejects a forged create response before recording delivered", async () => {
     const f = await fixture();
     await f.add("q");

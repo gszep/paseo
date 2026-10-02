@@ -664,10 +664,6 @@ export class ChiConnection {
     }
   }
 
-  private evictHumanPromptIdentity(cwd: string, entry: HumanPromptIdentityEntry) {
-    if (this.humanPromptIdentities.get(cwd) === entry) this.humanPromptIdentities.delete(cwd);
-  }
-
   private async humanPromptIdentity(cwd: string, fresh: boolean) {
     // login() checks the host credential on every access. Never cache logout,
     // credential rotation or the live Git remote behind the repository TTL.
@@ -696,28 +692,31 @@ export class ChiConnection {
         ready: false,
         cleared: false,
         pending: Promise.resolve().then(async () => {
-          const identity = await this.mentionIdentity(cwd);
-          next.ready = true;
-          next.expires = Date.now() + 30_000;
-          return identity;
+          try {
+            const identity = await this.mentionIdentity(cwd);
+            next.ready = true;
+            next.expires = Date.now() + 30_000;
+            return identity;
+          } catch (error) {
+            // Never cache a rejection, even when the failure cleared another scope.
+            if (this.humanPromptIdentities.get(cwd) === next)
+              this.humanPromptIdentities.delete(cwd);
+            throw error;
+          }
         }),
       };
       entry = next;
       this.humanPromptIdentities.set(cwd, entry);
     }
+    // A context mismatch means the credential changed, which the next access clears.
     const current = entry;
-    try {
-      const identity = await current.pending;
-      if (current.cleared) throw new Error("chi-human-prompt-context-changed");
-      this.requireMentionContext(identity, this.mentionContext(observed));
-      // A backend upgrade should become available on the next boundary.
-      if (!identity.humanPrompts) this.evictHumanPromptIdentity(cwd, current);
-      return identity;
-    } catch (error) {
-      // Only this failed acquisition is evicted; other checkouts keep their scopes.
-      this.evictHumanPromptIdentity(cwd, current);
-      throw error;
-    }
+    const identity = await current.pending;
+    if (current.cleared) throw new Error("chi-human-prompt-context-changed");
+    this.requireMentionContext(identity, this.mentionContext(observed));
+    // A backend upgrade should become available on the next boundary.
+    if (!identity.humanPrompts && this.humanPromptIdentities.get(cwd) === current)
+      this.humanPromptIdentities.delete(cwd);
+    return identity;
   }
 
   private humanPromptBinding(agentId: string) {
