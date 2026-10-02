@@ -53,6 +53,10 @@ function selectionKey(selection: Selection, target: Target) {
 
 function continuationErrorMessage(message: string): string {
   const descriptions: Record<string, string> = {
+    "chi-destination-required":
+      "Configure a Chi destination and repository mapping on this host before continuing. Restore the original endpoint for an existing transfer.",
+    "chi-destination-changed":
+      "The original Chi destination was removed or changed. Restore it before retrying this transfer.",
     "chi-transfer-preparation-required":
       "Prepare the transfer from the source agent in Paseo before continuing.",
     "continuation-pre-mutation-failed-start-new-attempt":

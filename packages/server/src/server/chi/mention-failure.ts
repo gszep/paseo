@@ -3,6 +3,8 @@ import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
 // Codes are produced by the host login/repository boundary and fixed Chi routes.
 const accessFailures = new Set([
+  "chi-destination-required",
+  "chi-destination-changed",
   "chi-github-login-required",
   "chi-identity-mismatch",
   "chi-repository-mismatch",

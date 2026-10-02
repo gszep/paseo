@@ -83,7 +83,6 @@ async function privateJson(path: string): Promise<unknown | null> {
 export async function readQuarantinedSessions(
   home: string,
   serverId: string,
-  endpoint: string,
 ): Promise<QuarantinedSession[]> {
   const directory = join(home, "chi", "receipts");
   try {
@@ -103,8 +102,7 @@ export async function readQuarantinedSessions(
       const identity = journal.identity;
       if (
         identity.destination.instanceId !== `${serverId}:opencode` ||
-        identity.destination.workspace.hostId !== serverId ||
-        identity.endpoint !== endpoint
+        identity.destination.workspace.hostId !== serverId
       )
         continue;
       const key = createHash("sha256")

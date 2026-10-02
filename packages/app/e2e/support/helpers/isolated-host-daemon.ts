@@ -215,10 +215,15 @@ export async function startIsolatedHostDaemon(
       closed = true;
       await killProcessTree(child);
       if (!options.preserveHome) {
-        await rm(paseoHome, { recursive: true, force: true });
+        await rm(paseoHome, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
       }
       if (publishedPackageRoot) {
-        await rm(publishedPackageRoot, { recursive: true, force: true });
+        await rm(publishedPackageRoot, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 100,
+        });
       }
     },
   };
