@@ -144,6 +144,9 @@ function Inbox({
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
   const [openSession, setOpenSession] = useState(true);
   const [scrolledDown, setScrolledDown] = useState(false);
+  useEffect(() => {
+    if (compact && selected) setScrolledDown(false);
+  }, [compact, selected]);
   const scroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) =>
       setScrolledDown(event.nativeEvent.contentOffset.y > 0),

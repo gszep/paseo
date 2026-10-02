@@ -7,7 +7,11 @@ import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
 import { InboxCoverageNotice } from "./inbox-coverage";
 import { inboxTransportQueryOptions, useInboxQuery } from "./inbox-query";
 import { useFetchQuery } from "@/data/query";
-import { ChiOperationError, type ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
+import {
+  ChiOperationError,
+  type ChiMentionContext,
+  type ChiHandoff,
+} from "@getpaseo/protocol/chi-mentions";
 import { createMentionScope, mentionQueryKey } from "./mention-context";
 import { useInbox, useInboxTransport } from "./use-inbox";
 import { queryClient } from "@/data/query-client";
@@ -30,6 +34,10 @@ vi.mock("@/components/ui/form-field", () => ({ FormTextInput: () => null }));
 vi.mock("./repository-filter", () => ({ RepositoryFilter: () => null }));
 vi.mock("./entry-navigation", () => ({ locateMention: vi.fn(), openMentionTarget: vi.fn() }));
 vi.mock("./reply-model", () => ({ openReplyForm: vi.fn() }));
+vi.mock("@/constants/layout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/constants/layout")>()),
+  useIsCompactFormFactor: () => true,
+}));
 vi.mock("react-native", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-native")>();
   return {
@@ -446,6 +454,95 @@ test("production screen connects empty-page continuation and scroll pause to the
     expect(calls.at(-1)).toBeUndefined();
   } finally {
     focusManager.setFocused(undefined);
+    vi.useRealTimers();
+  }
+});
+
+test("compact discussion unmount releases the list pause and returning to its top keeps refresh active", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const context: ChiMentionContext = {
+    actor: "github:alice",
+    deployment: "synthetic-deployment",
+    generation: "a".repeat(64),
+    repo: "*",
+  };
+  const handoff: ChiHandoff = {
+    schemaVersion: 1,
+    id: "compact",
+    repo: "github:o/a",
+    author: "github:bob",
+    recipient: context.actor,
+    text: "Compact fixture",
+    sources: [],
+    state: "open",
+    revision: 1,
+    events: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    readAt: "2026-01-01T00:00:00.000Z",
+  };
+  let reads = 0;
+  host.client = {
+    chiMentions: vi.fn(async ({ operation }) => {
+      if (operation.action === "scope") return { kind: "scope", actor: context.actor, context };
+      if (operation.action === "read") throw new Error("synthetic detail unavailable");
+      if (operation.action !== "inbox") throw new Error("unexpected operation");
+      reads++;
+      return {
+        kind: "inbox",
+        actor: context.actor,
+        context,
+        handoffs: [handoff],
+        nextCursor: null,
+        unreadCount: 0,
+      };
+    }),
+  };
+  const view = mount(
+    <QueryClientProvider client={queryClient}>
+      <SidebarMentionsRow />
+      <ChiInboxScreen />
+    </QueryClientProvider>,
+  );
+  try {
+    await vi.waitFor(() =>
+      expect(
+        view.container.querySelector('[aria-label="Discuss mention Compact fixture"]'),
+      ).not.toBeNull(),
+    );
+    const list = view.container.querySelector('[data-testid="chi-flat-inbox"]') as HTMLDivElement;
+    Object.defineProperty(list, "scrollTop", { value: 100, writable: true, configurable: true });
+    act(() => list.dispatchEvent(new Event("scroll", { bubbles: true })));
+    const before = reads;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001);
+    });
+    expect(reads).toBe(before);
+    act(() =>
+      (
+        view.container.querySelector(
+          '[aria-label="Discuss mention Compact fixture"]',
+        ) as HTMLElement
+      ).click(),
+    );
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[data-testid="chi-flat-inbox"]')).toBeNull(),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001);
+    });
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(before));
+    const back = [...view.container.querySelectorAll('[role="button"]')].find(
+      (element) => element.textContent === "Back to mentions",
+    ) as HTMLElement;
+    expect(back).toBeDefined();
+    act(() => back.click());
+    const returned = reads;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001);
+    });
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(returned));
+  } finally {
     vi.useRealTimers();
   }
 });
