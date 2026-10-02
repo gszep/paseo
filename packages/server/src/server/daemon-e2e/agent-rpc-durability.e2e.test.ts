@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
@@ -283,7 +284,9 @@ test("agent fetch RPCs tolerate an agent whose workspace project record is gone"
     await client?.close().catch(() => undefined);
     await daemon?.close().catch(() => undefined);
     for (const target of fixture.cleanupPaths) {
-      rmSync(target, { recursive: true, force: true });
+      // Match createTestPaseoDaemon's cleanup: Windows can retain filesystem
+      // handles briefly after daemon shutdown. Retry only transient OS errors.
+      await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   }
 });
@@ -331,7 +334,8 @@ test("history search filters before pagination and keeps newest matches first", 
   } finally {
     await client?.close().catch(() => undefined);
     await daemon?.close().catch(() => undefined);
-    for (const target of fixture.cleanupPaths) rmSync(target, { recursive: true, force: true });
+    for (const target of fixture.cleanupPaths)
+      await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 
