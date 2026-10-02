@@ -766,7 +766,9 @@ export class AgentManager {
   private readonly admissionTickets = new Set<symbol>();
 
   constructor(options: AgentManagerOptions) {
-    this.chi = options.chi ? new ChiConnection(this, options.chi) : null;
+    this.chi = options.chi
+      ? new ChiConnection(this, { ...options.chi, logger: options.logger })
+      : null;
     this.pluginLifecycle = options.pluginLifecycle;
     this.idFactory = options.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;

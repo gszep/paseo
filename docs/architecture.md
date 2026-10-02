@@ -346,8 +346,14 @@ cursor and answers independently. Reads run outside the dispatch lock, and queue
 sends precede reads. A lost create response stays uncertain until an exact read
 proves delivery; recovery does not require a second send. Cached answers exposed by the
 bounded reminder get exact ACL verification without polling for corrections. The
-foreground step has a two-second deadline; expiration withholds the reminder and
-prevents subsequent dispatch while the bounded reader continues for the next turn.
+foreground wait has a two-second budget; expiration withholds the reminder while
+one detached boundary per agent continues dispatch and reconciliation across turns.
+Its two-minute deadline stops further admission; an in-flight exact read can still
+persist progress. Boundary timeouts and aborts log fixed reason codes, never content
+or credentials. Native turn pins use already-reconciled settled assistant IDs, so
+long-session history reads are absent from this path. Repository authority is cached
+for 30 seconds, with live credential/mapping checks and fresh write admission;
+context loss and configuration reload clear it, including delayed acquisitions.
 Explicit list/resolve may read the full bounded receipt.
 Dispatch requires the backend's scanner capability; recipient controls require its
 optional handoff capability. Old clients still parse ordinary discussion.

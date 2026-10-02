@@ -15,6 +15,9 @@ import { classifyMentionFailure } from "./mention-failure.js";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
 import type { MentionIdentity } from "./mentions.js";
+import { OpenCodeV2AgentClient } from "../agent/providers/opencode/v2/agent.js";
+import { V2Harness } from "../agent/providers/opencode/test-utils/v2-harness.js";
+import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
   encodeHumanAnswers,
   readHumanPrompts,
@@ -30,6 +33,7 @@ function barrier() {
   return { promise, resolve };
 }
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
 });
@@ -1670,7 +1674,7 @@ describe("automatic sync destinations", () => {
       }> = async () => ({ verdict: "clean" }),
       provenance: Pick<
         ChiConnectionOptions,
-        "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents"
+        "provenance" | "provenanceRemover" | "provenanceScanner" | "listStoredAgents" | "logger"
       > = noopProvenance,
     ) =>
       new ChiConnection(f.manager, {
@@ -1725,6 +1729,7 @@ describe("automatic sync destinations", () => {
       pendingPermissions: new Map(),
     });
     f.manager.getAgent = (id) => f.agents.find((candidate) => candidate.id === id)!;
+    f.manager.listAgents = () => f.agents;
     const remote = new Map<string, ChiHandoff>();
     const request = f.authority.request;
     let deny = false;
@@ -1766,7 +1771,11 @@ describe("automatic sync destinations", () => {
       afterRead?.();
       return result;
     };
-    const connection = f.connect();
+    const logger = { warn: vi.fn() };
+    const connection = f.connect(undefined, undefined, {
+      logger,
+      provenance: async () => ({ attempted: true, created: false, reason: "test-skip", ref: "" }),
+    });
     await connection.capture(agent.id);
     const add = () =>
       connection.humanPromptOperation(agent.id, {
@@ -1783,6 +1792,7 @@ describe("automatic sync destinations", () => {
       remote,
       connection,
       add,
+      logger,
       deny: (value = true) => {
         deny = value;
       },
@@ -2033,21 +2043,471 @@ describe("automatic sync destinations", () => {
     });
   });
 
-  it("pre-turn prompt reconciliation has a deadline and cannot send after it expires", async () => {
+  it("a 700-message session with slow listing and authority dispatches by the third boundary", async () => {
+    const f = await humanFixture();
+    const harness = new V2Harness();
+    harness.info.id = "ses_fork";
+    harness.history.push(
+      ...Array.from({ length: 700 }, (_, index) => ({
+        id: `msg_${index}`,
+        type: "assistant" as const,
+        agent: "build",
+        model: { providerID: "test", id: "model" },
+        time: { created: index, completed: index + 1 },
+        content: [{ type: "text" as const, text: "x".repeat(3200) }],
+      })),
+    );
+    const session = await new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    }).resumeSession({ provider: "opencode", sessionId: "ses_fork", metadata: { cwd: f.home } });
+    f.manager.getAgent(f.agent.id)!.session = session;
+    const list = vi
+      .spyOn(harness.api.message, "list")
+      .mockImplementation(() => new Promise(() => undefined));
+    const entered = barrier();
+    const gate = barrier();
+    try {
+      // Adding also must not load native history.
+      const adding = f.add();
+      expect(list).not.toHaveBeenCalled();
+      await adding;
+      const login = f.authority.login;
+      const slowLogin = vi.fn(async () => {
+        entered.resolve();
+        await gate.promise;
+        return login();
+      });
+      f.authority.login = slowLogin;
+      const first = f.connection.humanPromptBoundary(f.agent.id);
+      await entered.promise;
+      expect(await first).toBeNull();
+      expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+      expect(slowLogin).toHaveBeenCalledTimes(1);
+      expect(f.logger.warn.mock.calls).toEqual([
+        [
+          { agentId: f.agent.id, reason: "foreground-budget" },
+          "Chi human prompt boundary wait timed out",
+        ],
+        [
+          { agentId: f.agent.id, reason: "foreground-budget" },
+          "Chi human prompt boundary wait timed out",
+        ],
+      ]);
+      gate.resolve();
+      await f.connection.humanPromptBoundary(f.agent.id);
+      expect(f.remote.size).toBe(1);
+      expect(readHumanPrompts([...f.remote.values()][0]!.text)?.turnId).toBe("msg_699");
+      expect(list).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve();
+      await f.connection["humanPromptBoundaries"].get(f.agent.id)?.pending;
+      await session.close();
+    }
+  });
+
+  it("capture failure still dispatches against the last settled source", async () => {
     const f = await humanFixture();
     await f.add();
-    let release!: () => void;
+    vi.spyOn(f.connection, "capture").mockRejectedValue(new Error("capture unavailable"));
+    const boundary = vi.spyOn(f.connection, "humanPromptBoundary");
+    f.connection.afterTurn(f.agent.id);
+    await vi.waitFor(() => expect(boundary).toHaveBeenCalledWith(f.agent.id, false));
+    await boundary.mock.results[0]!.value;
+    expect([...f.remote.values()][0]!.sources).toEqual([
+      { kind: "neutral", id: f.sourceId, snapshot: "b".repeat(64), entryId: "msg_fork" },
+    ]);
+  });
+
+  it.each(["background-timeout", "stopped", "destinations-changed"])(
+    "logs %s without secrets and aborts detached admission",
+    async (reason) => {
+      const f = await humanFixture();
+      await f.add();
+      const gate = barrier();
+      const entered = barrier();
+      const request = f.authority.request;
+      f.authority.request = async (url, init) => {
+        if (new URL(String(url)).pathname === "/auth/session") {
+          entered.resolve();
+          await gate.promise;
+        }
+        return request(url, init);
+      };
+      // Expire the existing authority, without changing token/receipt identity.
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+      await entered.promise;
+      const authority = f.connection["humanPromptIdentities"].get(f.home)!.pending;
+      if (reason === "background-timeout") await vi.advanceTimersByTimeAsync(120_000);
+      else if (reason === "stopped") f.connection.stopHumanPromptSweep();
+      else {
+        vi.spyOn(f.connection, "capture").mockRejectedValue(new Error("PRIVATE capture"));
+        await f.connection.onDestinationsChanged();
+      }
+      expect(await pending).toBeNull();
+      expect(f.logger.warn.mock.calls).toEqual([
+        [{ agentId: f.agent.id, reason }, "Chi human prompt boundary aborted"],
+      ]);
+      gate.resolve();
+      await authority.catch(() => undefined);
+      vi.useRealTimers();
+      expect(f.remote.size).toBe(0);
+    },
+  );
+
+  it("a recipient who starts viewing during slow write authorization suppresses detached dispatch", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const gate = barrier();
+    const entered = barrier();
+    const request = f.authority.request;
+    f.authority.request = async (url, init) => {
+      if (new URL(String(url)).pathname === "/auth/session") {
+        entered.resolve();
+        await gate.promise;
+      }
+      return request(url, init);
+    };
+    const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+    await entered.promise;
+    f.connection.isHumanPromptViewed = () => true;
+    gate.resolve();
+    await pending;
+    expect(f.remote.size).toBe(0);
+  });
+
+  it.each([
+    ["AbortError", "request-aborted"],
+    ["TimeoutError", "request-timeout"],
+    ["Error", "boundary-failed"],
+  ])("logs a %s boundary failure without serializing the error", async (name, reason) => {
+    const f = await humanFixture();
+    await f.add();
+    const error = new Error("PRIVATE prompt, credential and backend response");
+    error.name = name!;
+    vi.spyOn(f.connection.humanPrompts, "boundary").mockRejectedValue(error);
+    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+    expect(f.logger.warn.mock.calls).toEqual([
+      [{ agentId: f.agent.id, reason }, "Chi human prompt boundary withheld"],
+    ]);
+  });
+
+  it("a timed-out acquisition cannot strand later turns or clear their recovered authority", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const gate = barrier();
+    const entered = barrier();
+    const request = f.authority.request;
+    f.authority.request = async (url, init) => {
+      if (new URL(String(url)).pathname === "/auth/session") {
+        entered.resolve();
+        await gate.promise;
+      }
+      return request(url, init);
+    };
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const first = f.connection.humanPromptBoundary(f.agent.id, false);
+    await entered.promise;
+    const abandoned = f.connection["humanPromptIdentities"].get(f.home)!.pending;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(await first).toBeNull();
+    f.authority.request = request;
+    try {
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      expect(f.remote.size).toBe(1);
+    } finally {
+      gate.resolve();
+    }
+    await abandoned;
+    vi.useRealTimers();
+    const recovered = vi.spyOn(f.authority, "request");
+    await f.add();
+    expect(recovered).not.toHaveBeenCalled();
+  });
+
+  it("reuses warm human authority, expires it, and clears it on logout and handoff denial", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const request = vi.spyOn(f.authority, "request");
+    await f.add();
+    expect(request).not.toHaveBeenCalled();
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 30_001);
+    await f.add();
+    expect(request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/auth/session",
+      "/repos",
+    ]);
     const login = f.authority.login;
     f.authority.login = async () => {
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      throw new Error("chi-github-login-required");
+    };
+    await expect(f.add()).rejects.toThrow("chi-github-login-required");
+    f.authority.login = login;
+    request.mockClear();
+    await f.add();
+    expect(request).toHaveBeenCalledTimes(2);
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    f.deny();
+    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
+    f.deny(false);
+    request.mockClear();
+    await f.add();
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["login", "repository"])(
+    "a delayed %s authority cannot repopulate a cache cleared by a mapping reload",
+    async (phase) => {
+      const f = await humanFixture();
+      const gate = barrier();
+      const entered = barrier();
+      const request = f.authority.request;
+      f.authority.request = async (url, init) => {
+        if (phase === "repository" && new URL(String(url)).pathname === "/auth/session") {
+          entered.resolve();
+          await gate.promise;
+        }
+        return request(url, init);
+      };
+      const login = f.authority.login;
+      if (phase === "login")
+        f.authority.login = async () => {
+          entered.resolve();
+          await gate.promise;
+          return login();
+        };
+      const pending = f.add();
+      const rejection = expect(pending).rejects.toThrow("context-changed");
+      await entered.promise;
+      vi.spyOn(f.connection, "capture").mockRejectedValue(new Error("PRIVATE capture"));
+      await f.connection.onDestinationsChanged();
+      gate.resolve();
+      await rejection;
+      f.authority.request = request;
+      const reload = vi.spyOn(f.authority, "request");
+      await f.add();
+      expect(reload).toHaveBeenCalledTimes(2);
+      expect(f.remote.size).toBe(0);
+    },
+  );
+
+  it("a mapping paused during authority acquisition cannot persist a new local item", async () => {
+    const f = await humanFixture();
+    const gate = barrier();
+    const entered = barrier();
+    const login = f.authority.login;
+    f.authority.login = async () => {
+      entered.resolve();
+      await gate.promise;
       return login();
     };
-    expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
-    release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(f.remote.size).toBe(0);
+    const pending = f.add();
+    const rejected = expect(pending).rejects.toThrow();
+    await entered.promise;
+    const agent = f.manager.getAgent(f.agent.id)!;
+    agent.labels["chi.native"] = JSON.stringify({
+      ...JSON.parse(agent.labels["chi.native"]!),
+      paused: true,
+    });
+    gate.resolve();
+    await rejected;
+    expect(await f.connection.humanPrompts.hasItems(f.agent.id)).toBe(false);
+  });
+
+  it("a reminted session token refreshes cached authority without changing receipt ownership", async () => {
+    const f = await humanFixture();
+    f.authority.login = async () => ({
+      sessionToken: "fixture",
+      chiUserId: "github:owner",
+      credentialGeneration: "stable",
+    });
+    await f.add();
+    const request = vi.spyOn(f.authority, "request");
+    f.authority.login = async () => ({
+      sessionToken: "reminted",
+      chiUserId: "github:owner",
+      credentialGeneration: "stable",
+    });
+    await f.add();
+    expect(
+      request.mock.calls.map(([url, init]) => [new URL(String(url)).pathname, init?.headers]),
+    ).toEqual([
+      ["/auth/session", { authorization: "Bearer reminted" }],
+      ["/repos", { authorization: "Bearer reminted" }],
+    ]);
+  });
+
+  it.each(["session", "paused", "remote", "credential", "capture-progress"])(
+    "slow admission rechecks %s without treating capture progress as authority loss",
+    async (change) => {
+      const f = await humanFixture();
+      await f.add();
+      const gate = barrier();
+      const entered = barrier();
+      const login = f.authority.login;
+      f.authority.login = async () => {
+        entered.resolve();
+        await gate.promise;
+        return login();
+      };
+      const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+      await entered.promise;
+      const agent = f.manager.getAgent(f.agent.id)!;
+      if (change === "session")
+        agent.persistence = { provider: "opencode", sessionId: "ses_other" };
+      if (change === "paused" || change === "capture-progress") {
+        const association = JSON.parse(agent.labels["chi.native"]!);
+        agent.labels["chi.native"] = JSON.stringify({
+          ...association,
+          ...(change === "paused"
+            ? { paused: true }
+            : { head: "c".repeat(64), error: "evidence-http-503", capturePending: true }),
+        });
+      }
+      if (change === "remote")
+        execFileSync("git", [
+          "-C",
+          f.home,
+          "remote",
+          "set-url",
+          "origin",
+          "https://github.com/fixture/other.git",
+        ]);
+      if (change === "credential")
+        f.authority.login = async () => ({
+          sessionToken: "ROTATED-PRIVATE",
+          chiUserId: "github:owner",
+        });
+      gate.resolve();
+      await pending;
+      expect(f.remote.size).toBe(change === "capture-progress" ? 1 : 0);
+      expect(JSON.stringify(f.logger.warn.mock.calls)).not.toContain("ROTATED-PRIVATE");
+    },
+  );
+
+  it("coalesces concurrent authority refreshes without invalidating another same-workspace caller", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const accesses = await Promise.all([
+      f.connection["humanPromptAccess"](f.agent.id),
+      f.connection["humanPromptAccess"](f.agent.id),
+    ]);
+    const gate = barrier();
+    const entered = barrier();
+    const request = f.authority.request;
+    const reads = vi.fn(
+      async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (new URL(String(url)).pathname === "/auth/session") {
+          entered.resolve();
+          await gate.promise;
+        }
+        return request(url, init);
+      },
+    );
+    f.authority.request = reads;
+    const first = accesses[0]!.check(true);
+    await entered.promise;
+    // Hold the remote read until both callers have acquired the same entry.
+    const login = vi.spyOn(f.authority, "login");
+    const second = accesses[1]!.check(true);
+    await vi.waitFor(() => expect(login).toHaveBeenCalled());
+    gate.resolve();
+    await Promise.all([first, second]);
+    expect(reads.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/auth/session",
+      "/repos",
+    ]);
+  });
+
+  it.each([2000, 120_000])(
+    "slow answer reads persist across a %i ms budget and are exposed on the next boundary",
+    async (budget) => {
+      const f = await humanFixture();
+      await f.add();
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      const handoff = [...f.remote.values()][0]!;
+      handoff.replies = [
+        {
+          id: "3fad06da-0902-405e-9476-ac1d8fdd9480",
+          actor: "github:owner",
+          revision: 2,
+          at: "now",
+          text: encodeHumanAnswers([
+            { id: readHumanPrompts(handoff.text)!.items[0]!.id, text: "Blue" },
+          ]),
+        },
+      ];
+      const gate = barrier();
+      const entered = barrier();
+      const request = f.authority.request;
+      f.authority.request = async (url, init) => {
+        if (new URL(String(url)).pathname === "/handoffs") {
+          entered.resolve();
+          await gate.promise;
+        }
+        return request(url, init);
+      };
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const foreground = f.connection.humanPromptBoundary(f.agent.id);
+      await entered.promise;
+      const worker = f.connection["humanPromptBoundaries"].get(f.agent.id)!.pending;
+      await vi.advanceTimersByTimeAsync(budget);
+      expect(await foreground).toBeNull();
+      gate.resolve();
+      await worker;
+      vi.useRealTimers();
+      const saved = JSON.parse(
+        await readFile(
+          join(
+            f.home,
+            "chi",
+            "human-prompts",
+            createHash("sha256").update(f.agent.id).digest("hex") + ".json",
+          ),
+          "utf8",
+        ),
+      );
+      expect(saved.items[0].answer.text).toBe("Blue");
+      const reminder = await f.connection.humanPromptBoundary(f.agent.id);
+      expect(reminder).toContain("Blue");
+      expect(reminder).toContain("untrusted human-written data");
+      expect(f.remote.size).toBe(1);
+    },
+  );
+
+  it("drains a boundary queued during slow reconciliation without requiring another turn", async () => {
+    const f = await humanFixture();
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    const gate = barrier();
+    const entered = barrier();
+    const request = f.authority.request;
+    f.authority.request = async (url, init) => {
+      if (new URL(String(url)).pathname === "/handoffs" && init?.method !== "POST") {
+        entered.resolve();
+        await gate.promise;
+      }
+      return request(url, init);
+    };
+    const first = f.connection.humanPromptBoundary(f.agent.id, false);
+    await entered.promise;
+    await f.connection.humanPromptOperation(f.agent.id, {
+      action: "add",
+      dedupeKey: "later",
+      kind: "question",
+      priority: "blocking",
+      recipient: "github:other",
+      text: "Queued in the next turn",
+    });
+    const queued = f.connection.humanPromptBoundary(f.agent.id, false);
+    gate.resolve();
+    await Promise.all([first, queued]);
+    await vi.waitFor(() => expect(f.remote.size).toBe(2));
+    await f.connection["humanPromptBoundaries"].get(f.agent.id)?.pending;
   });
 
   it("uses one authority bracket rather than one per handoff read at a boundary", async () => {
@@ -2067,11 +2527,11 @@ describe("automatic sync destinations", () => {
     await f.connection.humanPromptBoundary(f.agent.id, false);
     expect(
       request.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/auth/session"),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
     expect(
       request.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/handoffs"),
     ).toHaveLength(4);
-    expect(request.mock.calls).toHaveLength(8);
+    expect(request.mock.calls).toHaveLength(4);
   });
 
   it("human question routing resumes only its pending owner form with exact multi-select answers", async () => {

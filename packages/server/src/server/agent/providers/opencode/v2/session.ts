@@ -304,8 +304,13 @@ export class OpenCodeV2Session implements AgentSession {
     return this.turns.startTurn(prompt, options);
   }
   async humanPromptTurnId() {
-    const page = await this.client.message.list({ sessionID: this.id, order: "desc", limit: 1 });
-    return page.data[0]?.id ?? null;
+    // Reconciliation already owns this snapshot. A native history request here
+    // can take longer than the entire foreground human-prompt budget.
+    return (
+      this.history.findLast(
+        (message) => message.type === "assistant" && message.time.completed !== undefined,
+      )?.id ?? null
+    );
   }
   steerActiveTurn(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult> {
     return this.turns.steerActiveTurn(prompt, options);

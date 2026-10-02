@@ -176,28 +176,41 @@ describe("human prompt delivery receipts", () => {
       },
     ];
     const reads: string[] = [];
-    const slow = {
-      ...f.transport,
-      read: async (id: string) => {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        reads.push(id);
-        return f.transport.read(id);
-      },
-    };
     await f.add("new", { recipient: "github:new" });
     const reminders: string[] = [];
     for (let turn = 0; turn < 4; turn++) {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const slow = {
+        ...f.transport,
+        read: async (id: string) => {
+          entered();
+          await gate;
+          reads.push(id);
+          return f.transport.read(id);
+        },
+      };
       const controller = new AbortController();
       const expired = new Promise<null>((resolve) =>
         controller.signal.addEventListener("abort", () => resolve(null), { once: true }),
       );
-      const timer = setTimeout(() => controller.abort(), 2000);
       const service = f.restart();
       const boundary = service.boundary(
         f.scope,
         { ...slow, signal: controller.signal },
         { source: f.source, viewed: false },
       );
+      // Expire two foreground waits while a read is in flight, then let the
+      // following turns expose the durable result. No disk-speed/timer race.
+      await started;
+      if (turn < 2) controller.abort();
+      release();
       const reminder = await Promise.race([boundary, expired]);
       if (reminder) {
         reminders.push(reminder);
@@ -206,7 +219,6 @@ describe("human prompt delivery receipts", () => {
       // The foreground may leave, but its bounded reader finishes and commits.
       await boundary;
       await service["refresh"](f.scope, slow);
-      clearTimeout(timer);
     }
     expect(f.attempts).toHaveLength(11);
     expect([...f.remote.values()].some((h) => h.recipient === "github:new")).toBe(true);
