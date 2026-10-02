@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, execSync, spawnSync } from "child_process";
 import {
   existsSync,
@@ -242,6 +242,26 @@ function commitFile(cwd: string, path: string, content: string, message: string)
   execFileSync("git", ["add", path], { cwd });
   execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", message], { cwd });
 }
+
+let gitTemplateDir: string;
+beforeEach(() => {
+  // Git 2.55 can detach auto-maintenance even for a tiny local push. Copy
+  // foreground ownership into every fixture (including bare remotes/clones):
+  // receive-pack strips GIT_CONFIG_COUNT, so a command-level override is lost.
+  gitTemplateDir = mkdtempSync(join(tmpdir(), "checkout-git-template-"));
+  writeFileSync(
+    join(gitTemplateDir, "config"),
+    "[maintenance]\n\tautoDetach = false\n[gc]\n\tautoDetach = false\n",
+  );
+  vi.stubEnv("GIT_TEMPLATE_DIR", gitTemplateDir);
+});
+afterEach(() => {
+  try {
+    rmSync(gitTemplateDir, { recursive: true, force: true });
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 describe("checkout git utilities", () => {
   let tempDir: string;
