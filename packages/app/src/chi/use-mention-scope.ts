@@ -2,7 +2,8 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { focusManager, onlineManager } from "@tanstack/react-query";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { queryClient } from "@/data/query-client";
-import { createMentionScope, type MentionScope } from "./mention-context";
+import { createMentionScope, reconcileMentionScope, type MentionScope } from "./mention-context";
+import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { clearHostMentionSelection } from "./mention-selection";
 import { useEntryTarget } from "./entry-target";
 import { inboxAuthority } from "./inbox-identity";
@@ -43,6 +44,14 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
 export function loseHostMentionScopes(host: string) {
   for (const [key, entry] of scopes)
     if (JSON.parse(key)[0] === host) entry.scope.lose("chi-host-disconnected");
+}
+export function inboxContextObserver(host: string) {
+  const key = JSON.stringify([host, ""]);
+  const entry = scopes.get(key);
+  const generation = entry?.scope.getState().generation;
+  return (context?: ChiMentionContext) => {
+    if (entry && scopes.get(key) === entry) reconcileMentionScope(entry.scope, context, generation);
+  };
 }
 export function useMentionScope(
   host: string,

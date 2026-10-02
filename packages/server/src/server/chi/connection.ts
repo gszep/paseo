@@ -43,7 +43,7 @@ import {
   readGitHubCliToken,
   type AuthState,
 } from "@henkaku-center/chi-native/auth";
-import { DEFAULT_BACKEND_URL, parseGitHubRemote } from "@henkaku-center/chi-native/repository";
+import { parseGitHubRemote } from "@henkaku-center/chi-native/repository";
 import {
   append,
   boundedText,
@@ -72,6 +72,7 @@ import {
   parseChiDestinations,
   resolveChiDestination,
   resolveChiDestinationForRepo,
+  destinationForEndpoint,
   type ChiDestinationsConfig,
   type ResolvedChiDestination,
 } from "./destinations.js";
@@ -101,8 +102,7 @@ const associationSchema = z.object({
   paused: z.boolean().optional(),
   // Durable sync-needed marker: a capture is outstanding across restarts.
   capturePending: z.boolean().optional(),
-  // True for associations created by the explicit canonical-transfer path on an
-  // unmapped repository; they keep legacy default-deployment capture.
+  // Historical explicit Share/Continue labels used private visibility.
   explicit: z.boolean().optional(),
   // Hidden provenance ref written after a settled turn in a mapped workspace.
   provenanceRef: z.string().optional(),
@@ -233,7 +233,7 @@ export interface ChiAuthority {
   login(): Promise<AuthState & { credentialGeneration?: string }>;
   invalidate(): void;
 }
-function createDeployment(endpoint = DEFAULT_BACKEND_URL): ChiAuthority {
+function createDeployment(endpoint: string): ChiAuthority {
   return {
     endpoint,
     request: fetch,
@@ -287,11 +287,7 @@ export class ChiConnection {
     { sessionId: string; cwd: string; workspaceId: string; labels: string }
   >();
   quarantinedSessions() {
-    return readQuarantinedSessions(
-      this.options.home,
-      this.options.serverId,
-      this.authority.endpoint,
-    );
+    return readQuarantinedSessions(this.options.home, this.options.serverId);
   }
   async assertImportAllowed(input: {
     provider: string;
@@ -327,7 +323,9 @@ export class ChiConnection {
   async assertCurrent(agent: { cwd: string; labels: Record<string, string> }): Promise<void> {
     const encoded = agent.labels[label];
     if (!encoded) return;
-    const association = associationSchema.parse(JSON.parse(encoded));
+    const stored = associationSchema.parse(JSON.parse(encoded));
+    if (!stored.conversationId && !stored.blocked) return;
+    const association = this.requireAssociation(stored);
     if (association.blocked) throw new Error("chi-conversation-pending");
     if (!association.conversationId) return;
     const endpoint = this.endpointFor(association.endpoint);
@@ -357,6 +355,7 @@ export class ChiConnection {
       if (this.manager.isChiAgentBusy(agentId)) throw new Error("chi-session-busy");
       let association = this.association(agent);
       if (!association) association = await this.share(agentId);
+      association = this.requireAssociation(await this.reconcileAssociation(agentId, association));
       const endpoint = this.endpointFor(association.endpoint);
       const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
       if (!sameActor(auth.chiUserId, association.actor)) throw new Error("chi-identity-mismatch");
@@ -402,9 +401,10 @@ export class ChiConnection {
       const agent = this.manager.getAgent(agentId);
       const association = agent && this.association(agent);
       if (!agent || !association?.conversationId) throw new Error("chi-conversation-required");
-      const auth = await this.authorize(association.repo, agent.cwd);
+      const endpoint = this.requireAssociation(association).endpoint!;
+      const auth = await this.authorize(association.repo, agent.cwd, this.authorityFor(endpoint));
       if (!sameActor(auth.chiUserId, association.actor)) throw new Error("chi-identity-mismatch");
-      const client = this.client(association.repo, auth.sessionToken);
+      const client = this.client(association.repo, auth.sessionToken, endpoint);
       let result = await client.get({
         id: association.conversationId,
         ...(association.reserve ? { transferId: association.reserve.transferId } : {}),
@@ -433,7 +433,12 @@ export class ChiConnection {
   private readonly pending = new Map<string, Promise<Association>>();
   private readonly dirty = new Set<string>();
   private readonly continuing = new Set<string>();
-  private readonly authority: ChiAuthority;
+  // Mention receipts are deployment-bound. Never retarget this transport on reload.
+  private readonly primaryEndpoint: string | null;
+  private get authority(): ChiAuthority {
+    if (!this.primaryEndpoint) throw new Error("chi-destination-required");
+    return this.authorityFor(this.endpointFor(this.primaryEndpoint));
+  }
   private readonly scanCapture: (
     full: LocalScanInput,
     minimised: LocalScanInput,
@@ -455,14 +460,19 @@ export class ChiConnection {
     private readonly manager: AgentManager,
     private readonly options: ChiConnectionOptions,
   ) {
-    this.authority = options.authority ?? createDeployment();
+    const endpoints = [
+      ...new Set(Object.values(this.chiConfig()?.destinations ?? {}).map((d) => d.endpoint)),
+    ];
+    this.primaryEndpoint = endpoints.length === 1 ? endpoints[0]! : null;
     this.scanCapture =
       options.scanCapture ?? ((full, minimised) => scanCaptureVerdict(full, minimised));
     this.provenanceWriter = options.provenance ?? writeProvenance;
     this.provenanceRemover = options.provenanceRemover ?? removeProvenance;
-    this.authorityByEndpoint.set(this.authority.endpoint, this.authority);
+    const getAuthority = () => this.authority;
     this.mentions = new ChiMentions(options.home, {
-      endpoint: this.authority.endpoint,
+      get endpoint() {
+        return getAuthority().endpoint;
+      },
       request: async (url, init) => {
         const response = await this.authority.request(url, init);
         if ([401, 403, 404].includes(response.status)) {
@@ -477,7 +487,9 @@ export class ChiConnection {
     // Human prompts classify their own failures: a 404 for an unconfirmed batch
     // proves a lost create never landed and is not an access loss.
     this.humanPromptMentions = new ChiMentions(options.home, {
-      endpoint: this.authority.endpoint,
+      get endpoint() {
+        return getAuthority().endpoint;
+      },
       request: (url, init) => this.authority.request(url, init),
     });
     this.humanPrompts = new HumanPrompts(options.home);
@@ -489,10 +501,22 @@ export class ChiConnection {
 
   /** One authority per endpoint; an injected fixture authority overrides them all. */
   private authorityFor(endpoint: string): ChiAuthority {
-    if (this.options.authority) return this.options.authority;
+    this.endpointFor(endpoint);
     const existing = this.authorityByEndpoint.get(endpoint);
     if (existing) return existing;
-    const created = createDeployment(endpoint);
+    const transport = this.options.authority ?? createDeployment(endpoint);
+    const created: ChiAuthority = {
+      endpoint,
+      invalidate: () => transport.invalidate(),
+      login: () => {
+        this.endpointFor(endpoint);
+        return transport.login();
+      },
+      request: (url, init) => {
+        this.endpointFor(endpoint);
+        return transport.request(url, init);
+      },
+    };
     this.authorityByEndpoint.set(endpoint, created);
     return created;
   }
@@ -521,18 +545,16 @@ export class ChiConnection {
   }
 
   private endpointFor(pinned?: string): string {
-    if (pinned) return pinned;
-    // A destination-less association (legacy label or explicit canonical
-    // transfer) stays on the default deployment; a live remap must never
-    // retarget a canonical check, matching the migration path.
-    return DEFAULT_BACKEND_URL;
+    if (!pinned || !destinationForEndpoint(this.chiConfig(), pinned))
+      throw new Error("chi-destination-required");
+    return pinned;
   }
 
   /** Without a scope the loss is host-wide; otherwise only that repository or checkout. */
   private loseMentionAuthority(scope?: { repo?: string; cwd?: string }) {
     this.participants.clear();
     this.clearHumanPromptAuthority(scope);
-    this.authority.invalidate();
+    for (const authority of this.authorityByEndpoint.values()) authority.invalidate();
   }
 
   private async mentionIdentity(cwd: string, directoryOnly = false): Promise<MentionIdentity> {
@@ -545,6 +567,10 @@ export class ChiConnection {
       const parsed = parseGitHubRemote(remote.stdout);
       if (!parsed) throw new Error("chi-repository-mismatch");
       repo = `github:${parsed.owner}/${parsed.repo}`.toLowerCase();
+      const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
+      if (!resolved) throw new Error("chi-destination-required");
+      if (resolved.endpoint !== this.authority.endpoint)
+        throw new Error("chi-mentions-unavailable");
       const auth = directoryOnly ? await this.authority.login() : await this.authorize(repo, cwd);
       return {
         repo,
@@ -583,7 +609,8 @@ export class ChiConnection {
     }
     // A peer destination cannot deliver mentions; fail before preparing one that
     // could never be reconciled.
-    if (association.endpoint && association.endpoint !== this.authority.endpoint)
+    association = this.requireAssociation(await this.reconcileAssociation(agentId, association));
+    if (association.endpoint !== this.authority.endpoint)
       throw new Error("chi-mentions-unavailable");
     if (!association.actor) {
       // An auto-association may be created without an actor; bind it now rather
@@ -730,7 +757,7 @@ export class ChiConnection {
       !association ||
       association.paused ||
       association.blocked ||
-      mapping.endpoint !== this.authority.endpoint ||
+      mapping.endpoint !== this.primaryEndpoint ||
       this.endpointFor(association.endpoint) !== mapping.endpoint
     )
       throw new Error("chi-human-prompt-mapping-required");
@@ -1334,7 +1361,8 @@ export class ChiConnection {
     if (!parsed) throw new Error("chi-repository-mismatch");
     const repo = (selectedRepo ?? `github:${parsed.owner}/${parsed.repo}`).toLowerCase();
     const resolved = resolveChiDestinationForRepo(this.chiConfig(), repo);
-    const endpoint = resolved?.endpoint ?? DEFAULT_BACKEND_URL;
+    if (!resolved) throw new Error("chi-destination-required");
+    const endpoint = resolved.endpoint;
     const auth = await this.authorize(repo, agent.cwd, this.authorityFor(endpoint));
     const encoded = await this.manager.updateAgentLabel(agentId, label, (current) => {
       if (current) {
@@ -1343,22 +1371,15 @@ export class ChiConnection {
         if (!sameActor(previous.actor, auth.chiUserId)) throw new Error("chi-identity-mismatch");
         return current;
       }
-      // Explicit canonical-transfer association. A mapped repository pins the
-      // configured destination; an unmapped one keeps the legacy default
-      // deployment and is never auto-created.
       return JSON.stringify({
         repo,
         actor: auth.chiUserId,
         sourceId: null,
         head: null,
         error: null,
-        ...(resolved
-          ? {
-              destination: resolved.destinationId,
-              endpoint: resolved.endpoint,
-              audience: resolved.audience,
-            }
-          : { explicit: true, endpoint }),
+        destination: resolved.destinationId,
+        endpoint: resolved.endpoint,
+        audience: resolved.audience,
       });
     });
     const previous = associationSchema.parse(JSON.parse(encoded));
@@ -1553,7 +1574,7 @@ export class ChiConnection {
         });
         // Mentions stay on the primary deployment; a peer destination's mentions
         // are out of P1 scope and are never cross-posted.
-        if (endpoint === this.authority.endpoint) {
+        if (endpoint === this.primaryEndpoint) {
           await this.mentions.captured({
             agentId,
             identity: {
@@ -1596,45 +1617,58 @@ export class ChiConnection {
   /**
    * Bind a pre-P1 association to its configured destination, or pause it when the
    * repository no longer maps or the pinned endpoint changed. Pausing never moves
-   * data and never blocks prompts.
+   * data. Canonical continuation prompts still require an active destination.
    */
   private async reconcileAssociation(
     agentId: string,
     association: Association,
   ): Promise<Association> {
-    const config = this.chiConfig();
-    if (!config) return association;
-    if (association.destination) {
-      const configured = config.destinations[association.destination];
-      if (!configured || configured.endpoint !== association.endpoint)
-        return this.pauseAssociation(agentId, "chi-destination-changed");
-      if (association.paused)
-        // The pinned destination is configured again: resume the durable capture.
-        return this.patchAssociation(agentId, { paused: false, capturePending: true, error: null });
-      return association;
-    }
-    if (association.explicit) {
-      return this.patchAssociation(agentId, {
-        endpoint: association.endpoint ?? DEFAULT_BACKEND_URL,
-        paused: false,
-      });
-    }
-    const resolved = resolveChiDestinationForRepo(config, association.repo);
-    if (!resolved || resolved.endpoint !== DEFAULT_BACKEND_URL)
-      return this.pauseAssociation(
-        agentId,
-        resolved ? "chi-destination-mismatch" : "chi-destination-unmapped",
-      );
-    return this.patchAssociation(agentId, {
-      destination: resolved.destinationId,
-      endpoint: resolved.endpoint,
-      audience: association.audience ?? resolved.audience,
-      paused: false,
-    });
+    const resolved = this.resolveAssociation(association);
+    if (JSON.stringify(resolved) === JSON.stringify(association)) return association;
+    return this.patchAssociation(agentId, (current) => this.resolveAssociation(current));
   }
 
-  private pauseAssociation(agentId: string, code: string): Promise<Association> {
-    return this.patchAssociation(agentId, { paused: true, capturePending: false, error: code });
+  private requireAssociation(association: Association): Association {
+    const resolved = this.resolveAssociation(association);
+    if (resolved.paused) throw new Error(resolved.error ?? "chi-destination-required");
+    return resolved;
+  }
+
+  private resolveAssociation(association: Association): Association {
+    const config = this.chiConfig();
+    const paused = (error: string): Association => ({
+      ...association,
+      paused: true,
+      capturePending: false,
+      error,
+    });
+    if (association.destination) {
+      const configured = config?.destinations[association.destination];
+      if (!configured || configured.endpoint !== association.endpoint)
+        return paused("chi-destination-changed");
+      if (association.paused)
+        // The pinned destination is configured again: resume the durable capture.
+        return { ...association, paused: false, capturePending: true, error: null };
+      return association;
+    }
+    // COMPAT(chi-pre-destinations): migration only, added 2026-10-01. Retain until
+    // pre-P1 persisted labels have been migrated; this URL never authorizes I/O.
+    const oldEndpoint = association.endpoint ?? "https://chi-backend-vadmp23swa-an.a.run.app";
+    const mapping = resolveChiDestinationForRepo(config, association.repo);
+    if (!association.explicit && (!mapping || mapping.endpoint !== oldEndpoint))
+      return paused("chi-destination-unmapped");
+    const resolved = association.explicit
+      ? destinationForEndpoint(config, oldEndpoint)
+      : { id: mapping!.destinationId, endpoint: mapping!.endpoint };
+    if (!resolved) return paused("chi-destination-required");
+    return {
+      ...association,
+      destination: resolved.id,
+      endpoint: resolved.endpoint,
+      audience: association.explicit ? "private" : (association.audience ?? mapping!.audience),
+      paused: false,
+      error: association.paused ? null : association.error,
+    };
   }
 
   /**
@@ -1656,7 +1690,13 @@ export class ChiConnection {
     agentId: string,
   ): Promise<Association> {
     const deleted = safeChiError(settled.captureError).endsWith("object-deleted");
-    if (association.destination && !association.paused && !deleted) {
+    const mapping = resolveChiDestinationForRepo(this.chiConfig(), association.repo);
+    if (
+      association.destination &&
+      !association.paused &&
+      !deleted &&
+      mapping?.endpoint === association.endpoint
+    ) {
       await this.writeProvenanceFor(
         target,
         association,
@@ -1983,7 +2023,7 @@ export class ChiConnection {
   /** Only an explicit not-found response purges; access loss leaves login intact. */
   private async confirmOrphan(record: StoredChiAgent, association: Association): Promise<boolean> {
     try {
-      const authority = this.authorityFor(this.endpointFor(association.endpoint));
+      const authority = this.authorityFor(this.requireAssociation(association).endpoint!);
       const auth = await this.authorizeRepository(association.repo, record.cwd, authority);
       if (!sameActor(auth.chiUserId, association.actor)) return false;
       return !(await nativeSourceExists(
@@ -2071,22 +2111,6 @@ export class ChiConnection {
         actor: association.actor || null,
       };
     }
-    // A destination-less association still uploads to the default deployment
-    // (legacy behaviour, or an explicit canonical transfer); report it so the
-    // chip never says "local" while bytes leave the host. A paused one is
-    // deliberately not uploading.
-    for (const { association } of identities) {
-      if (!association || association.destination || association.paused) continue;
-      return {
-        repo: association.repo,
-        destinationId: "default",
-        name: "Chi",
-        endpoint: association.endpoint ?? DEFAULT_BACKEND_URL,
-        audience: association.audience ?? (association.explicit ? "private" : "shared"),
-        matchedRule: null,
-        actor: association.actor || null,
-      };
-    }
     return null;
   }
 
@@ -2115,6 +2139,10 @@ export class ChiConnection {
     mentionsAvailable: boolean;
   }> {
     const identities = await this.workspaceIdentities(input.workspaceId);
+    for (const identity of identities) {
+      if (identity.association)
+        identity.association = this.resolveAssociation(identity.association);
+    }
     if (input.retry)
       for (const identity of identities) void this.capture(identity.id).catch(() => undefined);
     const fromAssociations = this.destinationFromIdentities(identities, this.chiConfig());
@@ -2135,7 +2163,7 @@ export class ChiConnection {
       pending,
       error,
       warning,
-      mentionsAvailable: Boolean(resolved && resolved.endpoint === this.authority.endpoint),
+      mentionsAvailable: Boolean(resolved && !error && resolved.endpoint === this.primaryEndpoint),
     };
   }
 
@@ -2340,6 +2368,9 @@ export class ChiConnection {
       ): Promise<ManagedAgent>;
     },
   ) {
+    const resolved = resolveChiDestinationForRepo(this.chiConfig(), input.repo);
+    if (!resolved) throw new Error("chi-destination-required");
+    if (resolved.endpoint !== this.authority.endpoint) throw new Error("chi-destination-required");
     const canonical = input.canonical;
     if (!canonical?.conversationId || !canonical.transferId)
       throw new Error("chi-transfer-preparation-required");
@@ -2415,6 +2446,9 @@ export class ChiConnection {
             error: null,
             conversationId: canonical.conversationId,
             blocked: true,
+            destination: resolved.destinationId,
+            endpoint: resolved.endpoint,
+            audience: resolved.audience,
           }),
         };
         const existing = await registration.find(receipt.destination.sessionId);

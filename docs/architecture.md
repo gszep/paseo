@@ -41,6 +41,19 @@ fail closed; the Chi browser has no runtime pairing authority or continuation
 action. Independent branching uses OpenCode's native Fork. Share to Chi
 associates one agent explicitly; configured repository mappings associate agents
 automatically under the mapping's pinned audience. Unmapped agents stay local.
+Chi network operations require an explicitly configured destination; new Share,
+Continue intake and workspace mentions also require a repository mapping. Legacy
+destination-less labels require a repository mapping to the exact former endpoint,
+or stay paused with `chi-destination-unmapped` before auth/export. Explicit legacy
+Share/Continue labels may bind by exact endpoint with private audience; provenance
+still requires a current repository mapping to that endpoint. Status reads resolve
+these states without writing labels. Removing a pinned destination pauses capture
+and blocks canonical continuation prompts; ordinary noncanonical prompts remain
+usable. Receipt quarantine covers every deployment on the
+owning host, even after its destination is removed. The initial inbox/mention
+transport binds to the sole configured endpoint at startup; restart after changing
+it. Multiple capture destinations do not implicitly choose an inbox deployment.
+
 Chi credentials come from an in-memory GitHub CLI exchange, independent of native
 runtime credentials. `chiCanonical` gates the single Continue/Resume transfer
 flow; `chiNative` remains the sharing capability. Older wire requests still parse
@@ -241,12 +254,23 @@ or deployment requires reconnecting the original account; transport fallback can
 switch recipients. The deployment inbox uses backend keyset pagination across
 repositories, presented as one History-style list: History's date sections, a
 client-side search and repository filter, lazy paging and agent-row columns. It
-shows every handoff the principal can read, received and authored; the verified
+shows handoffs addressed to the authenticated recipient; the verified
 identity is shown unobtrusively rather than as a header control row. Refresh is
 automatic on open, window focus/visibility, reconnect and the shared mention
 interval, and after the user's own actions; there is no manual refresh or
 Inbox/Project mode control. Search covers loaded pages only; a server-side query
-is a later step, not this one. Repository,
+is a later step, not this one. The sidebar and list share one first-page query.
+Same-context cached items render immediately while page one revalidates. The
+cache is in memory for five minutes; scope loss synchronously evicts it. Older
+pages are loaded on scroll and are discarded on head refresh. Empty cursor pages
+automatically continue for at most ten pages per head acquisition; an empty list
+then offers Load more mentions. Repeated cursors stop automatic continuation.
+While the list is scrolled down, interval and focus refresh pause for both the
+list and sidebar, so their shared head cannot discard rows under the scroll
+position. Returning to the top or unmounting the list releases the pause;
+transport verification and explicit action/reconnect refresh remain active.
+Failed head/older reads clear their protected data
+before delivering the error. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context
 browsing stay on the handoff's immutable snapshot. Structured access loss removes
@@ -262,8 +286,9 @@ requests reacquire the backend fence with bounded retries; mutations retain thei
 explicit recovery flow. This is pull-based access reacquisition, not recall of data
 already downloaded. A partially acquired inbox retains the backend's
 `unavailableRepos`, shows an incomplete-inbox notice, and marks the unread badge
-with `+` (including `0+`) and an accessible incomplete-count label. Deployment
-cursors bind that unavailable set; `invalid-cursor` clears the whole cached walk
+with `+` (including `0+`) and an accessible incomplete-count label. Bounded unread
+counts also carry this marker. Legacy deployment cursors bind the unavailable
+set; `invalid-cursor` clears the whole cached walk
 and restarts at page one rather than mixing coverage from different pages.
 
 First view saves the recipient's durable `readAt` marker without acknowledging the
