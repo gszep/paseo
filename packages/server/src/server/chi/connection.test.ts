@@ -720,11 +720,19 @@ describe("Chi owner recovery", () => {
     "persists the bounded capture reason %s without advancing the association",
     async (reason, code) => {
       const f = await fixture();
+      const sourceId = prepareNativeCapture({
+        sessionId: "ses_fork",
+        capture: minimiseNativeExport({
+          native: JSON.stringify(f.transfer),
+          mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
+          coverage: { kind: "export", reason: null },
+        }).capture,
+      }).sourceId;
       const agent = await f.registration.register("ses_fork", {
         "chi.native": JSON.stringify({
           repo: f.input.repo,
           actor: "github:owner",
-          sourceId: f.input.sourceId,
+          sourceId,
           head: f.input.snapshotId,
           error: null,
         }),
@@ -2850,6 +2858,28 @@ describe("automatic sync destinations", () => {
     expect(f.reads).toEqual([]);
     expect(f.posts).toHaveLength(posts);
   });
+
+  it.each([null, "evidence-http-409-evidence-head-conflict"])(
+    "never retargets an association when its runtime namespace changes, even to an identical remote capture (cached error=%s)",
+    async (error) => {
+      const f = await conflictedCapture();
+      await f.connection.capture(f.agent.id);
+      const sourceId = "f".repeat(64);
+      const original = f.association();
+      await f.manager.updateAgentLabel(f.agent.id, "chi.native", () =>
+        JSON.stringify({ ...original, sourceId, error }),
+      );
+      f.posts.length = 0;
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("capture-head-diverged");
+      expect(f.association()).toMatchObject({
+        sourceId,
+        head: original.head,
+        capturePending: false,
+      });
+      expect(f.posts).toEqual([]);
+      expect(f.reads).toEqual([]);
+    },
+  );
 
   it("the periodic sweep re-drives pending captures with bounded backoff and no overlapping sweeps", async () => {
     const f = await syncFixture();

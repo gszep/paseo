@@ -119,6 +119,8 @@ reset, edited/reordered/deleted messages and equal-message metadata-only changes
 require human recovery (`capture-head-diverged`), never a head overwrite. Compare
 the archive and the other writer, then Continue from the canonical session or use
 native Fork to preserve local work as a new source. Do not edit association heads.
+The exported source ID must also match the existing association before upload;
+changing runtime namespaces never retargets a label, even to identical content.
 
 The periodic sweep also re-drives durable `capturePending` records, including
 loaded agents. It attempts at most four serial captures per rotating pass and

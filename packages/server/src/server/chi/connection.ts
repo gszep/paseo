@@ -1251,6 +1251,7 @@ export class ChiConnection {
         };
         const { parsed, captured, captureError, warning } = await this.scanAndCapture({
           input,
+          sourceId: pinned.sourceId,
           full: { native, mapping, coverage, sessionId },
           minimised: {
             native: minimised.native,
@@ -1426,6 +1427,7 @@ export class ChiConnection {
    */
   private async scanAndCapture(args: {
     input: CaptureInput;
+    sourceId: string | null;
     full: LocalScanInput;
     minimised: LocalScanInput;
     retryConflict: boolean;
@@ -1438,6 +1440,10 @@ export class ChiConnection {
     warning: string | null;
   }> {
     const parsed = prepareNativeCapture(args.input);
+    // A copied/replaced runtime namespace must not retarget an existing label,
+    // even when the other source already contains this exact capture.
+    if (args.sourceId !== null && args.sourceId !== parsed.sourceId)
+      throw new Error("capture-head-diverged");
     let captured: Awaited<ReturnType<typeof captureNative>> | null = null;
     let captureError: unknown = null;
     let warning: string | null = null;
