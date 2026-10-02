@@ -81,7 +81,7 @@ export interface HumanPromptScope {
   context: ChiMentionContext;
   pendingQuestionIds?: readonly string[];
 }
-interface Transport {
+export interface HumanPromptTransport {
   dispatchEnabled?: boolean;
   signal?: AbortSignal;
   create(batch: {
@@ -90,8 +90,21 @@ interface Transport {
     text: string;
     sources: ChiSource[];
   }): Promise<ChiHandoff>;
-  read(id: string): Promise<ChiHandoff>;
+  /** `null` only for an unconfirmed batch the backend proves it does not hold. */
+  read(id: string, unconfirmed?: boolean): Promise<ChiHandoff | null>;
   viewed?(recipient: string): boolean;
+}
+type Transport = HumanPromptTransport;
+
+/** A create failure whose outcome is proven: never posted, or refused by the backend. */
+export class HumanPromptSendError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: "not-sent" | "rejected",
+  ) {
+    super(message);
+    this.name = "HumanPromptSendError";
+  }
 }
 const quotaSchema = z
   .array(
@@ -105,7 +118,7 @@ const quotaSchema = z
   )
   .max(10000);
 const lanes = new Map<string, Promise<unknown>>();
-const refreshes = new Map<string, Promise<void>>();
+const refreshes = new Map<string, { signal?: AbortSignal; work: Promise<void> }>();
 const readers = new Map<string, Promise<void>>();
 
 export function quoteHumanAnswer(text: string): string {
@@ -282,12 +295,14 @@ export class HumanPrompts {
       return explicitRead ? pending : pending.slice(0, 8);
     });
     for (const batch of selected) {
-      let handoff: ChiHandoff | undefined;
+      let handoff: ChiHandoff | null | undefined;
       try {
-        handoff = await transport.read(batch.id);
+        handoff = await transport.read(batch.id, batch.status !== "delivered");
       } catch (error) {
         if (batch.status === "delivered") throw error;
       }
+      if (handoff === null && batch.status === "delivered")
+        throw new Error("chi-human-prompt-invalid-response");
       // Reads never hold the dispatch lane. Reload before committing so a delayed
       // read cannot overwrite new items, a mute, or a form's retirement.
       await this.exclusive(async () => {
@@ -304,24 +319,33 @@ export class HumanPrompts {
                 item.answer = { text: answer.text, replyId: reply.id, actor: reply.actor };
             }
           }
+        } else if (handoff === null && current.status === "uncertain") {
+          // The backend holds no such handoff, so the lost create never landed.
+          // Resending the same immutable batch id is idempotent.
+          current.status = "reserved";
         }
         state.cursor = (state.batches.indexOf(current) + 1) % Math.max(1, state.batches.length);
         await this.save(scope, state);
       });
     }
   }
-  private refresh(scope: HumanPromptScope, transport: Transport) {
+  refresh(scope: HumanPromptScope, transport: Transport) {
     const key = this.path(scope.agentId);
     const pending = refreshes.get(key);
-    if (pending) return pending;
-    const work = this.reconcile(scope, transport).finally(() => {
-      if (refreshes.get(key) === work) refreshes.delete(key);
-    });
-    refreshes.set(key, work);
-    return work;
+    // An aborted run's refresh fails at its next read; a new run reads afresh.
+    if (pending && !pending.signal?.aborted) return pending.work;
+    const entry = {
+      signal: transport.signal,
+      work: this.reconcile(scope, transport).finally(() => {
+        if (refreshes.get(key) === entry) refreshes.delete(key);
+      }),
+    };
+    refreshes.set(key, entry);
+    return entry.work;
   }
-  private verify(state: State, batch: z.infer<typeof batchSchema>, handoff: ChiHandoff) {
+  private verify(state: State, batch: z.infer<typeof batchSchema>, handoff: ChiHandoff | null) {
     if (
+      !handoff ||
       handoff.id !== batch.id ||
       handoff.author.toLowerCase() !== state.context.actor ||
       handoff.repo !== state.context.repo ||
@@ -353,8 +377,13 @@ export class HumanPrompts {
         text: batch.text,
         sources: [batch.source],
       });
-    } catch {
-      batch.status = "uncertain";
+    } catch (error) {
+      // A proven unsent batch keeps its status, so the same id is resent later.
+      if (error instanceof HumanPromptSendError && error.outcome === "not-sent") return;
+      batch.status =
+        error instanceof HumanPromptSendError && error.outcome === "rejected"
+          ? "failed"
+          : "uncertain";
       await this.save(scope, state);
       return;
     }
@@ -396,6 +425,15 @@ export class HumanPrompts {
       remind?: boolean;
     },
   ): Promise<string | null> {
+    await this.dispatch(scope, transport, options);
+    await this.refresh(scope, transport);
+    return options.remind === false ? null : this.reminder(scope, transport);
+  }
+  async dispatch(
+    scope: HumanPromptScope,
+    transport: Transport,
+    options: { source: ChiSource | null; viewed: boolean },
+  ) {
     await this.exclusive(async () => {
       transport.signal?.throwIfAborted();
       const state = await this.load(scope);
@@ -406,13 +444,17 @@ export class HumanPrompts {
         !options.viewed &&
         options.source
       ) {
-        // Native forms cannot ask the blocked model to call retry. Reuse the
-        // saved batch verbatim; retirement, viewing and quotas still gate it.
+        // Native forms cannot ask the blocked model to call retry, and a reserved
+        // batch provably never reached the backend. Reuse the saved batch
+        // verbatim; retirement, viewing and quotas still gate it.
         for (const batch of state.batches.filter(
           (b) =>
             b.status !== "delivered" &&
             !transport.viewed?.(b.recipient) &&
-            state.items.some((i) => i.batchId === b.id && !i.retired && i.nativeQuestionId),
+            state.items.some(
+              (i) =>
+                i.batchId === b.id && !i.retired && (i.nativeQuestionId || b.status === "reserved"),
+            ),
         )) {
           await this.send(scope, state, batch, transport);
         }
@@ -471,21 +513,8 @@ export class HumanPrompts {
       }
       await this.save(scope, state);
     });
-    // A timed-out foreground turn leaves reconciliation running. The next turn
-    // can use its durable answers without waiting for another full read batch.
-    const cached =
-      options.remind !== false && transport.signal
-        ? await this.reminder(scope, transport, true)
-        : null;
-    const refresh = this.refresh(scope, transport);
-    if (cached !== null) {
-      void refresh.catch(() => undefined);
-      return cached;
-    }
-    await refresh;
-    return options.remind === false ? null : this.reminder(scope, transport);
   }
-  private async reminder(scope: HumanPromptScope, transport: Transport, answersOnly = false) {
+  async reminder(scope: HumanPromptScope, transport: Transport, answersOnly = false) {
     const state = await this.exclusive(() => this.load(scope, false));
     if (answersOnly && !state.items.some((item) => item.answer && !item.retired)) return null;
     const reminder = this.renderReminder(state);

@@ -29,8 +29,8 @@ describe("OpenCode v2 resume configuration", () => {
         id: `msg_${index}`,
         time: { created: index, ...(index < 699 ? { completed: index + 1 } : {}) },
       })),
-      { id: "user", type: "user", text: "next", time: { created: 701 } },
     );
+    // The last assistant message is still streaming, so it can never be the pin.
     const client = new OpenCodeV2AgentClient({
       logger: createTestLogger(),
       runtime: harness.runtime,
@@ -47,6 +47,53 @@ describe("OpenCode v2 resume configuration", () => {
       const id = session.humanPromptTurnId!();
       expect(list).not.toHaveBeenCalled();
       expect(await id).toBe("msg_698");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("human prompt turn ids pin a turn's own prompt before its first assistant settles", async () => {
+    const harness = new V2Harness();
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    const reminder = (id: string, created: number) => ({
+      id,
+      type: "user" as const,
+      text: "private answer",
+      metadata: { chiHumanPrompts: true },
+      time: { created },
+    });
+    try {
+      // A brand-new session: its first prompt is settled as soon as it is stored.
+      harness.history.push({ id: "first", type: "user", text: "start", time: { created: 1 } });
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("first");
+      // A later turn's first step pins this turn's prompt, not the previous
+      // turn's last answer, the private reminder, or the streaming reply.
+      harness.history.push(
+        { ...assistant([]), id: "previous", time: { created: 2, completed: 3 } },
+        reminder("private", 4),
+        { id: "prompt", type: "user", text: "next", time: { created: 5 } },
+        { ...assistant([]), id: "streaming", time: { created: 6 } },
+      );
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("prompt");
+      // A reminder injected after compaction never becomes the pin either.
+      harness.history.splice(-1, 1, {
+        ...assistant([]),
+        id: "settled",
+        time: { created: 6, completed: 7 },
+      });
+      harness.history.push(reminder("compacted", 8));
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("settled");
     } finally {
       await session.close();
     }

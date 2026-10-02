@@ -54,7 +54,14 @@ import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
-import { HumanPrompts, quoteHumanAnswer, type HumanPromptOperation } from "./human-prompts.js";
+import {
+  HumanPrompts,
+  HumanPromptSendError,
+  quoteHumanAnswer,
+  type HumanPromptOperation,
+  type HumanPromptScope,
+  type HumanPromptTransport,
+} from "./human-prompts.js";
 import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
@@ -236,8 +243,42 @@ function createDeployment(endpoint = DEFAULT_BACKEND_URL): ChiAuthority {
   };
 }
 
+interface HumanPromptIdentityEntry {
+  key: string;
+  repo: string;
+  expires: number;
+  ready: boolean;
+  cleared: boolean;
+  pending: Promise<MentionIdentity>;
+}
+interface HumanPromptAccess {
+  scope: HumanPromptScope;
+  transport: HumanPromptTransport;
+  check(fresh?: boolean): Promise<MentionIdentity>;
+}
+interface HumanPromptWorker {
+  controller: AbortController;
+  /** Whether this run finished its reconciliation reads. */
+  done: Promise<boolean>;
+  /** This run's access once its dispatch phase ends; `null` if it never got there. */
+  dispatched: Promise<HumanPromptAccess | null>;
+  rerun: boolean;
+}
+
+function mentionHttpStatus(error: unknown): number | null {
+  const match = error instanceof Error ? /^chi-mentions-http-(\d{3})$/.exec(error.message) : null;
+  return match ? Number(match[1]) : null;
+}
+
+function humanPromptFailure(error: unknown): string {
+  return error instanceof Error && /^chi-[a-z0-9-]+$/.test(error.message)
+    ? error.message
+    : "chi-human-prompt-unavailable";
+}
+
 export class ChiConnection {
   readonly mentions: ChiMentions;
+  private readonly humanPromptMentions: ChiMentions;
   readonly humanPrompts: HumanPrompts;
   isHumanPromptViewed: (agentId: string, recipient: string, owner: string) => boolean = () => false;
   private readonly participants = new ParticipantCache();
@@ -425,10 +466,19 @@ export class ChiConnection {
       request: async (url, init) => {
         const response = await this.authority.request(url, init);
         if ([401, 403, 404].includes(response.status)) {
-          this.loseMentionAuthority();
+          const repo = new Headers(init?.headers).get("x-chi-repo");
+          this.loseMentionAuthority(
+            response.status === 401 || !repo || repo === "*" ? undefined : { repo },
+          );
         }
         return response;
       },
+    });
+    // Human prompts classify their own failures: a 404 for an unconfirmed batch
+    // proves a lost create never landed and is not an access loss.
+    this.humanPromptMentions = new ChiMentions(options.home, {
+      endpoint: this.authority.endpoint,
+      request: (url, init) => this.authority.request(url, init),
     });
     this.humanPrompts = new HumanPrompts(options.home);
   }
@@ -478,13 +528,15 @@ export class ChiConnection {
     return DEFAULT_BACKEND_URL;
   }
 
-  private loseMentionAuthority() {
+  /** Without a scope the loss is host-wide; otherwise only that repository or checkout. */
+  private loseMentionAuthority(scope?: { repo?: string; cwd?: string }) {
     this.participants.clear();
-    this.clearHumanPromptAuthority();
+    this.clearHumanPromptAuthority(scope);
     this.authority.invalidate();
   }
 
   private async mentionIdentity(cwd: string, directoryOnly = false): Promise<MentionIdentity> {
+    let repo: string | undefined;
     try {
       const remote = await execCommand("git", ["remote", "get-url", "origin"], {
         cwd,
@@ -492,7 +544,7 @@ export class ChiConnection {
       });
       const parsed = parseGitHubRemote(remote.stdout);
       if (!parsed) throw new Error("chi-repository-mismatch");
-      const repo = `github:${parsed.owner}/${parsed.repo}`.toLowerCase();
+      repo = `github:${parsed.owner}/${parsed.repo}`.toLowerCase();
       const auth = directoryOnly ? await this.authority.login() : await this.authorize(repo, cwd);
       return {
         repo,
@@ -502,7 +554,7 @@ export class ChiConnection {
         humanPrompts: "humanPrompts" in auth && auth.humanPrompts === true,
       };
     } catch (error) {
-      this.loseMentionAuthority();
+      this.loseMentionAuthority(repo ? { repo } : { cwd });
       // A failed authority acquisition invalidates protected data even when token
       // exchange or Git reports an error outside the public Chi code vocabulary.
       throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
@@ -565,30 +617,36 @@ export class ChiConnection {
     };
   }
 
-  private readonly humanPromptIdentities = new Map<
-    string,
-    {
-      key: string;
-      expires: number;
-      ready: boolean;
-      pending: Promise<MentionIdentity>;
-    }
-  >();
+  private readonly humanPromptIdentities = new Map<string, HumanPromptIdentityEntry>();
   private humanPromptCredential: string | null = null;
-  private humanPromptGeneration = 0;
+  // Advanced only by host-wide clears: credential change, reload and shutdown.
+  private humanPromptEpoch = 0;
 
-  private clearHumanPromptAuthority() {
-    this.humanPromptGeneration++;
-    this.humanPromptIdentities.clear();
-    this.humanPromptCredential = null;
+  /** Without a scope the clear is host-wide; otherwise only that repository or checkout. */
+  private clearHumanPromptAuthority(scope?: { repo?: string; cwd?: string }) {
+    if (!scope) {
+      this.humanPromptEpoch++;
+      this.humanPromptCredential = null;
+    }
+    const repo = scope?.repo?.toLowerCase();
+    for (const [cwd, entry] of this.humanPromptIdentities) {
+      if (scope && entry.repo !== repo && cwd !== scope.cwd) continue;
+      // Callers still awaiting this acquisition must not use its delayed result.
+      entry.cleared = true;
+      this.humanPromptIdentities.delete(cwd);
+    }
+  }
+
+  private evictHumanPromptIdentity(cwd: string, entry: HumanPromptIdentityEntry) {
+    if (this.humanPromptIdentities.get(cwd) === entry) this.humanPromptIdentities.delete(cwd);
   }
 
   private async humanPromptIdentity(cwd: string, fresh: boolean) {
     // login() checks the host credential on every access. Never cache logout,
     // credential rotation or the live Git remote behind the repository TTL.
-    const before = this.humanPromptGeneration;
+    const epoch = this.humanPromptEpoch;
     const observed = await this.mentionIdentity(cwd, true);
-    if (before !== this.humanPromptGeneration) throw new Error("chi-human-prompt-context-changed");
+    if (epoch !== this.humanPromptEpoch) throw new Error("chi-human-prompt-context-changed");
     const credential = JSON.stringify([
       observed.actor,
       observed.credentialGeneration ?? observed.token,
@@ -596,22 +654,20 @@ export class ChiConnection {
     if (this.humanPromptCredential !== null && this.humanPromptCredential !== credential)
       this.clearHumanPromptAuthority();
     this.humanPromptCredential = credential;
+    // A reminted session token replaces only this checkout's entry.
     const key = JSON.stringify([this.mentionContext(observed), observed.token]);
     let entry = this.humanPromptIdentities.get(cwd);
-    if (entry && entry.key !== key) {
-      this.clearHumanPromptAuthority();
-      this.humanPromptCredential = credential;
-      entry = undefined;
-    }
-    if (!entry || (entry.ready && (fresh || entry.expires <= Date.now()))) {
+    if (!entry || entry.key !== key || (entry.ready && (fresh || entry.expires <= Date.now()))) {
       for (const [path, cached] of this.humanPromptIdentities)
         if (cached.ready && cached.expires <= Date.now()) this.humanPromptIdentities.delete(path);
       if (this.humanPromptIdentities.size >= 64)
         this.humanPromptIdentities.delete(this.humanPromptIdentities.keys().next().value!);
-      const next = {
+      const next: HumanPromptIdentityEntry = {
         key,
+        repo: observed.repo,
         expires: Date.now() + 30_000,
         ready: false,
+        cleared: false,
         pending: Promise.resolve().then(async () => {
           const identity = await this.mentionIdentity(cwd);
           next.ready = true;
@@ -622,17 +678,17 @@ export class ChiConnection {
       entry = next;
       this.humanPromptIdentities.set(cwd, entry);
     }
-    const generation = this.humanPromptGeneration;
+    const current = entry;
     try {
-      const identity = await entry.pending;
-      if (this.humanPromptGeneration !== generation)
-        throw new Error("chi-human-prompt-context-changed");
+      const identity = await current.pending;
+      if (current.cleared) throw new Error("chi-human-prompt-context-changed");
       this.requireMentionContext(identity, this.mentionContext(observed));
       // A backend upgrade should become available on the next boundary.
-      if (!identity.humanPrompts) this.humanPromptIdentities.delete(cwd);
+      if (!identity.humanPrompts) this.evictHumanPromptIdentity(cwd, current);
       return identity;
     } catch (error) {
-      if (this.humanPromptGeneration === generation) this.clearHumanPromptAuthority();
+      // Only this failed acquisition is evicted; other checkouts keep their scopes.
+      this.evictHumanPromptIdentity(cwd, current);
       throw error;
     }
   }
@@ -661,93 +717,119 @@ export class ChiConnection {
     ]);
   }
 
+  // Failures here concern one agent; they never clear another agent's authority.
   private async humanPromptAuthority(agentId: string, fresh = false) {
-    const generation = this.humanPromptGeneration;
-    try {
-      const agent = this.manager.getAgent(agentId);
-      if (!agent || !agent.persistence || !agent.session?.humanPromptTurnId)
-        throw new Error("chi-native-agent-required");
-      const binding = this.humanPromptBinding(agentId);
-      const mapping = await this.resolveForCwd(agent.cwd);
-      const association = this.association(agent);
-      if (
-        !mapping ||
-        !association ||
-        association.paused ||
-        association.blocked ||
-        mapping.endpoint !== this.authority.endpoint ||
-        this.endpointFor(association.endpoint) !== mapping.endpoint
-      )
-        throw new Error("chi-human-prompt-mapping-required");
-      const identity = await this.humanPromptIdentity(agent.cwd, fresh);
-      if (
-        association.repo.toLowerCase() !== identity.repo ||
-        association.actor.toLowerCase() !== identity.actor
-      )
-        throw new Error("chi-human-prompt-mapping-required");
-      await this.assertCurrent(agent);
-      const sessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
-      if (!sessionId) throw new Error("chi-native-agent-required");
-      const turnId = await agent.session.humanPromptTurnId();
-      if (!turnId) throw new Error("chi-human-prompt-native-turn-required");
-      if (this.humanPromptBinding(agentId) !== binding)
-        throw new Error("chi-human-prompt-context-changed");
-      const scope = {
-        agentId,
-        sessionId,
-        turnId,
-        context: this.mentionContext(identity),
-        pendingQuestionIds: [...agent.pendingPermissions.values()]
-          .filter((r) => this.isRoutableHumanQuestion(r) && r.metadata.sessionId === sessionId)
-          .map((r) => r.id),
-      };
-      return { scope, identity, association };
-    } catch (error) {
-      if (this.humanPromptGeneration === generation) this.clearHumanPromptAuthority();
-      throw error;
-    }
+    const agent = this.manager.getAgent(agentId);
+    if (!agent || !agent.persistence || !agent.session?.humanPromptTurnId)
+      throw new Error("chi-native-agent-required");
+    const binding = this.humanPromptBinding(agentId);
+    const mapping = await this.resolveForCwd(agent.cwd);
+    const association = this.association(agent);
+    if (
+      !mapping ||
+      !association ||
+      association.paused ||
+      association.blocked ||
+      mapping.endpoint !== this.authority.endpoint ||
+      this.endpointFor(association.endpoint) !== mapping.endpoint
+    )
+      throw new Error("chi-human-prompt-mapping-required");
+    const identity = await this.humanPromptIdentity(agent.cwd, fresh);
+    if (
+      association.repo.toLowerCase() !== identity.repo ||
+      association.actor.toLowerCase() !== identity.actor
+    )
+      throw new Error("chi-human-prompt-mapping-required");
+    await this.assertCurrent(agent);
+    const sessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
+    if (!sessionId) throw new Error("chi-native-agent-required");
+    const turnId = await agent.session.humanPromptTurnId();
+    if (!turnId) throw new Error("chi-human-prompt-native-turn-required");
+    if (this.humanPromptBinding(agentId) !== binding)
+      throw new Error("chi-human-prompt-context-changed");
+    const scope = {
+      agentId,
+      sessionId,
+      turnId,
+      context: this.mentionContext(identity),
+      pendingQuestionIds: [...agent.pendingPermissions.values()]
+        .filter((r) => this.isRoutableHumanQuestion(r) && r.metadata.sessionId === sessionId)
+        .map((r) => r.id),
+    };
+    return { scope, identity, association };
   }
 
   private async humanPromptAccess(agentId: string, signal?: AbortSignal) {
     const initial = await raceProviderRefreshAbort(signal, this.humanPromptAuthority(agentId));
     signal?.throwIfAborted();
-    const generation = this.humanPromptGeneration;
+    // Only this agent's own session, identity or mapping aborts its work. A
+    // cleared cache means the next check reacquires authority, not a lockout.
     const check = async (fresh = false) => {
       signal?.throwIfAborted();
-      if (generation !== this.humanPromptGeneration)
-        throw new Error("chi-human-prompt-context-changed");
       const current = await raceProviderRefreshAbort(
         signal,
         this.humanPromptAuthority(agentId, fresh),
       );
       signal?.throwIfAborted();
-      if (generation !== this.humanPromptGeneration)
-        throw new Error("chi-human-prompt-context-changed");
       if (current.scope.sessionId !== initial.scope.sessionId)
         throw new Error("chi-human-prompt-context-changed");
       this.requireMentionContext(current.identity, initial.scope.context);
       return current.identity;
     };
-    const transport = {
+    const repo = initial.identity.repo;
+    const transport: HumanPromptTransport = {
       signal,
       dispatchEnabled: initial.identity.humanPrompts === true,
       viewed: (recipient: string) =>
         this.isHumanPromptViewed(agentId, recipient, initial.identity.actor),
-      create: async (batch: Parameters<ChiMentions["createHandoff"]>[1]) => {
-        signal?.throwIfAborted();
-        // Reads share the boundary bracket; a write needs fresh admission after
-        // any awaited reads, as well as verification after the response.
-        const current = await check(true);
-        if (!current.humanPrompts) throw new Error("chi-human-prompts-backend-upgrade-required");
-        if (this.isHumanPromptViewed(agentId, batch.recipient, current.actor))
-          throw new Error("chi-human-prompt-viewed");
-        const result = await this.mentions.createHandoff(current, batch);
+      create: async (batch) => {
+        let current: MentionIdentity;
+        try {
+          signal?.throwIfAborted();
+          // Reads share the boundary bracket; a write needs fresh admission after
+          // any awaited reads, as well as verification after the response.
+          current = await check(true);
+          if (!current.humanPrompts) throw new Error("chi-human-prompts-backend-upgrade-required");
+          // Viewing can begin during slow admission. Nothing is posted then.
+          if (this.isHumanPromptViewed(agentId, batch.recipient, current.actor))
+            throw new Error("chi-human-prompt-viewed");
+        } catch (error) {
+          throw new HumanPromptSendError(humanPromptFailure(error), "not-sent");
+        }
+        let result;
+        try {
+          result = await this.humanPromptMentions.createHandoff(current, batch);
+        } catch (error) {
+          const status = mentionHttpStatus(error);
+          // Authentication and repository denials precede the handler; the other
+          // fixed client errors prove that the backend refused this create.
+          if (status === 401 || status === 403) {
+            this.loseMentionAuthority(status === 401 ? undefined : { repo });
+            throw new HumanPromptSendError(humanPromptFailure(error), "not-sent");
+          }
+          if (status !== null && [400, 404, 409, 413, 422].includes(status))
+            throw new HumanPromptSendError(humanPromptFailure(error), "rejected");
+          throw error;
+        }
         await check();
         return result;
       },
-      read: async (id: string) => {
+      read: async (id, unconfirmed = false) => {
         signal?.throwIfAborted();
-        const result = await this.mentions.execute(initial.identity, { action: "read", id });
+        let result;
+        try {
+          result = await this.humanPromptMentions.execute(initial.identity, {
+            action: "read",
+            id,
+          });
+        } catch (error) {
+          const status = mentionHttpStatus(error);
+          // The author's own unconfirmed batch is absent: its create never landed.
+          if (status === 404 && unconfirmed) return null;
+          if (status === 401) this.loseMentionAuthority();
+          else if (status === 403 || status === 404) this.loseMentionAuthority({ repo });
+          throw error;
+        }
         if (result.kind !== "handoff") throw new Error("chi-human-prompt-invalid-response");
         return result.handoff;
       },
@@ -770,107 +852,151 @@ export class ChiConnection {
     return result;
   }
 
-  private readonly humanPromptBoundaries = new Map<
-    string,
-    {
-      controller: AbortController;
-      pending: Promise<string | null>;
-      rerun: boolean;
-    }
-  >();
+  private humanPromptSource(association: Association) {
+    return association.sourceId && association.head && association.promptEntryId
+      ? {
+          kind: "neutral" as const,
+          id: association.sourceId,
+          snapshot: association.head,
+          entryId: association.promptEntryId,
+        }
+      : null;
+  }
+
+  private readonly humanPromptBoundaries = new Map<string, HumanPromptWorker>();
 
   async humanPromptBoundary(agentId: string, remind = true): Promise<string | null> {
-    let work = this.humanPromptBoundaries.get(agentId);
-    if (!work) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort("background-timeout"), 120_000);
-      timer.unref();
-      controller.signal.addEventListener(
-        "abort",
-        () => {
-          // A stalled acquisition must not become an immortal pending cache
-          // entry that every later turn joins after this worker times out.
-          this.clearHumanPromptAuthority();
-          this.options.logger?.warn(
-            { agentId, reason: controller.signal.reason },
-            "Chi human prompt boundary aborted",
-          );
-        },
-        { once: true },
-      );
-      const pending = this.humanPromptBoundaryStep(agentId, remind, controller.signal).finally(
-        () => {
-          clearTimeout(timer);
-          const current = this.humanPromptBoundaries.get(agentId);
-          if (current?.pending === pending) {
-            this.humanPromptBoundaries.delete(agentId);
-            // A turn can queue more items after this worker's dispatch phase.
-            // Coalescing that boundary must not lose its request to drain them.
-            if (current.rerun && !controller.signal.aborted)
-              void this.humanPromptBoundary(agentId, false);
-          }
-        },
-      );
-      work = { controller, pending, rerun: false };
-      this.humanPromptBoundaries.set(agentId, work);
-    } else work.rerun = true;
-    if (!remind) return work.pending.then(() => null);
+    const worker = this.humanPromptWorker(agentId);
+    if (!remind) return worker.done.then(() => null);
     // Only the wait belongs to the foreground turn. The coalesced worker keeps
     // dispatching and persisting read progress across subsequent turn starts.
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const budget = new AbortController();
+    const timer = setTimeout(() => {
+      this.options.logger?.warn(
+        { agentId, reason: "foreground-budget" },
+        "Chi human prompt boundary wait timed out",
+      );
+      budget.abort("foreground-budget");
+    }, 2000);
     try {
-      return await Promise.race([
-        work.pending,
-        new Promise<null>((resolve) => {
-          timer = setTimeout(() => {
-            this.options.logger?.warn(
-              { agentId, reason: "foreground-budget" },
-              "Chi human prompt boundary wait timed out",
-            );
-            resolve(null);
-          }, 2000);
-        }),
-      ]);
+      return await this.humanPromptReminder(agentId, worker, budget.signal);
     } finally {
       clearTimeout(timer);
     }
   }
-  private async humanPromptBoundaryStep(
+
+  /** One detached dispatch and reconciliation per agent; later requests coalesce. */
+  private humanPromptWorker(agentId: string): HumanPromptWorker {
+    const existing = this.humanPromptBoundaries.get(agentId);
+    if (existing && !existing.controller.signal.aborted) {
+      // A turn can queue more items after this worker's dispatch phase.
+      // Coalescing that boundary must not lose its request to drain them.
+      existing.rerun = true;
+      return existing;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort("background-timeout"), 120_000);
+    timer.unref();
+    const cwd = this.manager.getAgent(agentId)?.cwd;
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        // A stalled acquisition must not become an immortal pending entry that
+        // every later turn joins after this worker times out.
+        const entry = cwd === undefined ? undefined : this.humanPromptIdentities.get(cwd);
+        if (controller.signal.reason === "background-timeout" && entry && !entry.ready)
+          this.clearHumanPromptAuthority({ cwd });
+        this.options.logger?.warn(
+          { agentId, reason: controller.signal.reason },
+          "Chi human prompt boundary aborted",
+        );
+      },
+      { once: true },
+    );
+    let publish!: (access: HumanPromptAccess | null) => void;
+    const worker: HumanPromptWorker = {
+      controller,
+      rerun: false,
+      dispatched: new Promise((resolve) => {
+        publish = resolve;
+      }),
+      done: Promise.resolve(false),
+    };
+    worker.done = this.humanPromptWork(agentId, controller.signal, publish).finally(() => {
+      clearTimeout(timer);
+      publish(null);
+      if (this.humanPromptBoundaries.get(agentId) !== worker) return;
+      this.humanPromptBoundaries.delete(agentId);
+      if (worker.rerun && !controller.signal.aborted) void this.humanPromptWorker(agentId);
+    });
+    this.humanPromptBoundaries.set(agentId, worker);
+    return worker;
+  }
+
+  private async humanPromptWork(
     agentId: string,
-    remind: boolean,
     signal: AbortSignal,
-  ): Promise<string | null> {
+    publish: (access: HumanPromptAccess) => void,
+  ): Promise<boolean> {
     try {
-      if (!(await this.humanPrompts.hasItems(agentId))) return null;
+      if (!(await this.humanPrompts.hasItems(agentId))) return false;
       const access = await this.humanPromptAccess(agentId, signal);
-      const { association } = access;
-      const source =
-        association.sourceId && association.head && association.promptEntryId
-          ? {
-              kind: "neutral" as const,
-              id: association.sourceId,
-              snapshot: association.head,
-              entryId: association.promptEntryId,
-            }
-          : null;
-      const reminder = await this.humanPrompts.boundary(access.scope, access.transport, {
-        source,
+      await this.humanPrompts.dispatch(access.scope, access.transport, {
+        source: this.humanPromptSource(access.association),
         viewed: false,
-        remind,
       });
-      await access.check();
+      publish(access);
+      // The worker owns its reads, so the deadline, shutdown and close abort them.
+      await this.humanPrompts.refresh(access.scope, access.transport);
+      return true;
+    } catch (error) {
+      this.logHumanPromptFailure(agentId, signal, error);
+      return false;
+    }
+  }
+
+  /** Any turn start, including one that joins an after-turn worker, gets its reminder. */
+  private async humanPromptReminder(
+    agentId: string,
+    worker: HumanPromptWorker,
+    budget: AbortSignal,
+  ) {
+    // Every step settles at the foreground budget; the worker keeps the progress.
+    const within = <T>(operation: Promise<T>) => raceProviderRefreshAbort(budget, operation);
+    try {
+      const access = await within(worker.dispatched);
+      if (!access) return null;
+      // Cached answers need not wait for this worker's reads; they are still
+      // re-verified against the backend before exposure.
+      let reminder = await within(this.humanPrompts.reminder(access.scope, access.transport, true));
+      if (reminder === null) {
+        // A failed reconciliation withholds the reminder rather than exposing
+        // statuses it could not confirm.
+        if (!(await within(worker.done))) return null;
+        reminder = await within(this.humanPrompts.reminder(access.scope, access.transport));
+      }
+      await within(access.check());
       return reminder;
     } catch (error) {
-      let reason = "boundary-failed";
-      if (error instanceof Error) {
-        if (error.name === "AbortError") reason = "request-aborted";
-        if (error.name === "TimeoutError") reason = "request-timeout";
-      }
-      if (!signal.aborted)
-        this.options.logger?.warn({ agentId, reason }, "Chi human prompt boundary withheld");
+      if (!budget.aborted) this.logHumanPromptFailure(agentId, worker.controller.signal, error);
       // A segment failure withholds data and never blocks an unrelated model turn.
       return null;
     }
+  }
+
+  private logHumanPromptFailure(agentId: string, signal: AbortSignal, error: unknown) {
+    if (signal.aborted) return;
+    let reason = "boundary-failed";
+    if (error instanceof Error) {
+      if (error.name === "AbortError") reason = "request-aborted";
+      if (error.name === "TimeoutError") reason = "request-timeout";
+    }
+    this.options.logger?.warn({ agentId, reason }, "Chi human prompt boundary withheld");
+  }
+
+  /** Archive, close and reload end that agent's detached human-prompt work. */
+  agentClosed(agentId: string) {
+    this.humanPromptBoundaries.get(agentId)?.controller.abort("agent-closed");
   }
 
   private readonly questionLanes = new Set<string>();
@@ -942,17 +1068,8 @@ export class ChiConnection {
           );
         }
       }
-      const { association } = access;
       await this.humanPrompts.boundary(access.scope, access.transport, {
-        source:
-          association.sourceId && association.head && association.promptEntryId
-            ? {
-                kind: "neutral",
-                id: association.sourceId,
-                snapshot: association.head,
-                entryId: association.promptEntryId,
-              }
-            : null,
+        source: this.humanPromptSource(access.association),
         viewed: false,
         remind: false,
       });
@@ -1170,7 +1287,7 @@ export class ChiConnection {
     try {
       return await this.authorizeRepository(repo, cwd, authority);
     } catch (error) {
-      if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
+      if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority({ repo });
       throw error;
     }
   }

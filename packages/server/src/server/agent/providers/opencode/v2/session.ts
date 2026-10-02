@@ -305,10 +305,14 @@ export class OpenCodeV2Session implements AgentSession {
   }
   async humanPromptTurnId() {
     // Reconciliation already owns this snapshot. A native history request here
-    // can take longer than the entire foreground human-prompt budget.
+    // can take longer than the entire foreground human-prompt budget. A user
+    // message is settled once stored, so a turn's first step pins its own prompt;
+    // private reminders are omitted from capture and never become the pin.
     return (
       this.history.findLast(
-        (message) => message.type === "assistant" && message.time.completed !== undefined,
+        (message) =>
+          (message.type === "assistant" && message.time.completed !== undefined) ||
+          (message.type === "user" && message.metadata?.chiHumanPrompts !== true),
       )?.id ?? null
     );
   }

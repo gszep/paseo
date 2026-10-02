@@ -9,7 +9,7 @@ import {
   type ChiHandoff,
   type ChiSource,
 } from "@getpaseo/protocol/chi-mentions";
-import { HumanPrompts, type HumanPromptScope } from "./human-prompts.js";
+import { HumanPrompts, HumanPromptSendError, type HumanPromptScope } from "./human-prompts.js";
 
 const homes: string[] = [];
 afterEach(async () => {
@@ -874,6 +874,66 @@ describe("human prompt delivery receipts", () => {
     release();
     await Promise.all([first, second]);
     expect(enterSecond).toHaveBeenCalledTimes(1);
+  });
+
+  it("a proven unsent create stays reserved and is resent under its id without another slot", async () => {
+    const f = await fixture();
+    await f.add("q");
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(
+      new HumanPromptSendError("chi-human-prompt-viewed", "not-sent"),
+    );
+    await f.flush(f.scope, { remind: false });
+    const [batch] = (await f.service["load"](f.scope)).batches;
+    expect(batch!.status).toBe("reserved");
+    await f.flush(f.scope, { remind: false });
+    expect([...f.remote.keys()]).toEqual([batch!.id]);
+    expect(
+      JSON.parse(await readFile(join(f.home, "chi", "human-prompts", "quota.json"), "utf8")),
+    ).toHaveLength(1);
+  });
+
+  it("a backend-refused create is failed and waits for an explicit retry", async () => {
+    const f = await fixture();
+    await f.add("q");
+    const create = vi
+      .spyOn(f.transport, "create")
+      .mockRejectedValueOnce(new HumanPromptSendError("chi-mentions-http-409", "rejected"));
+    await f.flush(f.scope, { remind: false });
+    await f.flush(f.scope, { remind: false });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("failed");
+    await f.service.operate(f.scope, { action: "retry" }, f.transport);
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("only an unconfirmed batch the backend does not hold is reserved again", async () => {
+    const f = await fixture();
+    // Boundary reads fail, so both creates remain unconfirmed until listed.
+    const failing = vi.spyOn(f.transport, "read").mockRejectedValue(new Error("unavailable"));
+    await f.add("lost", { recipient: "github:lost" });
+    f.lose(true);
+    await f.flush(f.scope, { remind: false });
+    f.lose(false);
+    await f.add("missing", { recipient: "github:missing" });
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(new Error("network down"));
+    await f.flush(f.scope, { remind: false });
+    const [landed, missing] = (await f.service["load"](f.scope)).batches;
+    expect([landed!.status, missing!.status]).toEqual(["uncertain", "uncertain"]);
+    failing.mockRestore();
+    const read = vi.spyOn(f.transport, "read").mockImplementation(async (id, unconfirmed) => {
+      expect(unconfirmed).toBe(true);
+      return f.remote.get(id) ?? null;
+    });
+    await f.service.operate(f.scope, { action: "list" }, f.transport);
+    expect(read).toHaveBeenCalledTimes(2);
+    const statuses = (await f.service["load"](f.scope)).batches.map((b) => b.status);
+    expect(statuses).toEqual(["delivered", "reserved"]);
+    // A delivered batch that disappears is an error, never a resend.
+    read.mockImplementation(async () => null);
+    await expect(f.service.operate(f.scope, { action: "list" }, f.transport)).rejects.toThrow(
+      "chi-human-prompt-invalid-response",
+    );
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
   });
 
   it("rejects a forged create response before recording delivered", async () => {

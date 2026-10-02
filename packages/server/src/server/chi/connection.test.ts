@@ -1764,10 +1764,11 @@ describe("automatic sync destinations", () => {
         afterCreate?.();
         return Response.json({ ok: true, handoff });
       }
-      const result = Response.json({
-        ok: true,
-        handoff: remote.get(parsed.searchParams.get("id")!),
-      });
+      const handoff = remote.get(parsed.searchParams.get("id")!);
+      // The backend answers an unknown or invisible id with 404 not-found.
+      const result = handoff
+        ? Response.json({ ok: true, handoff })
+        : Response.json({ ok: false, reason: "not-found" }, { status: 404 });
       afterRead?.();
       return result;
     };
@@ -2101,7 +2102,7 @@ describe("automatic sync destinations", () => {
       expect(list).not.toHaveBeenCalled();
     } finally {
       gate.resolve();
-      await f.connection["humanPromptBoundaries"].get(f.agent.id)?.pending;
+      await f.connection["humanPromptBoundaries"].get(f.agent.id)?.done;
       await session.close();
     }
   });
@@ -2187,7 +2188,7 @@ describe("automatic sync destinations", () => {
     await f.add();
     const error = new Error("PRIVATE prompt, credential and backend response");
     error.name = name!;
-    vi.spyOn(f.connection.humanPrompts, "boundary").mockRejectedValue(error);
+    vi.spyOn(f.connection.humanPrompts, "dispatch").mockRejectedValue(error);
     expect(await f.connection.humanPromptBoundary(f.agent.id)).toBeNull();
     expect(f.logger.warn.mock.calls).toEqual([
       [{ agentId: f.agent.id, reason }, "Chi human prompt boundary withheld"],
@@ -2454,7 +2455,7 @@ describe("automatic sync destinations", () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       const foreground = f.connection.humanPromptBoundary(f.agent.id);
       await entered.promise;
-      const worker = f.connection["humanPromptBoundaries"].get(f.agent.id)!.pending;
+      const worker = f.connection["humanPromptBoundaries"].get(f.agent.id)!.done;
       await vi.advanceTimersByTimeAsync(budget);
       expect(await foreground).toBeNull();
       gate.resolve();
@@ -2507,7 +2508,7 @@ describe("automatic sync destinations", () => {
     gate.resolve();
     await Promise.all([first, queued]);
     await vi.waitFor(() => expect(f.remote.size).toBe(2));
-    await f.connection["humanPromptBoundaries"].get(f.agent.id)?.pending;
+    await f.connection["humanPromptBoundaries"].get(f.agent.id)?.done;
   });
 
   it("uses one authority bracket rather than one per handoff read at a boundary", async () => {
@@ -2532,6 +2533,462 @@ describe("automatic sync destinations", () => {
       request.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/handoffs"),
     ).toHaveLength(4);
     expect(request.mock.calls).toHaveLength(4);
+  });
+
+  async function humanState(home: string, agentId: string) {
+    return JSON.parse(
+      await readFile(
+        join(
+          home,
+          "chi",
+          "human-prompts",
+          createHash("sha256").update(agentId).digest("hex") + ".json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      batches: Array<{ id: string; status: string }>;
+      items: Array<{ answer: unknown }>;
+    };
+  }
+  async function humanQuota(home: string) {
+    return JSON.parse(
+      await readFile(join(home, "chi", "human-prompts", "quota.json"), "utf8").catch(() => "[]"),
+    ) as unknown[];
+  }
+  /** Holds the first request matching `match` until released. */
+  function holdRequest(
+    f: { authority: { request: typeof fetch } },
+    match: (path: string, method: string) => boolean,
+  ) {
+    const entered = barrier();
+    const gate = barrier();
+    const request = f.authority.request;
+    let held = false;
+    f.authority.request = async (url, init) => {
+      if (!held && match(new URL(String(url)).pathname, init?.method ?? "GET")) {
+        held = true;
+        entered.resolve();
+        await gate.promise;
+      }
+      return request(url, init);
+    };
+    return { entered: entered.promise, release: gate.resolve };
+  }
+  function failPost(f: { authority: { request: typeof fetch } }, failure: number | Error) {
+    const request = f.authority.request;
+    const posted: string[] = [];
+    let failing = true;
+    f.authority.request = async (url, init) => {
+      if (new URL(String(url)).pathname === "/handoffs" && init?.method === "POST") {
+        posted.push(JSON.parse(String(init.body)).id);
+        if (failing) {
+          failing = false;
+          if (failure instanceof Error) throw failure;
+          return Response.json({ ok: false, reason: "unavailable" }, { status: failure });
+        }
+      }
+      return request(url, init);
+    };
+    return posted;
+  }
+  function answer(f: { remote: Map<string, ChiHandoff> }, recipient: string, text: string) {
+    const handoff = [...f.remote.values()].find((h) => h.recipient === recipient)!;
+    handoff.replies = [
+      {
+        id: "3fad06da-0902-405e-9476-ac1d8fdd9480",
+        actor: recipient,
+        revision: 2,
+        at: "now",
+        text: encodeHumanAnswers([{ id: readHumanPrompts(handoff.text)!.items[0]!.id, text }]),
+      },
+    ];
+  }
+
+  it.each([503, "network"])(
+    "a %s create is resent under the same id; its 404 is not-created, never lost access",
+    async (failure) => {
+      const f = await humanFixture();
+      const posted = failPost(f, failure === 503 ? 503 : new Error("network down"));
+      const invalidate = vi.spyOn(f.authority, "invalidate");
+      await f.add();
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      expect(f.remote.size).toBe(0);
+      // The read proves the create never landed, so the batch is reserved again.
+      expect((await humanState(f.home, f.agent.id)).batches.map((b) => b.status)).toEqual([
+        "reserved",
+      ]);
+      const listed = await f.connection.humanPromptOperation(f.agent.id, { action: "list" });
+      expect(listed.items.map((i) => i.delivery)).toEqual(["reserved"]);
+      expect(invalidate).not.toHaveBeenCalled();
+      // Warm authority survived the 404: listing needed no new acquisition.
+      const requests = vi.spyOn(f.authority, "request");
+      await f.connection.humanPromptOperation(f.agent.id, { action: "list" });
+      expect(
+        requests.mock.calls.filter(([url]) => new URL(String(url)).pathname !== "/handoffs"),
+      ).toEqual([]);
+      // The next boundary resends that immutable batch without an agent retry.
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      expect(f.remote.size).toBe(1);
+      expect(posted).toHaveLength(2);
+      expect(posted[1]).toBe(posted[0]);
+      expect([...f.remote.keys()]).toEqual([posted[0]]);
+      expect(await humanQuota(f.home)).toHaveLength(1);
+      expect(
+        (await f.connection.humanPromptOperation(f.agent.id, { action: "list" })).items[0]!
+          .delivery,
+      ).toBe("delivered");
+    },
+  );
+
+  it("an explicit retry delivers a create lost to a 503", async () => {
+    const f = await humanFixture();
+    const posted = failPost(f, 503);
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    await f.connection.humanPromptOperation(f.agent.id, { action: "list" });
+    const retried = await f.connection.humanPromptOperation(f.agent.id, { action: "retry" });
+    expect(retried.items.map((i) => i.delivery)).toEqual(["delivered"]);
+    expect(posted).toEqual([posted[0], posted[0]]);
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("an undelivered batch reading 404 never withholds another recipient's answer", async () => {
+    const f = await humanFixture();
+    failPost(f, new Error("network down"));
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    await f.connection.humanPromptOperation(f.agent.id, {
+      action: "add",
+      dedupeKey: "other",
+      kind: "question",
+      priority: "blocking",
+      recipient: "github:other",
+      text: "Which size?",
+    });
+    // Keep the owner's batch unsent so every boundary still reads its 404.
+    f.connection.isHumanPromptViewed = (_agent, recipient) => recipient === "github:owner";
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    answer(f, "github:other", "Large");
+    const reminders: Array<string | null> = [];
+    for (let turn = 0; turn < 2; turn++)
+      reminders.push(await f.connection.humanPromptBoundary(f.agent.id));
+    expect(reminders[0]).toContain("Large");
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("a per-agent failure elsewhere cannot fail an in-flight send", async () => {
+    const f = await humanFixture();
+    await f.add();
+    // Hold fresh write admission while another agent fails.
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    // For example, the question sweep visiting an agent outside any mapping.
+    await expect(
+      f.connection.humanPromptOperation("some-other-agent", { action: "list" }),
+    ).rejects.toThrow("chi-native-agent-required");
+    const unmapped = { ...f.agent, id: "unmapped", labels: {} };
+    f.agents.push(unmapped);
+    await expect(
+      f.connection.humanPromptOperation(unmapped.id, { action: "list" }),
+    ).rejects.toThrow("mapping-required");
+    held.release();
+    await pending;
+    expect(f.remote.size).toBe(1);
+    expect(await humanQuota(f.home)).toHaveLength(1);
+  });
+
+  it.each([
+    ["another repository", "github:fixture/other", 403, 0],
+    ["this repository", "github:fixture/repo", 403, 2],
+    ["the host session", "github:fixture/other", 401, 2],
+  ])("access loss for %s clears only that scope", async (_name, repo, status, expected) => {
+    const f = await humanFixture();
+    await f.add();
+    const request = f.authority.request;
+    f.authority.request = async (url, init) =>
+      new URL(String(url)).pathname === "/participants"
+        ? new Response("PRIVATE", { status })
+        : request(url, init);
+    await f.connection.mentions["authority"]
+      .request(new URL("/participants", f.authority.endpoint), {
+        headers: { "x-chi-repo": repo },
+      })
+      .then((response) => response.body?.cancel());
+    f.authority.request = request;
+    const reacquired = vi.spyOn(f.authority, "request");
+    await f.add();
+    expect(reacquired).toHaveBeenCalledTimes(expected);
+  });
+
+  it("a recipient who starts viewing during admission keeps the batch reserved for later", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    f.connection.isHumanPromptViewed = () => true;
+    held.release();
+    await pending;
+    expect(f.remote.size).toBe(0);
+    const before = await humanState(f.home, f.agent.id);
+    expect(before.batches.map((b) => b.status)).toEqual(["reserved"]);
+    f.connection.isHumanPromptViewed = () => false;
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect([...f.remote.keys()]).toEqual([before.batches[0]!.id]);
+    // The same batch on the same day reuses its reserved slot.
+    expect(await humanQuota(f.home)).toHaveLength(1);
+  });
+
+  it("a reserved batch still waits while muted", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    f.connection.isHumanPromptViewed = () => true;
+    held.release();
+    await pending;
+    await f.connection.humanPromptOperation(f.agent.id, { action: "mute", muted: true });
+    f.connection.isHumanPromptViewed = () => false;
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect(f.remote.size).toBe(0);
+  });
+
+  it.each([
+    [409, "failed"],
+    [404, "failed"],
+    [422, "failed"],
+    [403, "reserved"],
+    [401, "reserved"],
+    [500, "uncertain"],
+  ])("a %i create response records %s", async (status, recorded) => {
+    const f = await humanFixture();
+    failPost(f, status);
+    await f.add();
+    const access = await f.connection["humanPromptAccess"](f.agent.id);
+    await f.connection.humanPrompts.dispatch(access.scope, access.transport, {
+      source: { kind: "neutral", id: f.sourceId, snapshot: "b".repeat(64), entryId: "msg_fork" },
+      viewed: false,
+    });
+    expect((await humanState(f.home, f.agent.id)).batches.map((b) => b.status)).toEqual([recorded]);
+  });
+
+  it("a turn start that joins an after-turn worker still gets cached answers without waiting for it", async () => {
+    const f = await humanFixture();
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    await f.connection.humanPromptOperation(f.agent.id, {
+      action: "add",
+      dedupeKey: "other",
+      kind: "question",
+      priority: "blocking",
+      recipient: "github:other",
+      text: "Still open",
+    });
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    answer(f, "github:owner", "Blue");
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    // The after-turn worker's read of the still-open batch stays held.
+    const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    const afterTurn = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    try {
+      expect(await f.connection.humanPromptBoundary(f.agent.id)).toContain("Blue");
+      expect(f.logger.warn).not.toHaveBeenCalled();
+    } finally {
+      held.release();
+      await afterTurn;
+    }
+  });
+
+  it("a turn start that joins an after-turn worker renders its statuses once reads finish", async () => {
+    const f = await humanFixture();
+    await f.add();
+    const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    const afterTurn = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    const turnStart = f.connection.humanPromptBoundary(f.agent.id);
+    held.release();
+    expect(await turnStart).toContain('"status":"delivered"');
+    await afterTurn;
+  });
+
+  it("the first step of a brand-new session pins its prompt and can add and dispatch", async () => {
+    const f = await humanFixture();
+    const harness = new V2Harness();
+    harness.info.id = "ses_fork";
+    harness.history.push({ id: "msg_first", type: "user", text: "hi", time: { created: 1 } });
+    const session = await new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    }).resumeSession({ provider: "opencode", sessionId: "ses_fork", metadata: { cwd: f.home } });
+    f.manager.getAgent(f.agent.id)!.session = session;
+    try {
+      await f.add();
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      expect(readHumanPrompts([...f.remote.values()][0]!.text)?.turnId).toBe("msg_first");
+    } finally {
+      await session.close();
+    }
+  });
+
+  it.each(["removed", "closed"])(
+    "an agent %s while its detached boundary waits never posts or keeps reading",
+    async (change) => {
+      const f = await humanFixture();
+      await f.add();
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+      const held = holdRequest(f, (path) => path === "/auth/session");
+      const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+      await held.entered;
+      const requests = vi.spyOn(f.authority, "request");
+      const saved = [...f.agents];
+      if (change === "removed") f.agents.splice(0);
+      else f.connection.agentClosed(f.agent.id);
+      held.release();
+      await pending;
+      f.agents.splice(0, f.agents.length, ...saved);
+      expect(f.remote.size).toBe(0);
+      if (change === "closed") {
+        expect(f.logger.warn.mock.calls).toEqual([
+          [{ agentId: f.agent.id, reason: "agent-closed" }, "Chi human prompt boundary aborted"],
+        ]);
+        // Only the already-issued authorization completes; no handoff reads follow.
+        expect(
+          requests.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/handoffs"),
+        ).toEqual([]);
+      }
+    },
+  );
+
+  it("a closed agent's worker stops between reconciliation reads", async () => {
+    const f = await humanFixture();
+    for (const recipient of ["github:a", "github:b", "github:c"]) {
+      await f.connection.humanPromptOperation(f.agent.id, {
+        action: "add",
+        dedupeKey: recipient,
+        kind: "question",
+        priority: "blocking",
+        recipient,
+        text: "Pick",
+      });
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+    }
+    const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    const reads = vi.spyOn(f.authority, "request");
+    const pending = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    f.connection.agentClosed(f.agent.id);
+    held.release();
+    await pending;
+    expect(
+      reads.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/handoffs"),
+    ).toHaveLength(1);
+  });
+
+  it("a coalesced request never reruns an aborted worker, but a later boundary starts afresh", async () => {
+    const f = await humanFixture();
+    await f.add();
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    const first = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    const coalesced = f.connection.humanPromptBoundary(f.agent.id, false);
+    f.connection.agentClosed(f.agent.id);
+    held.release();
+    await Promise.all([first, coalesced]);
+    expect(f.connection["humanPromptBoundaries"].size).toBe(0);
+    expect(f.remote.size).toBe(0);
+    // A reload reopens the agent: its next boundary must not join the aborted run.
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("a new worker reads afresh instead of joining an aborted worker's reconciliation", async () => {
+    const f = await humanFixture();
+    for (const recipient of ["github:a", "github:b"]) {
+      await f.connection.humanPromptOperation(f.agent.id, {
+        action: "add",
+        dedupeKey: recipient,
+        kind: "question",
+        priority: "blocking",
+        recipient,
+        text: "Pick",
+      });
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+    }
+    answer(f, "github:a", "A");
+    answer(f, "github:b", "B");
+    const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    const aborted = f.connection.humanPromptBoundary(f.agent.id, false);
+    await held.entered;
+    f.connection.agentClosed(f.agent.id);
+    // The agent is reloaded rather than removed, so its next boundary runs.
+    const next = f.connection.humanPromptBoundary(f.agent.id, false);
+    held.release();
+    await Promise.all([aborted, next]);
+    expect(
+      (await humanState(f.home, f.agent.id)).items.filter((i) => i.answer !== null),
+    ).toHaveLength(2);
+    expect(f.logger.warn.mock.calls).toEqual([
+      [{ agentId: f.agent.id, reason: "agent-closed" }, "Chi human prompt boundary aborted"],
+    ]);
+  });
+
+  it("an abandoned foreground reminder does no further authority work", async () => {
+    const f = await humanFixture();
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    const held = holdRequest(f, (path, method) => path === "/handoffs" && method === "GET");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const foreground = f.connection.humanPromptBoundary(f.agent.id);
+    await held.entered;
+    const worker = f.connection["humanPromptBoundaries"].get(f.agent.id)!.done;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await foreground).toBeNull();
+    const login = vi.spyOn(f.authority, "login");
+    held.release();
+    expect(await worker).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(login).not.toHaveBeenCalled();
+    expect(f.logger.warn.mock.calls).toEqual([
+      [
+        { agentId: f.agent.id, reason: "foreground-budget" },
+        "Chi human prompt boundary wait timed out",
+      ],
+    ]);
+  });
+
+  it("a backend capability upgrade applies on the next boundary, not after the cache TTL", async () => {
+    const f = await humanFixture();
+    await f.add();
+    f.capability(false);
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect(f.remote.size).toBe(0);
+    f.capability(true);
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("a credential change invalidates an acquisition still in flight for the old one", async () => {
+    const f = await humanFixture();
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    const held = holdRequest(f, (path) => path === "/auth/session");
+    const pending = f.add();
+    const rejected = expect(pending).rejects.toThrow("context-changed");
+    await held.entered;
+    const login = f.authority.login;
+    f.authority.login = async () => ({
+      ...(await login()),
+      sessionToken: "ROTATED-PRIVATE",
+      credentialGeneration: "rotated",
+    });
+    await f.connection["humanPromptIdentity"](f.home, false).catch(() => undefined);
+    held.release();
+    await rejected;
+    expect(await f.connection.humanPrompts.hasItems(f.agent.id)).toBe(false);
   });
 
   it("human question routing resumes only its pending owner form with exact multi-select answers", async () => {
