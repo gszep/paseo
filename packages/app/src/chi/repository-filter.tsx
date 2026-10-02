@@ -10,7 +10,7 @@ import { ALL_REPOSITORIES_OPTION_ID, repositoryLabel } from "@/chi/inbox-model";
 const ThemedFolder = withUnistyles(Folder);
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-export interface RepositoryFilterProps {
+interface RepositoryFilterProps {
   /** Repositories present in the loaded pages, in canonical `github:owner/name` form. */
   repositories: readonly string[];
   selected: string;

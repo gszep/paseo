@@ -8,7 +8,7 @@
  * brand never has to be scattered through the code.
  */
 
-export interface BrandMark {
+interface BrandMark {
   /** SVG viewBox the mark paths are authored in. */
   viewBox: string;
   /** One or more SVG path `d` strings drawn in `viewBox`. */
@@ -22,18 +22,18 @@ export interface BrandWorkingIndicator {
   intervalMs: number;
 }
 
-export interface BrandFaviconSet {
+interface BrandFaviconSet {
   none: string;
   running: string;
   attention: string;
 }
 
-export interface BrandFavicons {
+interface BrandFavicons {
   light: BrandFaviconSet;
   dark: BrandFaviconSet;
 }
 
-export interface BrandAttribution {
+interface BrandAttribution {
   /** Short footer label, e.g. "Powered by Paseo". */
   label: string;
   /** HTTPS destination opened in the user's browser. */

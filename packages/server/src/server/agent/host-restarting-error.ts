@@ -16,7 +16,3 @@ export class HostRestartingError extends Error {
     this.name = "HostRestartingError";
   }
 }
-
-export function isHostRestartingError(error: unknown): error is HostRestartingError {
-  return error instanceof HostRestartingError;
-}

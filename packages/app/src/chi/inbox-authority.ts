@@ -1,13 +1,13 @@
 import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import type { ContinuationStorage } from "./continuation-state";
 
-export type InboxPrincipal = Pick<ChiMentionContext, "actor" | "deployment">;
-export function sameInboxPrincipal(a: InboxPrincipal, b: InboxPrincipal) {
+type InboxPrincipal = Pick<ChiMentionContext, "actor" | "deployment">;
+function sameInboxPrincipal(a: InboxPrincipal, b: InboxPrincipal) {
   return Boolean(a.deployment && a.actor === b.actor && a.deployment === b.deployment);
 }
 
 /** Host connection states that mean a host has finished its first connection attempt. */
-export type InboxHostConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
+type InboxHostConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
 
 /**
  * True once every configured host has reported a terminal connection state (or

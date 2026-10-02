@@ -12,7 +12,7 @@ export interface SyncDestination {
 }
 
 /** The daemon's answer for one workspace; null destination means local. */
-export interface SyncDestinationResponse {
+interface SyncDestinationResponse {
   destination: SyncDestination | null;
   pending: boolean;
   error: string | null;
