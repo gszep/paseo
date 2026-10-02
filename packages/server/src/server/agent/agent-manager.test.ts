@@ -191,10 +191,11 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
     try {
       for (const manager of [makeManager(), makeManager()]) {
         const listing = await manager.listImportableSessions();
-        if (status === "forking" || status === "failed-forking") {
+        if (process.platform === "win32" || status === "forking" || status === "failed-forking") {
           expect(listing.sessions).toEqual([]);
           expect(listing.providerErrors).toHaveLength(1);
-          // The provider knows the fork exists; the durable receipt does not.
+          // Windows cannot establish POSIX receipt privacy. Otherwise the
+          // provider knows the fork exists but the durable receipt does not.
           // Neither discovery nor guessed direct IDs may evade the owner gate.
           for (const row of rows) {
             await expect(
@@ -223,7 +224,8 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
         }
         expect(client.importSession).not.toHaveBeenCalled();
       }
-      if (status === "forking" || status === "failed-forking") return;
+      if (process.platform === "win32" || status === "forking" || status === "failed-forking")
+        return;
       if (status === "ready") {
         execFileSync("git", ["init", "--quiet", home]);
         execFileSync("git", [

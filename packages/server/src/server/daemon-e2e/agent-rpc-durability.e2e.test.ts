@@ -236,7 +236,11 @@ test("agent fetch RPCs tolerate an agent whose workspace project record is gone"
   let client: DaemonClient | null = null;
 
   try {
-    daemon = await createTestPaseoDaemon({ paseoHomeRoot: fixture.paseoHomeRoot, cleanup: false });
+    daemon = await createTestPaseoDaemon({
+      paseoHomeRoot: fixture.paseoHomeRoot,
+      cleanup: false,
+      agentClients: { codex: createTestAgentClient("codex") },
+    });
     client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     await client.connect();
 
@@ -306,7 +310,11 @@ test("history search filters before pagination and keeps newest matches first", 
         lastActivityAt: updatedAt,
       });
     }
-    daemon = await createTestPaseoDaemon({ paseoHomeRoot: fixture.paseoHomeRoot, cleanup: false });
+    daemon = await createTestPaseoDaemon({
+      paseoHomeRoot: fixture.paseoHomeRoot,
+      cleanup: false,
+      agentClients: { codex: createTestAgentClient("codex") },
+    });
     client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     await client.connect();
     const first = await client.fetchAgentHistory({ search: "bill", page: { limit: 1 } });

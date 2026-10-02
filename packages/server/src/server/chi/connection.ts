@@ -1315,7 +1315,7 @@ export class ChiConnection {
   /**
    * Bind a pre-P1 association to its configured destination, or pause it when the
    * repository no longer maps or the pinned endpoint changed. Pausing never moves
-   * data and never blocks prompts.
+   * data. Canonical continuation prompts still require an active destination.
    */
   private async reconcileAssociation(
     agentId: string,
@@ -1352,13 +1352,18 @@ export class ChiConnection {
     // COMPAT(chi-pre-destinations): migration only, added 2026-10-01. Retain until
     // pre-P1 persisted labels have been migrated; this URL never authorizes I/O.
     const oldEndpoint = association.endpoint ?? "https://chi-backend-vadmp23swa-an.a.run.app";
-    const resolved = destinationForEndpoint(config, oldEndpoint);
+    const mapping = resolveChiDestinationForRepo(config, association.repo);
+    if (!association.explicit && (!mapping || mapping.endpoint !== oldEndpoint))
+      return paused("chi-destination-unmapped");
+    const resolved = association.explicit
+      ? destinationForEndpoint(config, oldEndpoint)
+      : { id: mapping!.destinationId, endpoint: mapping!.endpoint };
     if (!resolved) return paused("chi-destination-required");
     return {
       ...association,
       destination: resolved.id,
       endpoint: resolved.endpoint,
-      audience: association.audience ?? (association.explicit ? "private" : "shared"),
+      audience: association.explicit ? "private" : (association.audience ?? mapping!.audience),
       paused: false,
       error: association.paused ? null : association.error,
     };
@@ -1383,7 +1388,13 @@ export class ChiConnection {
     agentId: string,
   ): Promise<Association> {
     const deleted = safeChiError(settled.captureError).endsWith("object-deleted");
-    if (association.destination && !association.paused && !deleted) {
+    const mapping = resolveChiDestinationForRepo(this.chiConfig(), association.repo);
+    if (
+      association.destination &&
+      !association.paused &&
+      !deleted &&
+      mapping?.endpoint === association.endpoint
+    ) {
       await this.writeProvenanceFor(
         target,
         association,
@@ -1824,7 +1835,7 @@ export class ChiConnection {
     const identities = await this.workspaceIdentities(input.workspaceId);
     for (const identity of identities) {
       if (identity.association)
-        identity.association = await this.reconcileAssociation(identity.id, identity.association);
+        identity.association = this.resolveAssociation(identity.association);
     }
     if (input.retry)
       for (const identity of identities) void this.capture(identity.id).catch(() => undefined);

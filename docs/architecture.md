@@ -43,9 +43,13 @@ associates one agent explicitly; configured repository mappings associate agents
 automatically under the mapping's pinned audience. Unmapped agents stay local.
 Chi network operations require an explicitly configured destination; new Share,
 Continue intake and workspace mentions also require a repository mapping. Legacy
-destination-less labels bind only to a destination with the exact former endpoint,
-retaining their audience, or pause before auth/export. Removing all configuration
-pauses existing associations. Receipt quarantine covers every deployment on the
+destination-less labels require a repository mapping to the exact former endpoint,
+or stay paused with `chi-destination-unmapped` before auth/export. Explicit legacy
+Share/Continue labels may bind by exact endpoint with private audience; provenance
+still requires a current repository mapping to that endpoint. Status reads resolve
+these states without writing labels. Removing a pinned destination pauses capture
+and blocks canonical continuation prompts; ordinary noncanonical prompts remain
+usable. Receipt quarantine covers every deployment on the
 owning host, even after its destination is removed. The initial inbox/mention
 transport binds to the sole configured endpoint at startup; restart after changing
 it. Multiple capture destinations do not implicitly choose an inbox deployment.

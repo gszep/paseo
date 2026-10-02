@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import * as spawn from "../../utils/spawn.js";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { minimiseNativeExport, prepareNativeCapture } from "@henkaku-center/chi-native/capture";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, type ChiAuthority, type ChiConnectionOptions } from "./connection.js";
 import type { ProvenanceRemover, ProvenanceWriter } from "./provenance.js";
+import type { ChiDestinationsConfig } from "./destinations.js";
 import { classifyMentionFailure } from "./mention-failure.js";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
@@ -994,6 +996,19 @@ describe("canonical Chi coordination", () => {
       cwd: f.home,
       workspaceId: f.input.workspaceId,
     };
+    if (process.platform === "win32") {
+      // No POSIX receipt privacy: refuse discovery and direct registration.
+      await expect(owner.quarantinedSessions()).rejects.toThrow(
+        "chi-receipt-quarantine-unavailable",
+      );
+      await expect(owner.assertImportAllowed(selection)).rejects.toThrow(
+        "chi-receipt-quarantine-unavailable",
+      );
+      expect(f.registration.register).not.toHaveBeenCalled();
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.runtime.fork).not.toHaveBeenCalled();
+      return;
+    }
     expect(await owner.quarantinedSessions()).toEqual([
       { sessionId: "ses_fork", cwd: f.home, kind: "fork" },
     ]);
@@ -1653,7 +1668,7 @@ describe("automatic sync destinations", () => {
     mappings: Array<{ repo: string; destination: string; audience?: "private" | "shared" }> = [
       { repo: "github:fixture/repo", destination: "henkaku", audience },
     ],
-  ) => ({
+  ): ChiDestinationsConfig => ({
     destinations: { henkaku: { name: "Henkaku", endpoint } },
     mappings,
   });
@@ -1816,7 +1831,7 @@ describe("automatic sync destinations", () => {
   it.each([false, true])(
     "migrates legacy explicit=%s by exact endpoint without following a new mapping or widening audience",
     async (explicit) => {
-      const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared", []));
+      const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "shared"));
       const agent = await f.register({
         "chi.native": JSON.stringify({
           repo: f.input.repo,
@@ -1841,6 +1856,154 @@ describe("automatic sync destinations", () => {
     },
   );
 
+  const hostConfig = () =>
+    destinationConfig(LEGACY_ENDPOINT, "shared", [
+      { repo: "github:henkaku-center/chi", destination: "henkaku", audience: "shared" },
+    ]);
+
+  it("migrates the hosts' mapped chi legacy label with the shared audience and provenance", async () => {
+    const f = await syncFixture(hostConfig());
+    f.input.repo = "github:henkaku-center/chi";
+    execFileSync("git", [
+      "-C",
+      f.home,
+      "remote",
+      "set-url",
+      "origin",
+      "https://github.com/henkaku-center/chi.git",
+    ]);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: f.input.repo,
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    const provenance = vi.fn<ProvenanceWriter>(async () => ({
+      attempted: false,
+      created: false,
+      reason: "worktree-clean",
+      ref: "",
+    }));
+    expect(await f.connect(undefined, undefined, { provenance }).capture(agent.id)).toMatchObject({
+      destination: "henkaku",
+      endpoint: LEGACY_ENDPOINT,
+      audience: "shared",
+      paused: false,
+    });
+    expect(f.evidence).toEqual([{ visibility: "shared" }]);
+    expect(provenance).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "private", "shared"] as const)(
+    "keeps an explicit unmapped legacy association private without provenance (audience=%s)",
+    async (audience) => {
+      const f = await syncFixture(hostConfig());
+      const agent = await f.register({
+        "chi.native": JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: null,
+          head: null,
+          error: null,
+          explicit: true,
+          audience,
+        }),
+      });
+      const provenance = vi.fn<ProvenanceWriter>();
+      const connection = f.connect(undefined, undefined, { provenance });
+      expect(await connection.capture(agent.id)).toMatchObject({
+        destination: "henkaku",
+        endpoint: LEGACY_ENDPOINT,
+        audience: "private",
+      });
+      await connection.capture(agent.id);
+      expect(f.evidence).toEqual([{ visibility: "private" }, { visibility: "private" }]);
+      expect(provenance).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not migrate legacy history to its new mapping even when the old endpoint is still configured", async () => {
+    const config = {
+      destinations: {
+        ...hostConfig().destinations,
+        peer: { name: "Peer", endpoint: "https://peer.invalid" },
+      },
+      mappings: [{ repo: "github:fixture/repo", destination: "peer", audience: "shared" as const }],
+    };
+    const f = await syncFixture(config);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: f.input.repo,
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    const login = vi.spyOn(f.authority, "login");
+    const provenance = vi.fn<ProvenanceWriter>();
+    await expect(f.connect(undefined, undefined, { provenance }).capture(agent.id)).rejects.toThrow(
+      "chi-destination-unmapped",
+    );
+    expect(login).not.toHaveBeenCalled();
+    expect(f.evidenceAttempts()).toBe(0);
+    expect(provenance).not.toHaveBeenCalled();
+  });
+
+  it("uses the mapped private audience when a legacy label has no pinned audience", async () => {
+    const f = await syncFixture(destinationConfig(LEGACY_ENDPOINT, "private"));
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: f.input.repo,
+        actor: "github:owner",
+        sourceId: null,
+        head: null,
+        error: null,
+      }),
+    });
+    expect(await f.connect().capture(agent.id)).toMatchObject({ audience: "private" });
+    expect(f.evidence).toEqual([{ visibility: "private" }]);
+  });
+
+  it.each([false, true])(
+    "keeps an unmapped legacy label paused (already paused=%s) under the hosts' config",
+    async (paused) => {
+      const f = await syncFixture(hostConfig());
+      const agent = await f.register({
+        "chi.native": JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: null,
+          head: null,
+          paused,
+          error: paused ? "chi-destination-unmapped" : null,
+        }),
+      });
+      const login = vi.spyOn(f.authority, "login");
+      const provenance = vi.fn<ProvenanceWriter>();
+      const connection = f.connect(undefined, undefined, { provenance });
+      // Repeated capture/reconciliation must not turn the pause into a binding.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(connection.capture(agent.id)).rejects.toThrow("chi-destination-unmapped");
+        expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
+          paused: true,
+          error: "chi-destination-unmapped",
+          capturePending: false,
+        });
+      }
+      expect(
+        JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!).destination,
+      ).toBeUndefined();
+      expect(login).not.toHaveBeenCalled();
+      expect(f.runtime.export).not.toHaveBeenCalled();
+      expect(f.evidenceAttempts()).toBe(0);
+      expect(provenance).not.toHaveBeenCalled();
+    },
+  );
+
   it("blocks a late upload after config removal and never sends its bearer to a replacement endpoint", async () => {
     const f = await syncFixture();
     const agent = await f.register();
@@ -1861,6 +2024,164 @@ describe("automatic sync destinations", () => {
     await expect(connection.capture(agent.id)).rejects.toThrow("chi-destination-required");
     expect(f.evidenceAttempts()).toBe(0);
     expect(f.evidence).toEqual([]);
+  });
+
+  it("rechecks the cached authority before login when configuration disappears during repository resolution", async () => {
+    const f = await syncFixture();
+    const agent = await f.register();
+    let config: ReturnType<typeof destinationConfig> | undefined = destinationConfig();
+    const connection = new ChiConnection(f.manager, {
+      home: f.home,
+      serverId: "server",
+      authority: f.authority,
+      getChiConfig: () => config,
+      scanCapture: async () => ({ verdict: "clean" }),
+      provenance: async () => ({
+        attempted: false,
+        created: false,
+        reason: "worktree-clean",
+        ref: "",
+      }),
+    });
+    await connection.capture(agent.id); // Cache the wrapped authority.
+    const login = vi.spyOn(f.authority, "login");
+    const request = vi.spyOn(f.authority, "request");
+    const resolveRepo = barrier();
+    const releaseRepo = barrier();
+    vi.spyOn(spawn, "execCommand").mockImplementationOnce(async () => {
+      resolveRepo.resolve();
+      await releaseRepo.promise;
+      return { stdout: "https://github.com/fixture/repo.git", stderr: "" };
+    });
+    const capture = connection.capture(agent.id);
+    const rejected = expect(capture).rejects.toThrow("chi-destination-required");
+    await resolveRepo.promise;
+    config = undefined;
+    releaseRepo.resolve();
+    await rejected;
+    expect(login).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    expect(f.evidence).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    "refuses to choose a mention or inbox deployment among distinct endpoints (reversed=%s)",
+    async (reversed) => {
+      const destinations = [
+        ["henkaku", { name: "Henkaku", endpoint: LEGACY_ENDPOINT }],
+        ["peer", { name: "Peer", endpoint: "https://peer.invalid" }],
+      ] as const;
+      const config = {
+        ...destinationConfig(),
+        destinations: Object.fromEntries(reversed ? destinations.toReversed() : destinations),
+      };
+      const f = await syncFixture(config);
+      const agent = await f.register();
+      const connection = f.connect();
+      await connection.capture(agent.id);
+      expect(f.evidence).toEqual([{ visibility: "shared" }]);
+      const login = vi.spyOn(f.authority, "login");
+      const request = vi.spyOn(f.authority, "request");
+      expect(
+        (await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).mentionsAvailable,
+      ).toBe(false);
+      await expect(
+        connection.mentionOperation(f.home, "workspace", { action: "scope" }),
+      ).rejects.toThrow("chi-destination-required");
+      await expect(connection.inboxOperation({ action: "scope" })).rejects.toThrow(
+        "chi-destination-required",
+      );
+      expect(login).not.toHaveBeenCalled();
+      expect(request).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["removed", "remapped"])(
+    "rechecks the repository mapping before provenance when it is %s during upload",
+    async (change) => {
+      const f = await syncFixture();
+      const agent = await f.register();
+      let config = destinationConfig();
+      const request = f.authority.request;
+      f.authority.request = async (url, init) => {
+        const response = await request(url, init);
+        if (new URL(String(url)).pathname === "/evidence" && init?.method === "POST")
+          config =
+            change === "removed"
+              ? destinationConfig(LEGACY_ENDPOINT, "shared", [])
+              : destinationConfig("https://peer.invalid");
+        return response;
+      };
+      const provenance = vi.fn<ProvenanceWriter>();
+      const connection = new ChiConnection(f.manager, {
+        home: f.home,
+        serverId: "server",
+        authority: f.authority,
+        getChiConfig: () => config,
+        scanCapture: async () => ({ verdict: "clean" }),
+        provenance,
+      });
+      await connection.capture(agent.id);
+      expect(f.evidence).toEqual([{ visibility: "shared" }]);
+      expect(provenance).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["legacy", "unmapped", "paused"])(
+    "reads %s sync status without writing agent labels",
+    async (state) => {
+      const f = await syncFixture(state === "unmapped" ? hostConfig() : destinationConfig());
+      const labels = {
+        "chi.native": JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: null,
+          head: null,
+          error: null,
+          ...(state === "paused"
+            ? { destination: "henkaku", endpoint: LEGACY_ENDPOINT, paused: true }
+            : {}),
+        }),
+      };
+      const agent = await f.register(labels);
+      const connection = f.connect();
+      const first = await connection.syncStatus({ workspaceId: "workspace", cwd: f.home });
+      expect(await connection.syncStatus({ workspaceId: "workspace", cwd: f.home })).toEqual(first);
+      expect(first.error).toBe(state === "unmapped" ? "chi-destination-unmapped" : null);
+      expect(f.manager.getAgent(agent.id)!.labels).toEqual(labels);
+      expect(f.manager.updateAgentLabel).not.toHaveBeenCalled();
+      expect(f.manager.updateAgentMetadata).not.toHaveBeenCalled();
+      expect(f.evidenceAttempts()).toBe(0);
+    },
+  );
+
+  it("blocks continuation prompts after destination removal while local prompts remain usable", async () => {
+    const f = await syncFixture(null);
+    const agent = await f.register({
+      "chi.native": JSON.stringify({
+        repo: f.input.repo,
+        actor: "github:owner",
+        sourceId: "a".repeat(64),
+        head: "b".repeat(64),
+        error: null,
+        destination: "henkaku",
+        endpoint: LEGACY_ENDPOINT,
+        conversationId: "conversation",
+      }),
+    });
+    const start = vi.fn(async () => "started");
+    const login = vi.spyOn(f.authority, "login");
+    const connection = f.connect();
+    await expect(connection.withPromptAdmission(agent.id, start)).rejects.toThrow(
+      "chi-destination-changed",
+    );
+    expect(start).not.toHaveBeenCalled();
+    expect(login).not.toHaveBeenCalled();
+    const stored = JSON.parse(f.agents[0]!.labels["chi.native"]!);
+    delete stored.conversationId;
+    f.agents[0]!.labels["chi.native"] = JSON.stringify(stored);
+    await expect(connection.withPromptAdmission(agent.id, start)).resolves.toBe("started");
+    expect(start).toHaveBeenCalledOnce();
   });
 
   async function humanFixture() {
@@ -1974,6 +2295,22 @@ describe("automatic sync destinations", () => {
     await expect(f.connection.humanPromptOperation(f.agent.id, { action: "list" })).rejects.toThrow(
       "404",
     );
+  });
+
+  it("never falls back to the old endpoint for human prompts on an unmigrated label", async () => {
+    const f = await humanFixture();
+    const agent = f.manager.getAgent(f.agent.id)!;
+    const stored = JSON.parse(agent.labels["chi.native"]!);
+    delete stored.destination;
+    delete stored.endpoint;
+    agent.labels["chi.native"] = JSON.stringify(stored);
+    const login = vi.spyOn(f.authority, "login");
+    const request = vi.spyOn(f.authority, "request");
+    await expect(f.connection.humanPromptOperation(agent.id, { action: "list" })).rejects.toThrow(
+      "chi-destination-required",
+    );
+    expect(login).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("an empty human-prompt boundary does not acquire credentials or start repository work", async () => {
@@ -2199,6 +2536,12 @@ describe("automatic sync destinations", () => {
 
   it("uses one authority bracket rather than one per handoff read at a boundary", async () => {
     const f = await humanFixture();
+    // This is a request-count contract. Subprocess scheduling must not consume
+    // the boundary's two-second production deadline on a loaded host.
+    vi.spyOn(spawn, "execCommand").mockResolvedValue({
+      stdout: "https://github.com/fixture/repo.git",
+      stderr: "",
+    });
     for (let n = 0; n < 4; n++) {
       await f.connection.humanPromptOperation(f.agent.id, {
         action: "add",
@@ -2210,6 +2553,7 @@ describe("automatic sync destinations", () => {
       });
       await f.connection.humanPromptBoundary(f.agent.id, false);
     }
+    expect(f.remote.size).toBe(4);
     const request = vi.spyOn(f.authority, "request");
     await f.connection.humanPromptBoundary(f.agent.id, false);
     expect(
@@ -2368,9 +2712,9 @@ describe("automatic sync destinations", () => {
         error: null,
       }),
     });
-    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-required");
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-unmapped");
     const association = JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!);
-    expect(association).toMatchObject({ paused: true, error: "chi-destination-required" });
+    expect(association).toMatchObject({ paused: true, error: "chi-destination-unmapped" });
     expect(f.evidence).toHaveLength(0);
   });
 
@@ -2409,7 +2753,7 @@ describe("automatic sync destinations", () => {
       }),
     });
     const login = vi.spyOn(f.authority, "login");
-    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-required");
+    await expect(f.connect().capture(agent.id)).rejects.toThrow("chi-destination-unmapped");
     expect(f.evidence).toEqual([]);
     expect(login).not.toHaveBeenCalled();
     expect(JSON.parse(f.manager.getAgent(agent.id)!.labels["chi.native"]!)).toMatchObject({
@@ -2568,7 +2912,7 @@ describe("automatic sync destinations", () => {
     });
     const status = await f.connect().syncStatus({ workspaceId: "workspace", cwd: f.home });
     expect(status.destination).toBeNull();
-    expect(status.error).toBe("chi-destination-required");
+    expect(status.error).toBe("chi-destination-unmapped");
     expect(status.mentionsAvailable).toBe(false);
     expect(agent.id).toBeTruthy();
   });
@@ -3221,8 +3565,10 @@ describe("automatic sync destinations", () => {
     execFileSync("git", ["-C", f.home, "config", "remote.origin.pushurl", remote]);
 
     await writeFile(join(f.home, "work.ts"), "work\n");
-    const scanner = join(f.home, "fake-gitleaks.sh");
-    await writeFile(scanner, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const scanner =
+      process.platform === "win32" ? "gitleaks.exe" : join(f.home, "fake-gitleaks.sh");
+    if (process.platform !== "win32")
+      await writeFile(scanner, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
     const agent = await f.register();
     await f.connect(undefined, undefined, { provenanceScanner: scanner }).capture(agent.id);
