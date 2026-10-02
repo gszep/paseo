@@ -6,6 +6,8 @@ import {
   Pressable,
   FlatList,
   type PressableStateCallbackType,
+  type NativeSyntheticEvent,
+  type NativeScrollEvent,
 } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
@@ -141,8 +143,14 @@ function Inbox({
   const [repository, setRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
   const [openSession, setOpenSession] = useState(true);
+  const [scrolledDown, setScrolledDown] = useState(false);
+  const scroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) =>
+      setScrolledDown(event.nativeEvent.contentOffset.y > 0),
+    [],
+  );
   // The recipient inbox shares its first page with the sidebar badge.
-  const query = useInbox(transport);
+  const query = useInbox(transport, { paused: scrolledDown, autoContinue: true });
   const loaded = useMemo(
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
     [query.data],
@@ -238,6 +246,8 @@ function Inbox({
               keyExtractor={rowKey}
               renderItem={renderRow}
               onEndReached={more}
+              onScroll={scroll}
+              scrollEventThrottle={100}
               onEndReachedThreshold={0.5}
               keyboardShouldPersistTaps="handled"
               ListEmptyComponent={emptyComponent}
@@ -261,6 +271,9 @@ function Inbox({
             </View>
           ) : null}
         </View>
+      ) : null}
+      {!query.isError && !query.isFetching && hasNextPage && rows.length === 0 ? (
+        <Button onPress={more}>Load more mentions</Button>
       ) : null}
     </View>
   );

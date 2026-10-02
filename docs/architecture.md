@@ -247,8 +247,14 @@ Inbox/Project mode control. Search covers loaded pages only; a server-side query
 is a later step, not this one. The sidebar and list share one first-page query.
 Same-context cached items render immediately while page one revalidates. The
 cache is in memory for five minutes; scope loss synchronously evicts it. Older
-pages are loaded only on scroll and are discarded on head refresh, never
-automatically re-fetched. Failed head/older reads clear their protected data
+pages are loaded on scroll and are discarded on head refresh. Empty cursor pages
+automatically continue for at most ten pages per head acquisition; an empty list
+then offers Load more mentions. Repeated cursors stop automatic continuation.
+While the list is scrolled down, interval and focus refresh pause for both the
+list and sidebar, so their shared head cannot discard rows under the scroll
+position. Returning to the top or unmounting the list releases the pause;
+transport verification and explicit action/reconnect refresh remain active.
+Failed head/older reads clear their protected data
 before delivering the error. Repository,
 handoff and source reads reacquire authorization. The inbox never opens supplied
 URLs or forwards tokens to the browser. Exact source reads and paginated context

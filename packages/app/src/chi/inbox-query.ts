@@ -6,9 +6,41 @@ import type {
 } from "@getpaseo/protocol/chi-mentions";
 import type { MentionScope } from "./mention-context";
 import { mentionRefreshIntervalMs } from "./use-mention-scope";
-import { useEffect } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useFetchInfiniteQuery, useFetchQuery } from "@/data/query";
+
+const refreshPauses = new Map<string, Set<symbol>>();
+const pauseListeners = new Set<() => void>();
+function subscribePause(listener: () => void) {
+  pauseListeners.add(listener);
+  return () => {
+    pauseListeners.delete(listener);
+  };
+}
+function useRefreshPaused(key: string, paused: boolean) {
+  const shared = useSyncExternalStore(
+    subscribePause,
+    () => refreshPauses.has(key),
+    () => false,
+  );
+  useEffect(() => {
+    if (!paused) return;
+    const owner = Symbol();
+    const owners = refreshPauses.get(key) ?? new Set<symbol>();
+    owners.add(owner);
+    refreshPauses.set(key, owners);
+    for (const listener of pauseListeners) listener();
+    return () => {
+      owners.delete(owner);
+      if (!owners.size) refreshPauses.delete(key);
+      for (const listener of pauseListeners) listener();
+    };
+  }, [key, paused]);
+  return paused || shared
+    ? { refetchInterval: false as const, refetchOnWindowFocus: false as const }
+    : {};
+}
 
 // Sidebar and route share the same verified transport immediately. Verification
 // is discovery only: every protected inbox read still runs through its scope.
@@ -26,13 +58,17 @@ export function inboxTransportQueryOptions(selection: string, verify: () => Prom
   };
 }
 
-export function useInboxQuery(input: Parameters<typeof inboxQueryOptions>[0]) {
+export function useInboxQuery(
+  input: Parameters<typeof inboxQueryOptions>[0] & { paused?: boolean; autoContinue?: boolean },
+) {
   const cache = useQueryClient();
   const options = inboxQueryOptions(input);
+  const refreshPaused = useRefreshPaused(JSON.stringify(options.queryKey), input.paused === true);
   // Keep the head independently: all refresh triggers fetch exactly one page.
   // Older pages belong to one head acquisition and never survive its refresh.
   const head = useFetchQuery({
     ...options,
+    ...refreshPaused,
     dataShape: "value",
     queryFn: async ({ signal }) => {
       // Older pages have no fresh authorization on a head-only refresh.
@@ -92,8 +128,24 @@ export function useInboxQuery(input: Parameters<typeof inboxQueryOptions>[0]) {
     }
   }, [cache, key, error]);
   const tail = head.isFetching ? undefined : older.data;
-  const pages =
-    input.enabled && head.data && !error ? [head.data, ...(tail?.pages ?? [])] : undefined;
+  const pages = useMemo(
+    () => (input.enabled && head.data && !error ? [head.data, ...(tail?.pages ?? [])] : undefined),
+    [input.enabled, head.data, error, tail],
+  );
+  useEffect(() => {
+    const last = pages?.at(-1);
+    const nextCursor = last?.nextCursor;
+    if (
+      input.autoContinue &&
+      !head.isFetching &&
+      !older.isFetching &&
+      last?.handoffs.length === 0 &&
+      nextCursor &&
+      !tail?.pageParams.includes(nextCursor) &&
+      (tail?.pages.length ?? 0) < 10
+    )
+      void older.fetchNextPage({ cancelRefetch: false });
+  }, [input.autoContinue, pages, head.isFetching, older, tail]);
   return {
     ...head,
     error,

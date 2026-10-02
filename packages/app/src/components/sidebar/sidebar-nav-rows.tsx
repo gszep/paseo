@@ -1,10 +1,10 @@
 import { router, usePathname } from "expo-router";
-import { CalendarClock, History, Plus, Search, AtSign } from "lucide-react-native";
+import { CalendarClock, History, Plus, Search } from "lucide-react-native";
 import { memo, useCallback, useMemo, type ComponentType } from "react";
 import { useTranslation } from "react-i18next";
 import { View, type StyleProp, type ViewStyle } from "react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
-import { useInbox, useInboxTransport } from "@/chi/use-inbox";
+import { SidebarMentionsRow } from "./sidebar-mentions-row";
 import { useShortcutKeys } from "@/hooks/use-shortcut-keys";
 import { PluginSidebarItemRow } from "@/plugins/sidebar-items";
 import { canCreateWorktreeForProjectKind } from "@/projects/host-projects";
@@ -166,36 +166,6 @@ function SidebarSchedulesRow({ onBeforeNavigate }: SidebarNavRowProps) {
       onPress={handlePress}
       isActive={pathname.includes("/schedules")}
       testID="sidebar-schedules"
-      variant="compact"
-    />
-  );
-}
-
-function SidebarMentionsRow({ onBeforeNavigate }: SidebarNavRowProps) {
-  const transport = useInboxTransport();
-  const inbox = useInbox(transport);
-  const unread =
-    transport.host && transport.state.context && !inbox.isError
-      ? inbox.data?.pages[0]?.unreadCount
-      : undefined;
-  const press = useCallback(() => {
-    onBeforeNavigate?.();
-    router.push({
-      pathname: "/chi",
-      params: { view: "inbox" },
-    });
-  }, [onBeforeNavigate]);
-  return (
-    <SidebarHeaderRow
-      icon={AtSign}
-      label="Mentions"
-      badge={unread}
-      badgeIncomplete={
-        unread !== undefined &&
-        Boolean(inbox.data?.pages[0]?.unreadCountIsLowerBound || inbox.unavailableRepos.length)
-      }
-      onPress={press}
-      testID="sidebar-mentions"
       variant="compact"
     />
   );

@@ -63,11 +63,15 @@ export function useInboxTransport() {
   };
 }
 
-export function useInbox(transport: ReturnType<typeof useInboxTransport>, inbox = true) {
+export function useInbox(
+  transport: ReturnType<typeof useInboxTransport>,
+  options: { paused?: boolean; autoContinue?: boolean } = {},
+) {
   const { scope, state, host, queryKey } = transport;
   return useInboxQuery({
     queryKey,
-    inbox,
+    inbox: true,
+    ...options,
     enabled: Boolean(host && state.context),
     context: state.context ?? undefined,
     run: scope.run,
