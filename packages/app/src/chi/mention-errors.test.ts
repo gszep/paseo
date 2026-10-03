@@ -40,7 +40,10 @@ test("a cut-scan limit explains capacity without claiming a secret was found", (
 });
 test.each([
   ["capture-head-diverged", "OpenCode Fork"],
+  ["capture-head-diverged", "Removed sources are never recreated automatically"],
+  ["capture-recovery-invalid", "Automatic sync stopped"],
   ["chi-operation-timeout", "may already have committed"],
 ])("%s explains the recovery path", (code, text) => {
   expect(mentionError(new Error(code))).toContain(text);
+  expect(isTerminalSyncError(code)).toBe(code !== "chi-operation-timeout");
 });

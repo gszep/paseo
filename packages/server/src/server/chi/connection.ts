@@ -149,6 +149,7 @@ function sameActor(a: string, b: string): boolean {
  * A missing local scanner is retryable (install it and the next turn/reconnect retries). */
 const TERMINAL_SYNC_ERRORS = new Set<string>([
   "capture-head-diverged",
+  "capture-recovery-invalid",
   "capture-local-secret-rejected",
   "capture-local-cut-scan-limit",
   "evidence-http-422-server-secret-scan-rejected",
@@ -1171,7 +1172,8 @@ export class ChiConnection {
     void operation
       .then(
         () => this.captureBackoff.delete(agentId),
-        () => {
+        (error) => {
+          if (safeChiError(error) === "chi-session-busy") return;
           const delay = Math.min((this.captureBackoff.get(agentId)?.delay ?? 30_000) * 2, 900_000);
           this.captureBackoff.set(agentId, { delay, nextCheck: Date.now() + delay });
         },
@@ -1396,6 +1398,11 @@ export class ChiConnection {
     target: CaptureTarget,
     agentId: string,
   ): Promise<Association> {
+    // Recovery could not establish canonical lineage. Do not republish a removed
+    // provenance ref or associate local changes with an unproved archived head.
+    const code = safeChiError(settled.captureError);
+    if (code === "capture-head-diverged" || code === "capture-recovery-invalid")
+      throw settled.captureError;
     const deleted = safeChiError(settled.captureError).endsWith("object-deleted");
     const mapping = resolveChiDestinationForRepo(this.chiConfig(), association.repo);
     if (
@@ -1570,9 +1577,8 @@ export class ChiConnection {
     const agent = this.manager.getAgent(agentId);
     if (!agent || agent.provider !== "opencode") return;
     const association = this.association(agent);
-    // Human-recovery errors stop automatic retries; transient failures back off.
+    // A settled turn bypasses sweep backoff, but never a human-recovery stop.
     if (association && isTerminalSyncError(association.error)) return;
-    if ((this.captureBackoff.get(agentId)?.nextCheck ?? 0) > Date.now()) return;
     // A genuinely local workspace (no mapping at all) stays quiet.
     if (!association && !this.chiConfig()) return;
     // Capture runs after manager turn reconciliation; the pending map coalesces

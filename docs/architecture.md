@@ -112,23 +112,32 @@ Managed head conflicts use the same recovery proof for settled turns, workspace
 Retry and background reconciliation. Reacquire the source under its pinned owner,
 namespace and workspace. An exact capture replay is verified against the immutable
 snapshot hash; otherwise the remote head must descend from the cached head and
-its ordered message IDs and revisions must be a strict prefix of the upload, with
+its ordered message IDs and revisions must be a prefix of the upload, with
 unchanged native parent/fork identity. The final write still passes the server
 scanner and CAS. A second racing conflict waits for the next attempt. History
-reset, edited/reordered/deleted messages and equal-message metadata-only changes
-require human recovery (`capture-head-diverged`), never a head overwrite. Compare
+reset and edited/reordered/deleted messages require human recovery
+(`capture-head-diverged`), never a head overwrite. Equal-message metadata-only
+changes are accepted after the same lineage proof. A cached head whose source is
+explicitly not found also stops with `capture-head-diverged`; reset sources are
+never automatically recreated. Invalid, incompatible or over-limit proofs stop
+automatic retries with `capture-recovery-invalid`. Compare
 the archive and the other writer, then Continue from the canonical session or use
 native Fork to preserve local work as a new source. Do not edit association heads.
+Terminal recovery failures also skip provenance writes, so a stopped capture
+cannot restore a removed ref or label new work with an unproved archived head.
 The exported source ID must also match the existing association before upload;
 changing runtime namespaces never retargets a label, even to identical content.
 
 Startup immediately re-drives durable `capturePending` records, including loaded
 and unloaded agents; the periodic sweep continues draining the backlog. Capture
-retries are independent of orphan-cleanup backoff and provenance-removal markers,
-so those surviving an upgrade cannot suppress capture recovery. Each sweep
+retries are independent of orphan-cleanup backoff. A provenance-removal marker
+does not authorize recreating a missing source: recovery must stop for human review.
+The October 1 operator reset accounts for three of the four reported stuck agents;
+only the orchestrator is a lost-response replay candidate. Each sweep
 attempts at most four serial captures per rotating pass and
 coalesces overlapping reconnect sweeps. Failed automatic captures back off from
-one minute to at most fifteen minutes; explicit Retry bypasses that delay. The
+one minute to at most fifteen minutes; busy sessions never increase backoff.
+Explicit Retry and settled turns bypass that delay. The
 pending label survives restart; transient backoff restarts with the daemon.
 Paused destinations and terminal rejections never auto-upload. Exact replay
 proof avoids downloading the native export, and known head conflicts avoid a

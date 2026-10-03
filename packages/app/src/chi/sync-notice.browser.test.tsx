@@ -66,8 +66,24 @@ describe("SyncNoticeView", () => {
         onRetry={vi.fn()}
       />,
     );
-    expect(container.textContent).toContain("preserve both histories");
+    expect(container.textContent).toContain("preserve local work");
+    expect(container.textContent).toContain("Removed sources are never recreated automatically");
     expect(container.textContent).toContain("OpenCode Fork");
+    expect(button(container, "Retry")).toBeUndefined();
+    expect(container.textContent).not.toContain(error);
+  });
+  it("invalid recovery proof stops automatic sync and hides Retry with fixed human recovery copy", () => {
+    const error = "capture-recovery-invalid";
+    const { container } = mount(
+      <SyncNoticeView
+        error={error}
+        terminal={isTerminalSyncError(error)}
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain("could not verify the archived history");
+    expect(container.textContent).toContain("Automatic sync stopped");
     expect(button(container, "Retry")).toBeUndefined();
     expect(container.textContent).not.toContain(error);
   });
