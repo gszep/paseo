@@ -81,7 +81,7 @@ export interface HumanPromptScope {
   context: ChiMentionContext;
   pendingQuestionIds?: readonly string[];
 }
-interface Transport {
+export interface HumanPromptTransport {
   dispatchEnabled?: boolean;
   signal?: AbortSignal;
   create(batch: {
@@ -90,8 +90,29 @@ interface Transport {
     text: string;
     sources: ChiSource[];
   }): Promise<ChiHandoff>;
-  read(id: string): Promise<ChiHandoff>;
+  /** `null` only for an unconfirmed batch the backend proves it does not hold. */
+  read(id: string, unconfirmed?: boolean): Promise<ChiHandoff | null>;
   viewed?(recipient: string): boolean;
+}
+type Transport = HumanPromptTransport;
+export interface HumanPromptOperateOptions {
+  nativeQuestionId?: string | null;
+  /**
+   * Batches whose handoffs the caller already read in this flow. Supplying it
+   * skips this call's own reads; answers of every other batch are withheld.
+   */
+  verified?: ReadonlySet<string>;
+}
+
+/** A create failure whose outcome is proven: never posted, or refused by the backend. */
+export class HumanPromptSendError extends Error {
+  constructor(
+    message: string,
+    readonly outcome: "not-sent" | "rejected",
+  ) {
+    super(message);
+    this.name = "HumanPromptSendError";
+  }
 }
 const quotaSchema = z
   .array(
@@ -105,8 +126,8 @@ const quotaSchema = z
   )
   .max(10000);
 const lanes = new Map<string, Promise<unknown>>();
-const refreshes = new Map<string, Promise<void>>();
-const readers = new Map<string, Promise<void>>();
+const refreshes = new Map<string, { signal?: AbortSignal; work: Promise<Set<string>> }>();
+const readers = new Map<string, Promise<Set<string>>>();
 
 export function quoteHumanAnswer(text: string): string {
   return text
@@ -187,14 +208,20 @@ export class HumanPrompts {
     scope: HumanPromptScope,
     operation: HumanPromptOperation,
     transport: Transport,
-    nativeQuestionId: string | null = null,
-    refresh = true,
+    options: HumanPromptOperateOptions = {},
   ) {
     operation = HumanPromptOperationSchema.parse(operation);
-    if (refresh && operation.action !== "add") {
+    const nativeQuestionId = options.nativeQuestionId ?? null;
+    // A cached answer is returned only when this flow has just read its handoff:
+    // repository authority may be cached, but the backend checks every read.
+    let verified = options.verified;
+    if (!verified && operation.action === "add")
+      verified = await this.authorizeAnswers(scope, transport);
+    if (!verified) {
       await this.exclusive(async () => this.save(scope, await this.load(scope)));
-      await this.reconcile(scope, transport, true);
+      verified = await this.reconcile(scope, transport, true);
     }
+    const exposed = verified;
     return this.exclusive(async () => {
       const state = await this.load(scope);
       if (operation.action === "add") {
@@ -233,12 +260,35 @@ export class HumanPrompts {
           await this.send(scope, state, batch, transport);
       }
       await this.save(scope, state);
-      return this.project(state);
+      return this.project(state, exposed);
     });
   }
-  private project(state: State) {
+  /** Reads every answered batch now; an unreadable handoff's answers are withheld. */
+  private async authorizeAnswers(scope: HumanPromptScope, transport: Transport) {
+    const state = await this.exclusive(() => this.load(scope, false));
+    const verified = new Set<string>();
+    await Promise.all(
+      state.batches
+        .filter((b) => state.items.some((i) => i.batchId === b.id && i.answer))
+        .map(async (batch) => {
+          try {
+            this.verify(state, batch, await transport.read(batch.id));
+            verified.add(batch.id);
+          } catch {
+            // Withholding never blocks adding; the read already reported access loss.
+          }
+        }),
+    );
+    return verified;
+  }
+  /** `exposed` lists the batches whose answers may be returned; `"all"` is internal only. */
+  private project(state: State, exposed: ReadonlySet<string> | "all") {
     return {
-      items: state.items.map((item) => {
+      items: state.items.map((stored) => {
+        const item =
+          stored.answer && exposed !== "all" && !(stored.batchId && exposed.has(stored.batchId))
+            ? { ...stored, answer: null }
+            : stored;
         let outcome = "pending";
         if (item.answer) outcome = "answered";
         if (item.retired) outcome = "late/not-applied";
@@ -262,12 +312,14 @@ export class HumanPrompts {
       .then(() => this.readBatches(scope, transport, explicitRead));
     readers.set(key, work);
     try {
-      await work;
+      return await work;
     } finally {
       if (readers.get(key) === work) readers.delete(key);
     }
   }
+  /** Returns the batches whose handoffs this pass read and verified. */
   private async readBatches(scope: HumanPromptScope, transport: Transport, explicitRead: boolean) {
+    const verified = new Set<string>();
     const selected = await this.exclusive(async () => {
       const state = await this.load(scope, false);
       const start = state.cursor % Math.max(1, state.batches.length);
@@ -282,12 +334,14 @@ export class HumanPrompts {
       return explicitRead ? pending : pending.slice(0, 8);
     });
     for (const batch of selected) {
-      let handoff: ChiHandoff | undefined;
+      let handoff: ChiHandoff | null | undefined;
       try {
-        handoff = await transport.read(batch.id);
+        handoff = await transport.read(batch.id, batch.status !== "delivered");
       } catch (error) {
         if (batch.status === "delivered") throw error;
       }
+      if (handoff === null && batch.status === "delivered")
+        throw new Error("chi-human-prompt-invalid-response");
       // Reads never hold the dispatch lane. Reload before committing so a delayed
       // read cannot overwrite new items, a mute, or a form's retirement.
       await this.exclusive(async () => {
@@ -295,6 +349,7 @@ export class HumanPrompts {
         const current = state.batches.find((b) => b.id === batch.id)!;
         if (handoff) {
           this.verify(state, current, handoff);
+          verified.add(current.id);
           current.status = "delivered";
           for (const reply of handoff.replies ?? []) {
             if (reply.actor.toLowerCase() !== current.recipient) continue;
@@ -304,24 +359,34 @@ export class HumanPrompts {
                 item.answer = { text: answer.text, replyId: reply.id, actor: reply.actor };
             }
           }
+        } else if (handoff === null && current.status === "uncertain") {
+          // The backend holds no such handoff, so the lost create never landed.
+          // Resending the same immutable batch id is idempotent.
+          current.status = "reserved";
         }
         state.cursor = (state.batches.indexOf(current) + 1) % Math.max(1, state.batches.length);
         await this.save(scope, state);
       });
     }
+    return verified;
   }
-  private refresh(scope: HumanPromptScope, transport: Transport) {
+  refresh(scope: HumanPromptScope, transport: Transport) {
     const key = this.path(scope.agentId);
     const pending = refreshes.get(key);
-    if (pending) return pending;
-    const work = this.reconcile(scope, transport).finally(() => {
-      if (refreshes.get(key) === work) refreshes.delete(key);
-    });
-    refreshes.set(key, work);
-    return work;
+    // An aborted run's refresh fails at its next read; a new run reads afresh.
+    if (pending && !pending.signal?.aborted) return pending.work;
+    const entry = {
+      signal: transport.signal,
+      work: this.reconcile(scope, transport).finally(() => {
+        if (refreshes.get(key) === entry) refreshes.delete(key);
+      }),
+    };
+    refreshes.set(key, entry);
+    return entry.work;
   }
-  private verify(state: State, batch: z.infer<typeof batchSchema>, handoff: ChiHandoff) {
+  private verify(state: State, batch: z.infer<typeof batchSchema>, handoff: ChiHandoff | null) {
     if (
+      !handoff ||
       handoff.id !== batch.id ||
       handoff.author.toLowerCase() !== state.context.actor ||
       handoff.repo !== state.context.repo ||
@@ -353,8 +418,13 @@ export class HumanPrompts {
         text: batch.text,
         sources: [batch.source],
       });
-    } catch {
-      batch.status = "uncertain";
+    } catch (error) {
+      // A proven unsent batch keeps its status, so the same id is resent later.
+      if (error instanceof HumanPromptSendError && error.outcome === "not-sent") return;
+      batch.status =
+        error instanceof HumanPromptSendError && error.outcome === "rejected"
+          ? "failed"
+          : "uncertain";
       await this.save(scope, state);
       return;
     }
@@ -396,6 +466,15 @@ export class HumanPrompts {
       remind?: boolean;
     },
   ): Promise<string | null> {
+    await this.dispatch(scope, transport, options);
+    await this.refresh(scope, transport);
+    return options.remind === false ? null : this.reminder(scope, transport);
+  }
+  async dispatch(
+    scope: HumanPromptScope,
+    transport: Transport,
+    options: { source: ChiSource | null; viewed: boolean },
+  ) {
     await this.exclusive(async () => {
       transport.signal?.throwIfAborted();
       const state = await this.load(scope);
@@ -406,13 +485,17 @@ export class HumanPrompts {
         !options.viewed &&
         options.source
       ) {
-        // Native forms cannot ask the blocked model to call retry. Reuse the
-        // saved batch verbatim; retirement, viewing and quotas still gate it.
+        // Native forms cannot ask the blocked model to call retry, and a reserved
+        // batch provably never reached the backend. Reuse the saved batch
+        // verbatim; retirement, viewing and quotas still gate it.
         for (const batch of state.batches.filter(
           (b) =>
             b.status !== "delivered" &&
             !transport.viewed?.(b.recipient) &&
-            state.items.some((i) => i.batchId === b.id && !i.retired && i.nativeQuestionId),
+            state.items.some(
+              (i) =>
+                i.batchId === b.id && !i.retired && (i.nativeQuestionId || b.status === "reserved"),
+            ),
         )) {
           await this.send(scope, state, batch, transport);
         }
@@ -471,21 +554,8 @@ export class HumanPrompts {
       }
       await this.save(scope, state);
     });
-    // A timed-out foreground turn leaves reconciliation running. The next turn
-    // can use its durable answers without waiting for another full read batch.
-    const cached =
-      options.remind !== false && transport.signal
-        ? await this.reminder(scope, transport, true)
-        : null;
-    const refresh = this.refresh(scope, transport);
-    if (cached !== null) {
-      void refresh.catch(() => undefined);
-      return cached;
-    }
-    await refresh;
-    return options.remind === false ? null : this.reminder(scope, transport);
   }
-  private async reminder(scope: HumanPromptScope, transport: Transport, answersOnly = false) {
+  async reminder(scope: HumanPromptScope, transport: Transport, answersOnly = false) {
     const state = await this.exclusive(() => this.load(scope, false));
     if (answersOnly && !state.items.some((item) => item.answer && !item.retired)) return null;
     const reminder = this.renderReminder(state);
@@ -503,7 +573,7 @@ export class HumanPrompts {
   }
   private revision(state: State) {
     return createHash("sha256")
-      .update(JSON.stringify(this.project(state)))
+      .update(JSON.stringify(this.project(state, "all")))
       .digest("hex");
   }
   private renderReminder(state: State): string | null {

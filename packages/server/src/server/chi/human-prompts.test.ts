@@ -9,7 +9,7 @@ import {
   type ChiHandoff,
   type ChiSource,
 } from "@getpaseo/protocol/chi-mentions";
-import { HumanPrompts, type HumanPromptScope } from "./human-prompts.js";
+import { HumanPrompts, HumanPromptSendError, type HumanPromptScope } from "./human-prompts.js";
 
 const homes: string[] = [];
 afterEach(async () => {
@@ -176,28 +176,41 @@ describe("human prompt delivery receipts", () => {
       },
     ];
     const reads: string[] = [];
-    const slow = {
-      ...f.transport,
-      read: async (id: string) => {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        reads.push(id);
-        return f.transport.read(id);
-      },
-    };
     await f.add("new", { recipient: "github:new" });
     const reminders: string[] = [];
     for (let turn = 0; turn < 4; turn++) {
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const slow = {
+        ...f.transport,
+        read: async (id: string) => {
+          entered();
+          await gate;
+          reads.push(id);
+          return f.transport.read(id);
+        },
+      };
       const controller = new AbortController();
       const expired = new Promise<null>((resolve) =>
         controller.signal.addEventListener("abort", () => resolve(null), { once: true }),
       );
-      const timer = setTimeout(() => controller.abort(), 2000);
       const service = f.restart();
       const boundary = service.boundary(
         f.scope,
         { ...slow, signal: controller.signal },
         { source: f.source, viewed: false },
       );
+      // Expire two foreground waits while a read is in flight, then let the
+      // following turns expose the durable result. No disk-speed/timer race.
+      await started;
+      if (turn < 2) controller.abort();
+      release();
       const reminder = await Promise.race([boundary, expired]);
       if (reminder) {
         reminders.push(reminder);
@@ -206,7 +219,6 @@ describe("human prompt delivery receipts", () => {
       // The foreground may leave, but its bounded reader finishes and commits.
       await boundary;
       await service["refresh"](f.scope, slow);
-      clearTimeout(timer);
     }
     expect(f.attempts).toHaveLength(11);
     expect([...f.remote.values()].some((h) => h.recipient === "github:new")).toBe(true);
@@ -306,7 +318,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(active);
     const h = [...f.remote.values()][0]!;
@@ -624,7 +636,7 @@ describe("human prompt delivery receipts", () => {
       text: "Native question",
     };
     const active = { ...f.scope, pendingQuestionIds: ["form"] };
-    await f.service.operate(active, input, f.transport, "form");
+    await f.service.operate(active, input, f.transport, { nativeQuestionId: "form" });
     await expect(f.service.operate(active, input, f.transport)).rejects.toThrow("conflict");
     await f.flush(active, { source: null });
     await f.flush();
@@ -633,7 +645,7 @@ describe("human prompt delivery receipts", () => {
       (await f.service.operate(f.scope, { action: "list" }, f.transport)).items[0]!.retired,
     ).toBe(true);
     const other = { ...f.scope, agentId: "other", pendingQuestionIds: ["other-form"] };
-    await f.service.operate(other, input, f.transport, "other-form");
+    await f.service.operate(other, input, f.transport, { nativeQuestionId: "other-form" });
     f.lose(true);
     await f.flush(other);
     expect(f.attempts).toHaveLength(1);
@@ -659,7 +671,7 @@ describe("human prompt delivery receipts", () => {
         text: "Native question",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(active);
     const h = [...f.remote.values()][0]!;
@@ -758,7 +770,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     f.deny(true);
     await f.flush(scope);
@@ -783,7 +795,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(scope);
     const h = [...f.remote.values()][0]!;
@@ -862,6 +874,167 @@ describe("human prompt delivery receipts", () => {
     release();
     await Promise.all([first, second]);
     expect(enterSecond).toHaveBeenCalledTimes(1);
+  });
+
+  it("a proven unsent create stays reserved and is resent under its id without another slot", async () => {
+    const f = await fixture();
+    await f.add("q");
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(
+      new HumanPromptSendError("chi-human-prompt-viewed", "not-sent"),
+    );
+    await f.flush(f.scope, { remind: false });
+    const [batch] = (await f.service["load"](f.scope)).batches;
+    expect(batch!.status).toBe("reserved");
+    await f.flush(f.scope, { remind: false });
+    expect([...f.remote.keys()]).toEqual([batch!.id]);
+    expect(
+      JSON.parse(await readFile(join(f.home, "chi", "human-prompts", "quota.json"), "utf8")),
+    ).toHaveLength(1);
+  });
+
+  it("a backend-refused create is failed and waits for an explicit retry", async () => {
+    const f = await fixture();
+    await f.add("q");
+    const create = vi
+      .spyOn(f.transport, "create")
+      .mockRejectedValueOnce(new HumanPromptSendError("chi-mentions-http-409", "rejected"));
+    await f.flush(f.scope, { remind: false });
+    await f.flush(f.scope, { remind: false });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("failed");
+    await f.service.operate(f.scope, { action: "retry" }, f.transport);
+    expect(f.remote.size).toBe(1);
+  });
+
+  it("only an unconfirmed batch the backend does not hold is reserved again", async () => {
+    const f = await fixture();
+    // Boundary reads fail, so both creates remain unconfirmed until listed.
+    const failing = vi.spyOn(f.transport, "read").mockRejectedValue(new Error("unavailable"));
+    await f.add("lost", { recipient: "github:lost" });
+    f.lose(true);
+    await f.flush(f.scope, { remind: false });
+    f.lose(false);
+    await f.add("missing", { recipient: "github:missing" });
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(new Error("network down"));
+    await f.flush(f.scope, { remind: false });
+    const [landed, missing] = (await f.service["load"](f.scope)).batches;
+    expect([landed!.status, missing!.status]).toEqual(["uncertain", "uncertain"]);
+    failing.mockRestore();
+    const read = vi.spyOn(f.transport, "read").mockImplementation(async (id, unconfirmed) => {
+      expect(unconfirmed).toBe(true);
+      return f.remote.get(id) ?? null;
+    });
+    await f.service.operate(f.scope, { action: "list" }, f.transport);
+    expect(read).toHaveBeenCalledTimes(2);
+    const statuses = (await f.service["load"](f.scope)).batches.map((b) => b.status);
+    expect(statuses).toEqual(["delivered", "reserved"]);
+    // A delivered batch that disappears is an error, never a resend.
+    read.mockImplementation(async () => null);
+    await expect(f.service.operate(f.scope, { action: "list" }, f.transport)).rejects.toThrow(
+      "chi-human-prompt-invalid-response",
+    );
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+  });
+
+  it("a stale not-found read never downgrades a batch a concurrent retry delivered", async () => {
+    const f = await fixture();
+    await f.add("q");
+    vi.spyOn(f.transport, "create").mockRejectedValueOnce(new Error("network down"));
+    vi.spyOn(f.transport, "read").mockRejectedValueOnce(new Error("unavailable"));
+    await f.flush(f.scope, { remind: false });
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("uncertain");
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stale = {
+      ...f.transport,
+      // Snapshot "absent" before the retry lands, then answer after it.
+      read: async () => {
+        entered();
+        await gate;
+        return null;
+      },
+    };
+    const reading = f.service.refresh(f.scope, stale);
+    await started;
+    await f.service.operate(f.scope, { action: "retry" }, f.transport, { verified: new Set() });
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+    release();
+    await reading;
+    expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+  });
+
+  async function answered(text: string) {
+    const f = await fixture();
+    await f.add("q");
+    await f.flush();
+    const h = [...f.remote.values()][0]!;
+    h.replies = [
+      {
+        id: randomUUID(),
+        actor: h.recipient,
+        at: "now",
+        revision: 2,
+        text: encodeHumanAnswers([{ id: readHumanPrompts(h.text)!.items[0]!.id, text }]),
+      },
+    ];
+    await f.flush(f.scope, { remind: false });
+    expect((await f.service["load"](f.scope)).items[0]!.answer?.text).toBe(text);
+    return f;
+  }
+
+  it("add returns a cached answer only after re-reading its handoff", async () => {
+    const f = await answered("Blue");
+    const read = vi.spyOn(f.transport, "read");
+    expect((await f.add("second")).items.map((i) => i.answer?.text ?? null)).toEqual([
+      "Blue",
+      null,
+    ]);
+    expect(read).toHaveBeenCalledTimes(1);
+    f.deny(true);
+    const withheld = await f.add("third");
+    expect(withheld.items[0]).toMatchObject({ answer: null, outcome: "pending" });
+    expect(withheld.items).toHaveLength(3);
+    // Withholding changes only the result, never the cached receipt.
+    f.deny(false);
+    expect((await f.add("third")).items[0]!.answer?.text).toBe("Blue");
+  });
+
+  it("add withholds an answer whose re-read handoff no longer matches", async () => {
+    const f = await answered("Blue");
+    const h = [...f.remote.values()][0]!;
+    f.remote.set(h.id, { ...h, author: "github:intruder" });
+    expect((await f.add("second")).items[0]!.answer).toBeNull();
+  });
+
+  it("an operation given a verified set reads nothing and returns only those answers", async () => {
+    const f = await answered("Blue");
+    const batch = (await f.service["load"](f.scope)).batches[0]!.id;
+    const read = vi.spyOn(f.transport, "read");
+    const none = await f.service.operate(f.scope, { action: "resolve" }, f.transport, {
+      verified: new Set(),
+    });
+    expect(none.items[0]!.answer).toBeNull();
+    const some = await f.service.operate(f.scope, { action: "resolve" }, f.transport, {
+      verified: new Set([batch]),
+    });
+    expect(some.items[0]!.answer?.text).toBe("Blue");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("refresh reports exactly the batches it read and verified", async () => {
+    const f = await answered("Blue");
+    await f.add("other", { recipient: "github:other" });
+    await f.flush(f.scope, { remind: false });
+    const [first, second] = (await f.service["load"](f.scope)).batches;
+    // The answered generic batch is not polled; the open one is.
+    expect([...(await f.service.refresh(f.scope, f.transport))]).toEqual([second!.id]);
+    expect(first!.status).toBe("delivered");
   });
 
   it("rejects a forged create response before recording delivered", async () => {

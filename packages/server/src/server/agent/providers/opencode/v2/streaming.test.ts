@@ -21,6 +21,112 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
+  test("human prompt turn ids use settled history without listing a long session again", async () => {
+    const harness = new V2Harness();
+    harness.history.push(
+      ...Array.from({ length: 700 }, (_, index) => ({
+        ...assistant([{ type: "text" as const, text: "x".repeat(3200) }]),
+        id: `msg_${index}`,
+        time: { created: index, ...(index < 699 ? { completed: index + 1 } : {}) },
+      })),
+    );
+    // The last assistant message is still streaming, so it can never be the pin.
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    const list = vi
+      .spyOn(harness.api.message, "list")
+      .mockImplementation(() => new Promise(() => undefined));
+    try {
+      const id = session.humanPromptTurnId!();
+      expect(list).not.toHaveBeenCalled();
+      expect(await id).toBe("msg_698");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("human prompt turn ids pin a turn's own prompt before its first assistant settles", async () => {
+    const harness = new V2Harness();
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    const reminder = (id: string, created: number) => ({
+      id,
+      type: "user" as const,
+      text: "private answer",
+      metadata: { chiHumanPrompts: true },
+      time: { created },
+    });
+    try {
+      // A brand-new session: its first prompt is settled as soon as it is stored.
+      harness.history.push({ id: "first", type: "user", text: "start", time: { created: 1 } });
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("first");
+      // A later turn's first step pins this turn's prompt, not the previous
+      // turn's last answer, the private reminder, or the streaming reply.
+      harness.history.push(
+        { ...assistant([]), id: "previous", time: { created: 2, completed: 3 } },
+        reminder("private", 4),
+        { id: "prompt", type: "user", text: "next", time: { created: 5 } },
+        { ...assistant([]), id: "streaming", time: { created: 6 } },
+      );
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("prompt");
+      // A reminder injected after compaction never becomes the pin either.
+      harness.history.splice(-1, 1, {
+        ...assistant([]),
+        id: "settled",
+        time: { created: 6, completed: 7 },
+      });
+      harness.history.push(reminder("compacted", 8));
+      await session.getRuntimeInfo!();
+      expect(await session.humanPromptTurnId!()).toBe("settled");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("human prompt turn ids follow reconciliation and clear when no settled assistant remains", async () => {
+    const harness = new V2Harness();
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: "/tmp/project" },
+    });
+    try {
+      expect(await session.humanPromptTurnId!()).toBeNull();
+      harness.history.push({ ...assistant([]), id: "settled", time: { created: 1, completed: 2 } });
+      await session.getRuntimeInfo!();
+      const list = vi.spyOn(harness.api.message, "list");
+      expect(await session.humanPromptTurnId!()).toBe("settled");
+      expect(list).not.toHaveBeenCalled();
+      harness.history.splice(0);
+      await session.getRuntimeInfo!();
+      list.mockClear();
+      expect(await session.humanPromptTurnId!()).toBeNull();
+      expect(list).not.toHaveBeenCalled();
+    } finally {
+      await session.close();
+    }
+  });
+
   test("private human reminders never appear in streamed or restored owner timelines", () => {
     const messages = [
       {
