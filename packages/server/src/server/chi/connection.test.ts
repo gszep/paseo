@@ -1686,8 +1686,12 @@ describe("automatic sync destinations", () => {
     mappings,
   });
 
-  async function syncFixture(config?: ReturnType<typeof destinationConfig> | null) {
+  async function syncFixture(
+    config?: ReturnType<typeof destinationConfig> | null,
+    sessionId = "ses_fork",
+  ) {
     const f = await fixture();
+    f.transfer.info.id = sessionId;
     const effective = config === undefined ? destinationConfig(f.authority.endpoint) : config;
     const evidence: Array<{ visibility: string }> = [];
     let failEvidence = false;
@@ -1699,9 +1703,9 @@ describe("automatic sync destinations", () => {
         native: JSON.stringify(f.transfer),
         mapping: { instanceId: "server:opencode", workspace: { hostId: "server", path: f.home } },
         coverage: { kind: "export", reason: null },
-        sessionId: "ses_fork",
+        sessionId,
       }).capture,
-      sessionId: "ses_fork",
+      sessionId,
     }).sourceId;
     const base = f.authority.request;
     f.authority.request = (async (url, init) => {
@@ -1751,7 +1755,7 @@ describe("automatic sync destinations", () => {
         ...provenance,
       });
     const register = (labels?: Record<string, string>) =>
-      f.registration.register("ses_fork", labels ?? {});
+      f.registration.register(sessionId, labels ?? {});
     return {
       ...f,
       evidence,
@@ -2657,8 +2661,8 @@ describe("automatic sync destinations", () => {
     await vi.waitFor(() => expect(f.evidence).toHaveLength(1));
   });
 
-  async function conflictedCapture() {
-    const f = await syncFixture();
+  async function conflictedCapture(sessionId = "ses_fork") {
+    const f = await syncFixture(undefined, sessionId);
     const agent = await f.register();
     type Capture = ReturnType<typeof minimiseNativeExport>["capture"];
     const snapshots: Array<{ id: string; previous: string | null; capture: Capture }> = [];
@@ -2702,7 +2706,7 @@ describe("automatic sync destinations", () => {
             sourceId: f.sourceId,
             head: last!.id,
             ownerId: "github:owner",
-            nativeSessionId: "ses_fork",
+            nativeSessionId: sessionId,
             instanceId: "server:opencode",
             workspace: { hostId: "server", path: f.home },
             harness: "opencode-v2",
@@ -2921,6 +2925,110 @@ describe("automatic sync destinations", () => {
       connection.stopProvenanceSweep();
     }
   });
+
+  it.each([true, false])(
+    "host startup drains four persisted lost-response conflicts despite old orphan backoff and provenance removal (loaded=%s)",
+    async (loaded) => {
+      const cases = [
+        { id: "310f39c8", append: false, provenanceRemoved: false },
+        { id: "ac43ab61", append: true, provenanceRemoved: true },
+        { id: "37101c7b", append: true, provenanceRemoved: true },
+        { id: "1641f888", append: true, provenanceRemoved: true },
+      ];
+      const fixtures = [];
+      for (const scenario of cases) {
+        const f = await conflictedCapture(`ses_${scenario.id}`);
+        f.agents[0]!.id = scenario.id;
+        f.agent.id = scenario.id;
+        await f.connection.capture(f.agent.id);
+        const cached = f.association().head;
+        f.appendMessage();
+        f.loseResponse();
+        await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-operation-timeout");
+        const committed = structuredClone(f.snapshots);
+        if (scenario.append) f.appendMessage();
+        await f.manager.updateAgentLabel(f.agent.id, "chi.native", (current) =>
+          JSON.stringify({
+            ...JSON.parse(current!),
+            error: "evidence-http-409-evidence-head-conflict",
+            capturePending: true,
+            provenanceRef: `refs/chi/provenance/owner/ses_${scenario.id}`,
+            provenanceRemoved: scenario.provenanceRemoved,
+          }),
+        );
+        expect(f.association().head).toBe(cached);
+        f.posts.length = 0;
+        fixtures.push({ ...f, committed, scenario });
+      }
+      const first = fixtures[0]!;
+      const owner = (id: string) => fixtures.find((f) => f.agent.id === id)!;
+      const manager = {
+        ...first.manager,
+        listAgents: () => (loaded ? fixtures.flatMap((f) => f.manager.listAgents()) : []),
+        getAgent: (id: string) => (loaded ? owner(id)?.manager.getAgent(id) : undefined),
+        updateAgentLabel: (id, key, update) => owner(id).manager.updateAgentLabel(id, key, update),
+        withNativeRuntime: (id, action) =>
+          fixtures.find((f) => f.transfer.info.id === id)!.manager.withNativeRuntime(id, action),
+      } as AgentManager;
+      const request: typeof fetch = async (url, init) => {
+        const parsed = new URL(String(url));
+        const sessionId =
+          parsed.pathname === "/evidence" && init?.method === "POST"
+            ? JSON.parse(JSON.parse(String(init.body)).capture.native).info.id
+            : null;
+        const destination = fixtures.find(
+          (f) =>
+            f.transfer.info.id === sessionId || f.sourceId === parsed.searchParams.get("sourceId"),
+        );
+        return (destination ?? first).authority.request(url, init);
+      };
+      const stored = () => fixtures.flatMap((f) => f.manager.listAgents());
+      await writeFile(
+        join(first.home, "chi", "provenance-sweep.json"),
+        JSON.stringify({
+          cursor: 0,
+          backoff: Object.fromEntries(
+            cases.map(({ id }) => [id, { nextCheck: Date.now() + 86_400_000, delay: 86_400_000 }]),
+          ),
+        }),
+      );
+      // A new connection has no in-memory retry state. Only the durable labels
+      // and the old orphan-cleanup cursor survive the host upgrade.
+      const connection = new ChiConnection(manager, {
+        home: first.home,
+        serverId: "server",
+        authority: { ...first.authority, request },
+        getChiConfig: () => destinationConfig(first.authority.endpoint),
+        scanCapture: async () => ({ verdict: "clean" }),
+        listStoredAgents: async () => stored(),
+        getStoredAgent: async (id) => owner(id)?.manager.getAgent(id) ?? null,
+        provenance: async () => ({
+          attempted: false,
+          created: false,
+          reason: "test-skip",
+          ref: "",
+        }),
+      });
+      connection.startProvenanceSweep();
+      try {
+        await vi.waitFor(
+          () => {
+            for (const f of fixtures) expect(f.association().capturePending).toBe(false);
+          },
+          { timeout: 10_000 },
+        );
+        for (const f of fixtures) {
+          expect(f.association()).toMatchObject({ head: f.snapshots.at(-1)!.id, error: null });
+          expect(f.posts).toHaveLength(1);
+          expect(f.posts[0]!.expectedHead).toBe(f.committed.at(-1)!.id);
+          expect(f.snapshots.slice(0, f.committed.length)).toEqual(f.committed);
+          expect(f.snapshots).toHaveLength(f.committed.length + Number(f.scenario.append));
+        }
+      } finally {
+        connection.stopProvenanceSweep();
+      }
+    },
+  );
 
   it("timeouts have a fixed public code without exposing diagnostic text", () => {
     expect(safeChiError(new DOMException("private response", "TimeoutError"))).toBe(

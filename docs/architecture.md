@@ -122,8 +122,11 @@ native Fork to preserve local work as a new source. Do not edit association head
 The exported source ID must also match the existing association before upload;
 changing runtime namespaces never retargets a label, even to identical content.
 
-The periodic sweep also re-drives durable `capturePending` records, including
-loaded agents. It attempts at most four serial captures per rotating pass and
+Startup immediately re-drives durable `capturePending` records, including loaded
+and unloaded agents; the periodic sweep continues draining the backlog. Capture
+retries are independent of orphan-cleanup backoff and provenance-removal markers,
+so those surviving an upgrade cannot suppress capture recovery. Each sweep
+attempts at most four serial captures per rotating pass and
 coalesces overlapping reconnect sweeps. Failed automatic captures back off from
 one minute to at most fifteen minutes; explicit Retry bypasses that delay. The
 pending label survives restart; transient backoff restarts with the daemon.
