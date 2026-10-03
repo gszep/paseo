@@ -373,17 +373,22 @@ proves delivery; recovery does not require a second send. A 404 for the author's
 unconfirmed batch proves the create never landed: the batch returns to reserved and
 the next boundary resends the same immutable ID, which the backend treats
 idempotently. A create that fails before posting (admission, viewing, 401/403) keeps
-its status for that resend; other fixed 4xx refusals record `failed`. Cached answers
-exposed by the bounded reminder get exact ACL verification without polling for
-corrections. The foreground wait has a two-second budget; expiration withholds the
+its status for that resend; other fixed 4xx refusals record `failed`, and a 401/403/404
+drops cached authority as for any mention write. A cached answer reaches the model only
+after its handoff was read in the same flow: the reminder and `add` re-read exactly the
+answers they return and withhold any that fail, list/resolve/retry read every batch,
+and the question sweep resumes a form only from batches its own pass read. The
+foreground wait has a two-second budget; expiration withholds the
 reminder while one detached boundary per agent continues dispatch and reconciliation
 across turns. A turn that joins a running boundary still gets cached answers at once,
 or the full reminder once that boundary's reads succeed. The two-minute deadline,
 shutdown, reload, and agent close or archive abort the boundary; an in-flight exact
 read can still persist progress. Timeouts and aborts log fixed reason codes, never
-content or credentials. Native turn pins use already-reconciled history: the latest
-completed assistant message or non-reminder user message, so a turn's first step pins
-its own prompt and long-session history reads are absent from this path. Repository
+content or credentials. A native turn pin is the latest settled message: a completed
+assistant step or a non-reminder user message, so a turn's first step pins its own
+prompt. Native lifecycle events (`session.inbox.delivered`, `session.step.ended`)
+set it before the slow history snapshot lists the message, and no history request
+runs on this path. Repository
 authority is cached for 30 seconds per checkout, with live credential/mapping checks
 and fresh write admission. Only the agent's own session, identity or mapping aborts
 its work; another agent's failure never clears it. Access loss clears the affected

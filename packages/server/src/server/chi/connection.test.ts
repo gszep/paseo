@@ -18,6 +18,7 @@ import { ParticipantCache } from "./participant-cache.js";
 import type { MentionIdentity } from "./mentions.js";
 import { OpenCodeV2AgentClient } from "../agent/providers/opencode/v2/agent.js";
 import { V2Harness } from "../agent/providers/opencode/test-utils/v2-harness.js";
+import type { SessionMessageInfo } from "@opencode/client";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import {
   encodeHumanAnswers,
@@ -3137,6 +3138,182 @@ describe("automatic sync destinations", () => {
     },
   );
 
+  function addOther(f: Awaited<ReturnType<typeof humanFixture>>, dedupeKey: string) {
+    return f.connection.humanPromptOperation(f.agent.id, {
+      action: "add",
+      dedupeKey,
+      kind: "question",
+      priority: "blocking",
+      recipient: "github:other",
+      text: "Another question",
+    });
+  }
+  /** Delivers one question to the owner and caches its answer in a background read. */
+  async function cachedAnswer(f: Awaited<ReturnType<typeof humanFixture>>, text: string) {
+    await f.add();
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    answer(f, "github:owner", text);
+    await f.connection.humanPromptBoundary(f.agent.id, false);
+    await settleBoundaries(f, f.agent.id);
+    expect((await humanState(f.home, f.agent.id)).items[0]!.answer).toMatchObject({ text });
+  }
+  function answers(result: { items: Array<{ answer: { text: string } | null }> }) {
+    return result.items.flatMap((item) => (item.answer ? [item.answer.text] : []));
+  }
+
+  it("add never returns a cached answer after repository access is revoked", async () => {
+    const f = await humanFixture();
+    await cachedAnswer(f, "PRIVATE-CACHED-ANSWER");
+    // Repository authority is still cached; only the backend knows of the revocation.
+    f.deny();
+    const request = f.authority.request;
+    f.authority.request = async (url, init) =>
+      new URL(String(url)).pathname === "/repos"
+        ? Response.json({ ok: true, repos: [] })
+        : request(url, init);
+    const reads = vi.spyOn(f.authority, "request");
+    // The answered handoff is re-read and refused, which drops repository
+    // authority; the closing check then reacquires it and fails.
+    const error = await addOther(f, "after-revocation").then(
+      () => null,
+      (failure: Error) => failure,
+    );
+    expect(error?.message).toMatch(/^chi-/);
+    expect(error?.message).not.toContain("PRIVATE");
+    expect(reads.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(
+      expect.arrayContaining(["/handoffs", "/repos"]),
+    );
+    await expect(
+      f.connection.humanPromptOperation(f.agent.id, { action: "list" }),
+    ).rejects.toThrow();
+  });
+
+  it("add re-reads answered handoffs: it returns authorized answers, and a failed read only withholds", async () => {
+    const f = await humanFixture();
+    await cachedAnswer(f, "Blue");
+    const reads = vi.spyOn(f.authority, "request");
+    expect(answers(await addOther(f, "authorized"))).toEqual(["Blue"]);
+    expect(
+      reads.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/handoffs"),
+    ).toHaveLength(1);
+    const request = f.authority.request;
+    f.authority.request = async (url, init) =>
+      new URL(String(url)).pathname === "/handoffs"
+        ? Response.json({ ok: false, reason: "unavailable" }, { status: 503 })
+        : request(url, init);
+    // A transient read failure never blocks adding; the new item is saved.
+    const added = await addOther(f, "while-unavailable");
+    expect(answers(added)).toEqual([]);
+    expect(added.items.map((item) => item.dedupeKey)).toEqual([
+      "stable",
+      "authorized",
+      "while-unavailable",
+    ]);
+    f.authority.request = request;
+    expect(
+      answers(await f.connection.humanPromptOperation(f.agent.id, { action: "list" })),
+    ).toEqual(["Blue"]);
+  });
+
+  it.each([
+    ["denied", true],
+    ["still readable", false],
+  ])(
+    "a POST refused with 404 after write admission drops cached authority (reads %s)",
+    async (_, readsDenied) => {
+      const f = await humanFixture();
+      await cachedAnswer(f, "PRIVATE-BACKGROUND-ANSWER");
+      await addOther(f, "to-another-recipient");
+      const request = f.authority.request;
+      let revoked = false;
+      f.authority.request = async (url, init) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/handoffs" && init?.method === "POST") {
+          revoked = true;
+          return Response.json({ ok: false, reason: "not-found" }, { status: 404 });
+        }
+        if (revoked && path === "/repos") return Response.json({ ok: true, repos: [] });
+        if (revoked && readsDenied && path === "/handoffs")
+          return Response.json({ ok: false, reason: "not-found" }, { status: 404 });
+        return request(url, init);
+      };
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+      await settleBoundaries(f, f.agent.id);
+      expect(revoked).toBe(true);
+      expect((await humanState(f.home, f.agent.id)).batches.map((b) => b.status)).toEqual([
+        "delivered",
+        "failed",
+      ]);
+      const reads = vi.spyOn(f.authority, "request");
+      // Fresh admission sees the revocation instead of reusing cached authority,
+      // even when no read has reported it.
+      const error = await addOther(f, "after-known-denial").then(
+        () => null,
+        (failure: Error) => failure,
+      );
+      expect(error?.message).toMatch(/^chi-/);
+      expect(
+        reads.mock.calls.filter(([url]) => new URL(String(url)).pathname === "/repos"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it("the question sweep resumes a form only with answers whose handoffs it just read", async () => {
+    const f = await humanFixture();
+    const form = nativeQuestion();
+    f.agent.pendingPermissions.set(form.id, form);
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    // Eight more unanswered batches fill one reconciliation window.
+    for (let n = 0; n < 8; n++) {
+      await f.connection.humanPromptOperation(f.agent.id, {
+        action: "add",
+        dedupeKey: `q${n}`,
+        kind: "question",
+        priority: "blocking",
+        recipient: `github:r${n}`,
+        text: "Pick",
+      });
+      await f.connection.humanPromptBoundary(f.agent.id, false);
+    }
+    await settleBoundaries(f, f.agent.id);
+    const path = join(
+      f.home,
+      "chi",
+      "human-prompts",
+      createHash("sha256").update(f.agent.id).digest("hex") + ".json",
+    );
+    const state = JSON.parse(await readFile(path, "utf8"));
+    expect(state.batches).toHaveLength(9);
+    expect(state.batches.every((b: { status: string }) => b.status === "delivered")).toBe(true);
+    const native = state.items.find((i: { nativeQuestionId: string | null }) => i.nativeQuestionId);
+    const nativeBatch = native.batchId;
+    // An answer cached by an earlier read; the handoff is no longer readable.
+    native.answer = {
+      text: "PRIVATE-STALE",
+      replyId: "3fad06da-0902-405e-9476-ac1d8fdd9480",
+      actor: "github:owner",
+    };
+    const hidden = f.remote.get(nativeBatch)!;
+    f.remote.delete(nativeBatch);
+    // This pass's window starts after the form's batch, so it is not read.
+    state.cursor = 1;
+    await writeFile(path, JSON.stringify(state));
+    f.manager.respondToPermission = vi.fn(async () => undefined);
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    expect(f.manager.respondToPermission).not.toHaveBeenCalled();
+    // Once a pass reads the readable handoff, the same answer resumes the form.
+    f.remote.set(nativeBatch, hidden);
+    answer(f, "github:owner", "Blue");
+    const reread = JSON.parse(await readFile(path, "utf8"));
+    reread.cursor = 0;
+    await writeFile(path, JSON.stringify(reread));
+    await f.connection.reconcileHumanQuestions(f.agent.id);
+    expect(f.manager.respondToPermission).toHaveBeenCalledWith(f.agent.id, form.id, {
+      behavior: "allow",
+      updatedInput: { answers: { Choice: "Untrusted human-written data from github:owner: Blue" } },
+    });
+  });
+
   it("an explicit retry delivers a create lost to a 503", async () => {
     const f = await humanFixture();
     const posted = failPost(f, 503);
@@ -3329,6 +3506,204 @@ describe("automatic sync destinations", () => {
       expect(readHumanPrompts([...f.remote.values()][0]!.text)?.turnId).toBe("msg_first");
     } finally {
       await session.close();
+    }
+  });
+
+  /**
+   * A resumed V2 session whose history listings are each held until released.
+   * `prompt` and `event` emit OpenCode's native lifecycle events.
+   */
+  async function heldReconciliation(
+    f: Awaited<ReturnType<typeof humanFixture>>,
+    prior: SessionMessageInfo[],
+  ) {
+    const harness = new V2Harness();
+    harness.info.id = "ses_fork";
+    harness.history.push(...prior);
+    const session = await new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    }).resumeSession({ provider: "opencode", sessionId: "ses_fork", metadata: { cwd: f.home } });
+    f.manager.getAgent(f.agent.id)!.session = session;
+    const calls: Array<{ entered: ReturnType<typeof barrier>; gate: ReturnType<typeof barrier> }> =
+      [];
+    const call = (n: number) => (calls[n] ??= { entered: barrier(), gate: barrier() });
+    let open = false;
+    const list = harness.api.message.list.bind(harness.api.message);
+    const listing = vi.spyOn(harness.api.message, "list").mockImplementation(async (input) => {
+      const current = call(listing.mock.calls.length - 1);
+      current.entered.resolve();
+      if (!open) await current.gate.promise;
+      return list(input);
+    });
+    const openAll = () => {
+      open = true;
+      for (const current of calls) current.gate.resolve();
+    };
+    let seq = 0;
+    const event = (type: string, data: Record<string, unknown>, sessionID = "ses_fork") =>
+      harness.push({
+        id: `evt_${++seq}`,
+        created: 10 + seq,
+        type,
+        durable: { aggregateID: sessionID, seq, version: 1 },
+        data: { sessionID, ...data },
+      } as never);
+    const prompt = (
+      id: string,
+      text: string,
+      metadata?: Record<string, unknown>,
+      sessionID = "ses_fork",
+    ) => {
+      // OpenCode stores a user message under its inbox id on delivery.
+      if (sessionID === "ses_fork")
+        harness.history.push({ id, type: "user", text, metadata, time: { created: 10 } });
+      event(
+        "session.inbox.enqueued",
+        { inboxID: id, item: { type: "user", delivery: "queue", payload: { text, metadata } } },
+        sessionID,
+      );
+      event("session.inbox.delivered", { inboxID: id }, sessionID);
+    };
+    return {
+      harness,
+      session,
+      event,
+      prompt,
+      listing,
+      pin: () => session.humanPromptTurnId!(),
+      /** Resolves once listing `n` (from 0, after resume) is in flight and held. */
+      entered: (n = 0) => call(n).entered.promise,
+      releaseOne: (n: number) => call(n).gate.resolve(),
+      async release() {
+        openAll();
+        await session.getRuntimeInfo();
+      },
+      async close() {
+        openAll();
+        await session.close();
+      },
+    };
+  }
+  const previousTurn: SessionMessageInfo = {
+    id: "msg_previous_turn",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "test", id: "model" },
+    time: { created: 1, completed: 2 },
+    content: [],
+  };
+
+  it.each([
+    ["an empty", []],
+    ["a previous turn's", [previousTurn]],
+  ])(
+    "a first step pins its live prompt while %s snapshot's reconciliation is held",
+    async (_, prior) => {
+      const f = await humanFixture();
+      const live = await heldReconciliation(f, prior as SessionMessageInfo[]);
+      try {
+        live.prompt("msg_current_user", "Ask the human now");
+        live.event("session.execution.started", {});
+        await live.entered();
+        const added = await f.add();
+        expect(added.items[0]!.turnId).toBe("msg_current_user");
+        await f.connection.humanPromptBoundary(f.agent.id, false);
+        expect(readHumanPrompts([...f.remote.values()][0]!.text)?.turnId).toBe("msg_current_user");
+        // Neither the tool nor the boundary requested native history.
+        expect(live.listing).toHaveBeenCalledTimes(1);
+      } finally {
+        await live.close();
+      }
+    },
+  );
+
+  it("a live pin skips private reminders, follows completed steps and ignores other sessions", async () => {
+    const f = await humanFixture();
+    const live = await heldReconciliation(f, [previousTurn]);
+    try {
+      live.prompt("msg_current_user", "Ask the human now");
+      live.prompt("msg_reminder", "Human prompts", { chiHumanPrompts: true });
+      live.event("session.step.started", { assistantMessageID: "msg_step_one" });
+      // Another session's lifecycle never moves this session's pin.
+      live.event("session.step.ended", { assistantMessageID: "msg_child_step" }, "ses_child");
+      live.prompt("msg_child_prompt", "child", undefined, "ses_child");
+      await live.entered();
+      expect(await live.pin()).toBe("msg_current_user");
+      live.event("session.step.ended", { assistantMessageID: "msg_step_one" });
+      await vi.waitFor(async () => expect(await live.pin()).toBe("msg_step_one"));
+      // The held snapshot predates the step's end, so it lists the step unfinished.
+      live.harness.history.push({ ...previousTurn, id: "msg_step_one", time: { created: 11 } });
+      await live.release();
+      expect(await live.pin()).toBe("msg_step_one");
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("a retried step is not pinned again until it ends, even if an older snapshot lists it completed", async () => {
+    const f = await humanFixture();
+    const live = await heldReconciliation(f, [previousTurn]);
+    try {
+      live.prompt("msg_current_user", "Ask the human now");
+      live.event("session.step.started", { assistantMessageID: "msg_step" });
+      live.event("session.step.failed", { assistantMessageID: "msg_step" });
+      await live.entered(0);
+      await vi.waitFor(async () => expect(await live.pin()).toBe("msg_step"));
+      live.event("session.step.started", { assistantMessageID: "msg_step" });
+      await vi.waitFor(async () => expect(await live.pin()).toBe("msg_current_user"));
+      // Listing 0 was requested before the retry: it lists the failed step completed.
+      const step = { ...previousTurn, id: "msg_step", time: { created: 11, completed: 12 } };
+      live.harness.history.push(step);
+      live.releaseOne(0);
+      await live.entered(1);
+      expect(await live.pin()).toBe("msg_current_user");
+      step.time = { created: 13 } as typeof step.time;
+      await live.release();
+      expect(await live.pin()).toBe("msg_current_user");
+      live.event("session.step.ended", { assistantMessageID: "msg_step" });
+      await vi.waitFor(async () => expect(await live.pin()).toBe("msg_step"));
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("a cancelled input or an input of unknown kind never becomes the live pin", async () => {
+    const f = await humanFixture();
+    const live = await heldReconciliation(f, [previousTurn]);
+    try {
+      live.event("session.inbox.enqueued", {
+        inboxID: "msg_cancelled",
+        item: { type: "user", delivery: "queue", payload: { text: "never sent" } },
+      });
+      live.event("session.inbox.cancelled", { inboxID: "msg_cancelled" });
+      live.event("session.inbox.delivered", { inboxID: "msg_cancelled" });
+      // Enqueued before this daemon subscribed: its kind and metadata are unknown.
+      live.event("session.inbox.delivered", { inboxID: "msg_unknown" });
+      await live.entered();
+      expect(await live.pin()).toBe("msg_previous_turn");
+    } finally {
+      await live.close();
+    }
+  });
+
+  it("a reverted live pin survives an older snapshot and is dropped by a newer one", async () => {
+    const f = await humanFixture();
+    const live = await heldReconciliation(f, [previousTurn]);
+    try {
+      live.event("session.execution.started", {});
+      await live.entered(0);
+      // This step settles after listing 0 was requested; listing 1 follows it.
+      live.event("session.step.ended", { assistantMessageID: "msg_reverted" });
+      await vi.waitFor(async () => expect(await live.pin()).toBe("msg_reverted"));
+      live.releaseOne(0);
+      await live.entered(1);
+      expect(await live.pin()).toBe("msg_reverted");
+      // The newer listing omits the step: it was reverted.
+      await live.release();
+      expect(await live.pin()).toBe("msg_previous_turn");
+    } finally {
+      await live.close();
     }
   });
 

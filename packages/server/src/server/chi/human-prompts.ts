@@ -95,6 +95,14 @@ export interface HumanPromptTransport {
   viewed?(recipient: string): boolean;
 }
 type Transport = HumanPromptTransport;
+export interface HumanPromptOperateOptions {
+  nativeQuestionId?: string | null;
+  /**
+   * Batches whose handoffs the caller already read in this flow. Supplying it
+   * skips this call's own reads; answers of every other batch are withheld.
+   */
+  verified?: ReadonlySet<string>;
+}
 
 /** A create failure whose outcome is proven: never posted, or refused by the backend. */
 export class HumanPromptSendError extends Error {
@@ -118,8 +126,8 @@ const quotaSchema = z
   )
   .max(10000);
 const lanes = new Map<string, Promise<unknown>>();
-const refreshes = new Map<string, { signal?: AbortSignal; work: Promise<void> }>();
-const readers = new Map<string, Promise<void>>();
+const refreshes = new Map<string, { signal?: AbortSignal; work: Promise<Set<string>> }>();
+const readers = new Map<string, Promise<Set<string>>>();
 
 export function quoteHumanAnswer(text: string): string {
   return text
@@ -200,14 +208,20 @@ export class HumanPrompts {
     scope: HumanPromptScope,
     operation: HumanPromptOperation,
     transport: Transport,
-    nativeQuestionId: string | null = null,
-    refresh = true,
+    options: HumanPromptOperateOptions = {},
   ) {
     operation = HumanPromptOperationSchema.parse(operation);
-    if (refresh && operation.action !== "add") {
+    const nativeQuestionId = options.nativeQuestionId ?? null;
+    // A cached answer is returned only when this flow has just read its handoff:
+    // repository authority may be cached, but the backend checks every read.
+    let verified = options.verified;
+    if (!verified && operation.action === "add")
+      verified = await this.authorizeAnswers(scope, transport);
+    if (!verified) {
       await this.exclusive(async () => this.save(scope, await this.load(scope)));
-      await this.reconcile(scope, transport, true);
+      verified = await this.reconcile(scope, transport, true);
     }
+    const exposed = verified;
     return this.exclusive(async () => {
       const state = await this.load(scope);
       if (operation.action === "add") {
@@ -246,12 +260,35 @@ export class HumanPrompts {
           await this.send(scope, state, batch, transport);
       }
       await this.save(scope, state);
-      return this.project(state);
+      return this.project(state, exposed);
     });
   }
-  private project(state: State) {
+  /** Reads every answered batch now; an unreadable handoff's answers are withheld. */
+  private async authorizeAnswers(scope: HumanPromptScope, transport: Transport) {
+    const state = await this.exclusive(() => this.load(scope, false));
+    const verified = new Set<string>();
+    await Promise.all(
+      state.batches
+        .filter((b) => state.items.some((i) => i.batchId === b.id && i.answer))
+        .map(async (batch) => {
+          try {
+            this.verify(state, batch, await transport.read(batch.id));
+            verified.add(batch.id);
+          } catch {
+            // Withholding never blocks adding; the read already reported access loss.
+          }
+        }),
+    );
+    return verified;
+  }
+  /** `exposed` lists the batches whose answers may be returned; `"all"` is internal only. */
+  private project(state: State, exposed: ReadonlySet<string> | "all") {
     return {
-      items: state.items.map((item) => {
+      items: state.items.map((stored) => {
+        const item =
+          stored.answer && exposed !== "all" && !(stored.batchId && exposed.has(stored.batchId))
+            ? { ...stored, answer: null }
+            : stored;
         let outcome = "pending";
         if (item.answer) outcome = "answered";
         if (item.retired) outcome = "late/not-applied";
@@ -275,12 +312,14 @@ export class HumanPrompts {
       .then(() => this.readBatches(scope, transport, explicitRead));
     readers.set(key, work);
     try {
-      await work;
+      return await work;
     } finally {
       if (readers.get(key) === work) readers.delete(key);
     }
   }
+  /** Returns the batches whose handoffs this pass read and verified. */
   private async readBatches(scope: HumanPromptScope, transport: Transport, explicitRead: boolean) {
+    const verified = new Set<string>();
     const selected = await this.exclusive(async () => {
       const state = await this.load(scope, false);
       const start = state.cursor % Math.max(1, state.batches.length);
@@ -310,6 +349,7 @@ export class HumanPrompts {
         const current = state.batches.find((b) => b.id === batch.id)!;
         if (handoff) {
           this.verify(state, current, handoff);
+          verified.add(current.id);
           current.status = "delivered";
           for (const reply of handoff.replies ?? []) {
             if (reply.actor.toLowerCase() !== current.recipient) continue;
@@ -328,6 +368,7 @@ export class HumanPrompts {
         await this.save(scope, state);
       });
     }
+    return verified;
   }
   refresh(scope: HumanPromptScope, transport: Transport) {
     const key = this.path(scope.agentId);
@@ -532,7 +573,7 @@ export class HumanPrompts {
   }
   private revision(state: State) {
     return createHash("sha256")
-      .update(JSON.stringify(this.project(state)))
+      .update(JSON.stringify(this.project(state, "all")))
       .digest("hex");
   }
   private renderReminder(state: State): string | null {

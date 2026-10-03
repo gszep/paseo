@@ -827,12 +827,13 @@ export class ChiConnection {
           result = await this.humanPromptMentions.createHandoff(current, batch);
         } catch (error) {
           const status = mentionHttpStatus(error);
+          // As for every other mention write, a denial drops cached authority.
+          if (status === 401) this.loseMentionAuthority();
+          else if (status === 403 || status === 404) this.loseMentionAuthority({ repo });
           // Authentication and repository denials precede the handler; the other
           // fixed client errors prove that the backend refused this create.
-          if (status === 401 || status === 403) {
-            this.loseMentionAuthority(status === 401 ? undefined : { repo });
+          if (status === 401 || status === 403)
             throw new HumanPromptSendError(humanPromptFailure(error), "not-sent");
-          }
           if (status !== null && [400, 404, 409, 413, 422].includes(status))
             throw new HumanPromptSendError(humanPromptFailure(error), "rejected");
           throw error;
@@ -1089,22 +1090,21 @@ export class ChiConnection {
               text: `${question.question}\nOptions: ${JSON.stringify(question.options)}${question.multiSelect ? "\nAnswer with a JSON array of selected labels." : ""}`,
             },
             access.transport,
-            request.id,
-            false,
+            { nativeQuestionId: request.id, verified: new Set() },
           );
         }
       }
-      await this.humanPrompts.boundary(access.scope, access.transport, {
+      await this.humanPrompts.dispatch(access.scope, access.transport, {
         source: this.humanPromptSource(access.association),
         viewed: false,
-        remind: false,
       });
+      // Only answers whose handoffs this pass read can resume a form.
+      const verified = await this.humanPrompts.refresh(access.scope, access.transport);
       const result = await this.humanPrompts.operate(
         access.scope,
         { action: "resolve" },
         access.transport,
-        null,
-        false,
+        { verified },
       );
       await access.check();
       for (const { request, questions, keys } of forms) {

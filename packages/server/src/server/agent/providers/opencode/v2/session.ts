@@ -3,7 +3,7 @@ import { SessionTurns } from "./turns.js";
 import { V2Timeline } from "./timeline.js";
 import { waitForLocationReady, awaitPaseoPlugin } from "./readiness.js";
 
-import type { ModelInfo, SessionInfo, SessionMessageInfo } from "@opencode/client";
+import type { ModelInfo, OpenCodeEvent, SessionInfo, SessionMessageInfo } from "@opencode/client";
 
 import { setTimeout as delay } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
@@ -39,6 +39,12 @@ import { commands } from "./commands.js";
 import { messages } from "./history.js";
 import { SessionPermissions } from "./permissions.js";
 
+interface LivePin {
+  id: string;
+  seq: number;
+  previous: LivePin | null;
+}
+
 function inheritedEnvironment(): Record<string, string> {
   return Object.fromEntries(
     Object.entries(process.env).filter(
@@ -62,6 +68,10 @@ export class OpenCodeV2Session implements AgentSession {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private history: SessionMessageInfo[] = [];
+  private livePin: LivePin | null = null;
+  private runningStep: { id: string; seq: number } | null = null;
+  private pinSeq = 0;
+  private readonly pendingInputs = new Map<string, boolean>();
   private modes: AgentMode[] = [];
   private models: ModelInfo[] = [];
   private usage: AgentUsage | undefined;
@@ -304,17 +314,62 @@ export class OpenCodeV2Session implements AgentSession {
     return this.turns.startTurn(prompt, options);
   }
   async humanPromptTurnId() {
-    // Reconciliation already owns this snapshot. A native history request here
-    // can take longer than the entire foreground human-prompt budget. A user
-    // message is settled once stored, so a turn's first step pins its own prompt;
-    // private reminders are omitted from capture and never become the pin.
-    return (
-      this.history.findLast(
-        (message) =>
-          (message.type === "assistant" && message.time.completed !== undefined) ||
-          (message.type === "user" && message.metadata?.chiHumanPrompts !== true),
-      )?.id ?? null
+    // A native history request here can take longer than the entire foreground
+    // human-prompt budget. A user message is settled once stored, so a turn's
+    // first step pins its own prompt; private reminders never become the pin.
+    const index = this.history.findLastIndex(
+      (message) =>
+        (message.type === "assistant" &&
+          message.time.completed !== undefined &&
+          message.id !== this.runningStep?.id) ||
+        (message.type === "user" && message.metadata?.chiHumanPrompts !== true),
     );
+    // Lifecycle events settle messages before a slow snapshot can list them.
+    const live = this.livePin;
+    if (live) {
+      const listed = this.history.findIndex((message) => message.id === live.id);
+      if (listed === -1 || listed > index) return live.id;
+    }
+    return this.history[index]?.id ?? null;
+  }
+  private observeHumanPromptPin(event: OpenCodeEvent) {
+    switch (event.type) {
+      case "session.inbox.enqueued":
+        // Only user input becomes a stored user message; its metadata is known
+        // only here. Unknown inputs fall back to the reconciled snapshot.
+        if (event.data.item.type === "user" && this.pendingInputs.size < 256)
+          this.pendingInputs.set(
+            event.data.inboxID,
+            event.data.item.payload.metadata?.chiHumanPrompts !== true,
+          );
+        return;
+      case "session.inbox.cancelled":
+        this.pendingInputs.delete(event.data.inboxID);
+        return;
+      case "session.inbox.delivered":
+        // OpenCode stores a delivered user input under its inbox id.
+        if (this.pendingInputs.get(event.data.inboxID))
+          this.livePin = { id: event.data.inboxID, seq: ++this.pinSeq, previous: null };
+        this.pendingInputs.delete(event.data.inboxID);
+        return;
+      case "session.step.ended":
+      case "session.step.failed":
+        if (this.runningStep?.id === event.data.assistantMessageID) this.runningStep = null;
+        this.livePin = {
+          id: event.data.assistantMessageID,
+          seq: ++this.pinSeq,
+          // One level suffices to undo a retry and keeps the chain bounded.
+          previous: this.livePin && { ...this.livePin, previous: null },
+        };
+        return;
+      case "session.step.started":
+        // A retried step reopens its message, which an older snapshot may still
+        // list as completed. It is not settled again until its step ends.
+        this.runningStep = { id: event.data.assistantMessageID, seq: ++this.pinSeq };
+        if (this.livePin?.id === event.data.assistantMessageID)
+          this.livePin = this.livePin.previous;
+        return;
+    }
   }
   steerActiveTurn(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult> {
     return this.turns.steerActiveTurn(prompt, options);
@@ -339,12 +394,19 @@ export class OpenCodeV2Session implements AgentSession {
     await this.permissions.respondToPermission(requestId, response);
   }
   private async reconcileSnapshot() {
+    const observed = this.pinSeq;
     const [info, history] = await Promise.all([
       this.client.session.get({ sessionID: this.id }),
       messages(this.client, this.id),
     ]);
     this.info = info;
     this.history = history;
+    // A snapshot requested after the pin settled omits it only once it was
+    // reverted; the pin must not outlive its message.
+    const live = this.livePin;
+    if (live && live.seq <= observed && !history.some((message) => message.id === live.id))
+      this.livePin = null;
+    if (this.runningStep && this.runningStep.seq <= observed) this.runningStep = null;
     const usage = usageFromV2({ session: info, history, models: this.models });
     if (!isDeepStrictEqual(usage, this.usage)) {
       this.usage = usage;
@@ -405,12 +467,13 @@ export class OpenCodeV2Session implements AgentSession {
       );
     }, 25);
   }
-  private observeOwnEvent(event: import("@opencode/client").OpenCodeEvent) {
+  private observeOwnEvent(event: OpenCodeEvent) {
     if (event.type === "form.created" && event.data.form.sessionID === this.id) {
       this.scheduleReconcile();
       return;
     }
     if (!("sessionID" in event.data) || event.data.sessionID !== this.id) return;
+    this.observeHumanPromptPin(event);
     if (event.type === "session.text.started" || event.type === "session.reasoning.started") {
       if (event.type === "session.text.started" && this.turns.hasStructuredOutput) return;
       this.timeline.startPart({

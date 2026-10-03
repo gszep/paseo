@@ -318,7 +318,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(active);
     const h = [...f.remote.values()][0]!;
@@ -636,7 +636,7 @@ describe("human prompt delivery receipts", () => {
       text: "Native question",
     };
     const active = { ...f.scope, pendingQuestionIds: ["form"] };
-    await f.service.operate(active, input, f.transport, "form");
+    await f.service.operate(active, input, f.transport, { nativeQuestionId: "form" });
     await expect(f.service.operate(active, input, f.transport)).rejects.toThrow("conflict");
     await f.flush(active, { source: null });
     await f.flush();
@@ -645,7 +645,7 @@ describe("human prompt delivery receipts", () => {
       (await f.service.operate(f.scope, { action: "list" }, f.transport)).items[0]!.retired,
     ).toBe(true);
     const other = { ...f.scope, agentId: "other", pendingQuestionIds: ["other-form"] };
-    await f.service.operate(other, input, f.transport, "other-form");
+    await f.service.operate(other, input, f.transport, { nativeQuestionId: "other-form" });
     f.lose(true);
     await f.flush(other);
     expect(f.attempts).toHaveLength(1);
@@ -671,7 +671,7 @@ describe("human prompt delivery receipts", () => {
         text: "Native question",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(active);
     const h = [...f.remote.values()][0]!;
@@ -770,7 +770,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     f.deny(true);
     await f.flush(scope);
@@ -795,7 +795,7 @@ describe("human prompt delivery receipts", () => {
         text: "Pick",
       },
       f.transport,
-      "form",
+      { nativeQuestionId: "form" },
     );
     await f.flush(scope);
     const h = [...f.remote.values()][0]!;
@@ -962,11 +962,79 @@ describe("human prompt delivery receipts", () => {
     };
     const reading = f.service.refresh(f.scope, stale);
     await started;
-    await f.service.operate(f.scope, { action: "retry" }, f.transport, null, false);
+    await f.service.operate(f.scope, { action: "retry" }, f.transport, { verified: new Set() });
     expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
     release();
     await reading;
     expect((await f.service["load"](f.scope)).batches[0]!.status).toBe("delivered");
+  });
+
+  async function answered(text: string) {
+    const f = await fixture();
+    await f.add("q");
+    await f.flush();
+    const h = [...f.remote.values()][0]!;
+    h.replies = [
+      {
+        id: randomUUID(),
+        actor: h.recipient,
+        at: "now",
+        revision: 2,
+        text: encodeHumanAnswers([{ id: readHumanPrompts(h.text)!.items[0]!.id, text }]),
+      },
+    ];
+    await f.flush(f.scope, { remind: false });
+    expect((await f.service["load"](f.scope)).items[0]!.answer?.text).toBe(text);
+    return f;
+  }
+
+  it("add returns a cached answer only after re-reading its handoff", async () => {
+    const f = await answered("Blue");
+    const read = vi.spyOn(f.transport, "read");
+    expect((await f.add("second")).items.map((i) => i.answer?.text ?? null)).toEqual([
+      "Blue",
+      null,
+    ]);
+    expect(read).toHaveBeenCalledTimes(1);
+    f.deny(true);
+    const withheld = await f.add("third");
+    expect(withheld.items[0]).toMatchObject({ answer: null, outcome: "pending" });
+    expect(withheld.items).toHaveLength(3);
+    // Withholding changes only the result, never the cached receipt.
+    f.deny(false);
+    expect((await f.add("third")).items[0]!.answer?.text).toBe("Blue");
+  });
+
+  it("add withholds an answer whose re-read handoff no longer matches", async () => {
+    const f = await answered("Blue");
+    const h = [...f.remote.values()][0]!;
+    f.remote.set(h.id, { ...h, author: "github:intruder" });
+    expect((await f.add("second")).items[0]!.answer).toBeNull();
+  });
+
+  it("an operation given a verified set reads nothing and returns only those answers", async () => {
+    const f = await answered("Blue");
+    const batch = (await f.service["load"](f.scope)).batches[0]!.id;
+    const read = vi.spyOn(f.transport, "read");
+    const none = await f.service.operate(f.scope, { action: "resolve" }, f.transport, {
+      verified: new Set(),
+    });
+    expect(none.items[0]!.answer).toBeNull();
+    const some = await f.service.operate(f.scope, { action: "resolve" }, f.transport, {
+      verified: new Set([batch]),
+    });
+    expect(some.items[0]!.answer?.text).toBe("Blue");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("refresh reports exactly the batches it read and verified", async () => {
+    const f = await answered("Blue");
+    await f.add("other", { recipient: "github:other" });
+    await f.flush(f.scope, { remind: false });
+    const [first, second] = (await f.service["load"](f.scope)).batches;
+    // The answered generic batch is not polled; the open one is.
+    expect([...(await f.service.refresh(f.scope, f.transport))]).toEqual([second!.id]);
+    expect(first!.status).toBe("delivered");
   });
 
   it("rejects a forged create response before recording delivered", async () => {
