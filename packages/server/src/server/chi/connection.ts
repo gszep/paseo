@@ -145,9 +145,11 @@ function sameActor(a: string, b: string): boolean {
   // login as typed by either the mention path (lowercased) or the capture path.
   return a.toLowerCase() === b.toLowerCase();
 }
-/** Secret rejections and cut-scan limits are terminal: never auto-retry.
+/** Secret rejections, cut-scan limits and divergence require human recovery.
  * A missing local scanner is retryable (install it and the next turn/reconnect retries). */
 const TERMINAL_SYNC_ERRORS = new Set<string>([
+  "capture-head-diverged",
+  "capture-recovery-invalid",
   "capture-local-secret-rejected",
   "capture-local-cut-scan-limit",
   "evidence-http-422-server-secret-scan-rejected",
@@ -1062,7 +1064,7 @@ export class ChiConnection {
     if (!resolved) throw new Error("chi-destination-required");
     const endpoint = resolved.endpoint;
     const auth = await this.authorize(repo, agent.cwd, this.authorityFor(endpoint));
-    const encoded = await this.manager.updateAgentLabel(agentId, label, (current) => {
+    await this.manager.updateAgentLabel(agentId, label, (current) => {
       if (current) {
         const previous = associationSchema.parse(JSON.parse(current));
         if (previous.repo.toLowerCase() !== repo) throw new Error("chi-association-conflict");
@@ -1080,8 +1082,7 @@ export class ChiConnection {
         audience: resolved.audience,
       });
     });
-    const previous = associationSchema.parse(JSON.parse(encoded));
-    return this.capture(agentId, /^evidence-http-409(?:-|$)/.test(previous.error ?? ""));
+    return this.capture(agentId);
   }
 
   /** Create the auto-association label without requiring the network. */
@@ -1148,7 +1149,7 @@ export class ChiConnection {
     return this.resolveForCwd(target.cwd);
   }
 
-  capture(agentId: string, retryConflict = false): Promise<Association> {
+  capture(agentId: string): Promise<Association> {
     this.dirty.add(agentId);
     const pending = this.pending.get(agentId);
     if (pending) return pending;
@@ -1160,15 +1161,24 @@ export class ChiConnection {
           if (!target) throw new Error("chi-native-agent-required");
           await this.ensureAssociation(target);
           const fresh = (await this.captureTarget(agentId)) ?? target;
-          const result = await this.captureOnce(fresh, retryConflict);
+          const result = await this.captureOnce(fresh);
           if (!this.dirty.has(agentId)) return result;
         } catch (error) {
           if (safeChiError(error) !== "chi-session-busy" || !this.dirty.has(agentId)) throw error;
         }
-        retryConflict = false;
       }
     })();
     this.pending.set(agentId, operation);
+    void operation
+      .then(
+        () => this.captureBackoff.delete(agentId),
+        (error) => {
+          if (safeChiError(error) === "chi-session-busy") return;
+          const delay = Math.min((this.captureBackoff.get(agentId)?.delay ?? 30_000) * 2, 900_000);
+          this.captureBackoff.set(agentId, { delay, nextCheck: Date.now() + delay });
+        },
+      )
+      .catch(() => undefined);
     void operation
       .finally(() => {
         this.pending.delete(agentId);
@@ -1178,7 +1188,7 @@ export class ChiConnection {
     return operation;
   }
 
-  private async captureOnce(target: CaptureTarget, retryConflict: boolean): Promise<Association> {
+  private async captureOnce(target: CaptureTarget): Promise<Association> {
     const agentId = target.id;
     let association = target.labels[label]
       ? associationSchema.parse(JSON.parse(target.labels[label]!))
@@ -1243,6 +1253,7 @@ export class ChiConnection {
         };
         const { parsed, captured, captureError, warning } = await this.scanAndCapture({
           input,
+          sourceId: pinned.sourceId,
           full: { native, mapping, coverage, sessionId },
           minimised: {
             native: minimised.native,
@@ -1252,7 +1263,7 @@ export class ChiConnection {
             projection: minimised.projection,
             ...(minimised.git ? { git: minimised.git } : {}),
           },
-          retryConflict,
+          retryConflict: pinned.error === "evidence-http-409-evidence-head-conflict",
           ownerId: auth.chiUserId,
           request: authority.request,
         });
@@ -1387,6 +1398,11 @@ export class ChiConnection {
     target: CaptureTarget,
     agentId: string,
   ): Promise<Association> {
+    // Recovery could not establish canonical lineage. Do not republish a removed
+    // provenance ref or associate local changes with an unproved archived head.
+    const code = safeChiError(settled.captureError);
+    if (code === "capture-head-diverged" || code === "capture-recovery-invalid")
+      throw settled.captureError;
     const deleted = safeChiError(settled.captureError).endsWith("object-deleted");
     const mapping = resolveChiDestinationForRepo(this.chiConfig(), association.repo);
     if (
@@ -1418,6 +1434,7 @@ export class ChiConnection {
    */
   private async scanAndCapture(args: {
     input: CaptureInput;
+    sourceId: string | null;
     full: LocalScanInput;
     minimised: LocalScanInput;
     retryConflict: boolean;
@@ -1430,6 +1447,10 @@ export class ChiConnection {
     warning: string | null;
   }> {
     const parsed = prepareNativeCapture(args.input);
+    // A copied/replaced runtime namespace must not retarget an existing label,
+    // even when the other source already contains this exact capture.
+    if (args.sourceId !== null && args.sourceId !== parsed.sourceId)
+      throw new Error("capture-head-diverged");
     let captured: Awaited<ReturnType<typeof captureNative>> | null = null;
     let captureError: unknown = null;
     let warning: string | null = null;
@@ -1438,9 +1459,23 @@ export class ChiConnection {
       if (verdict.verdict === "omitted-warning") warning = "capture-local-secret-omitted-content";
       if (verdict.verdict === "attribution-unavailable")
         warning = "capture-local-attribution-unavailable";
-      captured = await (args.retryConflict
-        ? retryCaptureNative(args.input, args.ownerId, args.request)
-        : captureNative(args.input, args.request));
+      if (args.retryConflict) {
+        captured = await retryCaptureNative(args.input, args.ownerId, args.request);
+      } else {
+        try {
+          captured = await captureNative(args.input, args.request);
+        } catch (error) {
+          if (
+            !(error instanceof EvidenceHttpError) ||
+            error.status !== 409 ||
+            error.reason !== "evidence-head-conflict"
+          )
+            throw error;
+          // One refresh/proof/CAS attempt only. A racing writer is handled by
+          // the next bounded retry, never by overwriting a newly advanced head.
+          captured = await retryCaptureNative(args.input, args.ownerId, args.request);
+        }
+      }
     } catch (error) {
       captureError = error;
     }
@@ -1542,7 +1577,7 @@ export class ChiConnection {
     const agent = this.manager.getAgent(agentId);
     if (!agent || agent.provider !== "opencode") return;
     const association = this.association(agent);
-    // A genuine secret-scan rejection is terminal until the user retries.
+    // A settled turn bypasses sweep backoff, but never a human-recovery stop.
     if (association && isTerminalSyncError(association.error)) return;
     // A genuinely local workspace (no mapping at all) stays quiet.
     if (!association && !this.chiConfig()) return;
@@ -1579,23 +1614,48 @@ export class ChiConnection {
     this.originCache.clear();
     for (const candidate of await this.candidateLabels()) {
       if (!candidate.labels[label]) continue;
+      if (isTerminalSyncError(this.parseAssociation(candidate.labels[label])?.error)) continue;
       void this.capture(candidate.id).catch(() => undefined);
     }
   }
 
-  /** Retry captures that are outstanding across a restart or reconnect. */
-  async reconcilePending(): Promise<void> {
-    for (const candidate of await this.candidateLabels()) {
+  private readonly captureBackoff = new Map<string, { nextCheck: number; delay: number }>();
+  private captureSweepCursor = 0;
+  private captureSweep: Promise<void> | null = null;
+
+  /** Retry durable pending captures, bounded across timer and reconnect callers. */
+  reconcilePending(): Promise<void> {
+    if (this.captureSweep) return this.captureSweep;
+    this.captureSweep = this.sweepPending().finally(() => {
+      this.captureSweep = null;
+    });
+    return this.captureSweep;
+  }
+
+  private async sweepPending(): Promise<void> {
+    const candidates = (await this.candidateLabels()).sort((a, b) => a.id.localeCompare(b.id));
+    const ids = new Set(candidates.map((candidate) => candidate.id));
+    for (const id of this.captureBackoff.keys()) if (!ids.has(id)) this.captureBackoff.delete(id);
+    let attempted = 0;
+    let visited = 0;
+    for (; visited < candidates.length && attempted < 4; visited++) {
+      const candidate = candidates[(this.captureSweepCursor + visited) % candidates.length]!;
       const association = this.parseAssociation(candidate.labels[label]);
       if (
         !association ||
         association.paused ||
         !association.capturePending ||
-        isTerminalSyncError(association.error)
+        isTerminalSyncError(association.error) ||
+        this.pending.has(candidate.id) ||
+        (this.captureBackoff.get(candidate.id)?.nextCheck ?? 0) > Date.now()
       )
         continue;
-      void this.capture(candidate.id).catch(() => undefined);
+      attempted++;
+      await this.capture(candidate.id).catch(() => undefined);
     }
+    this.captureSweepCursor = candidates.length
+      ? (this.captureSweepCursor + visited) % candidates.length
+      : 0;
   }
 
   /**
@@ -1650,7 +1710,7 @@ export class ChiConnection {
     this.orphanSweepStopped = false;
     const sweep = async () => {
       try {
-        await this.reconcileProvenanceOrphans();
+        await Promise.all([this.reconcilePending(), this.reconcileProvenanceOrphans()]);
       } catch {
         /* Retry transient authorization, storage and remote failures. */
       } finally {
@@ -2191,6 +2251,7 @@ export class ChiConnection {
 }
 
 export function safeChiError(error: unknown): string {
+  if (error instanceof Error && error.name === "TimeoutError") return "chi-operation-timeout";
   if (error instanceof EvidenceHttpError && error.reason) return `${error.message}-${error.reason}`;
   if (error instanceof ContinuationError) return error.message;
   if (error instanceof Error && /^(?:chi|evidence|capture)-[a-z0-9-]+$/.test(error.message))

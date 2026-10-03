@@ -102,6 +102,46 @@ Capture association errors retain the HTTP status and an allowlisted public Chi
 reason (for example `evidence-http-413-native-store-limit`). The native client
 reads at most 1 KiB of a failed response; unknown, malformed and oversized bodies
 remain status-only. Protected response text never becomes an association label.
+HTTP deadlines surface as `chi-operation-timeout`: completion is uncertain, since
+the backend may have committed before its response was lost. Share and Continue
+include authorization, export, scanning and network work, each with its own
+deadline; 30 seconds is not an end-to-end request budget. Provenance also runs
+before a managed capture returns. A long request alone does not identify its slow stage.
+
+Managed head conflicts use the same recovery proof for settled turns, workspace
+Retry and background reconciliation. Reacquire the source under its pinned owner,
+namespace and workspace. An exact capture replay is verified against the immutable
+snapshot hash; otherwise the remote head must descend from the cached head and
+its ordered message IDs and revisions must be a prefix of the upload, with
+unchanged native parent/fork identity. The final write still passes the server
+scanner and CAS. A second racing conflict waits for the next attempt. History
+reset and edited/reordered/deleted messages require human recovery
+(`capture-head-diverged`), never a head overwrite. Equal-message metadata-only
+changes are accepted after the same lineage proof. A cached head whose source is
+explicitly not found also stops with `capture-head-diverged`; reset sources are
+never automatically recreated. Invalid, incompatible or over-limit proofs stop
+automatic retries with `capture-recovery-invalid`. Compare
+the archive and the other writer, then Continue from the canonical session or use
+native Fork to preserve local work as a new source. Do not edit association heads.
+Terminal recovery failures also skip provenance writes, so a stopped capture
+cannot restore a removed ref or label new work with an unproved archived head.
+The exported source ID must also match the existing association before upload;
+changing runtime namespaces never retargets a label, even to identical content.
+
+Startup immediately re-drives durable `capturePending` records, including loaded
+and unloaded agents; the periodic sweep continues draining the backlog. Capture
+retries are independent of orphan-cleanup backoff. A provenance-removal marker
+does not authorize recreating a missing source: recovery must stop for human review.
+The October 1 operator reset accounts for three of the four reported stuck agents;
+only the orchestrator is a lost-response replay candidate. Each sweep
+attempts at most four serial captures per rotating pass and
+coalesces overlapping reconnect sweeps. Failed automatic captures back off from
+one minute to at most fifteen minutes; busy sessions never increase backoff.
+Explicit Retry and settled turns bypass that delay. The
+pending label survives restart; transient backoff restarts with the daemon.
+Paused destinations and terminal rejections never auto-upload. Exact replay
+proof avoids downloading the native export, and known head conflicts avoid a
+redundant failing upload before reconciliation.
 
 Continuation request identity survives client reloads. The owner reacquires source
 access and matches the receipt's actor, deployment, runtime origin, pin and workspace
