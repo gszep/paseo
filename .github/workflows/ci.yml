@@ -203,6 +203,16 @@ jobs:
       - name: Build server dependencies
         run: node scripts/ci-build.mjs build:server-deps
 
+      - name: Prepare OS write-boundary test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap apparmor-profiles
+          sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          # Probe as the runner user, with the same namespace/capability policy.
+          /usr/bin/bwrap --unshare-all --unshare-user --die-with-parent --new-session --disable-userns --cap-drop ALL --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
+
       - name: Install native Windows scanner for provenance tests
         if: runner.os == 'Windows'
         shell: pwsh
