@@ -26,6 +26,12 @@ import {
   emitLiveTimelineItemIfAgentKnown,
 } from "../timeline-append.js";
 import { resolveCreateAgentIntent } from "./intent.js";
+import {
+  logSubagentIsolation,
+  withIsolationLabels,
+  wrapSubagentWorktreeCreationError,
+  type SubagentWorktreeDecision,
+} from "./isolation.js";
 
 export interface CreateAgentSessionWorktreeResult {
   sessionConfig: AgentSessionConfig;
@@ -117,6 +123,8 @@ export interface CreateAgentFromMcpInput {
     action?: "branch-off" | "checkout";
     githubPrNumber?: number;
   };
+  // Set for agent-created agents; `worktree` already carries the decision's placement.
+  subagentIsolation?: SubagentWorktreeDecision;
 }
 
 export type CreateAgentCommandInput = CreateAgentFromSessionInput | CreateAgentFromMcpInput;
@@ -197,6 +205,16 @@ export async function createAgentCommand(
   let initialPromptStarted = false;
   let initialPromptError: unknown | null = null;
   if (input.kind === "mcp") {
+    if (input.subagentIsolation && input.callerAgentId) {
+      logSubagentIsolation({
+        logger: dependencies.logger,
+        decision: input.subagentIsolation,
+        callerAgentId: input.callerAgentId,
+        agentId: snapshot.id,
+        workspaceId: snapshot.workspaceId,
+        cwd: snapshot.cwd,
+      });
+    }
     input.onCreated?.({ agentId: snapshot.id, createdWorktree: resolved.createdWorktree ?? null });
   }
   if (resolved.prompt !== undefined) {
@@ -312,22 +330,31 @@ async function resolveMcpCreateAgent(
   const parentAgent = input.callerAgentId
     ? requireParentAgent(dependencies.agentManager, input.callerAgentId)
     : null;
+  const isolation = input.subagentIsolation;
+  if (parentAgent && !isolation) {
+    throw new Error("Agent-created agents require a worktree isolation decision");
+  }
   const cwd = resolveMcpInitialCwd(input, parentAgent);
-  const { resolvedCwd, setupContinuation, createdWorkspaceId, createdWorktree } =
-    await resolveMcpCwd({
+  let mcpCwd: Awaited<ReturnType<typeof resolveMcpCwd>>;
+  try {
+    mcpCwd = await resolveMcpCwd({
       dependencies,
       cwd,
       worktree: input.worktree,
       initialPrompt: input.initialPrompt ?? "",
     });
+  } catch (error) {
+    throw isolation?.kind === "worktree" ? wrapSubagentWorktreeCreationError(error) : error;
+  }
+  const { resolvedCwd, setupContinuation, createdWorkspaceId, createdWorktree } = mcpCwd;
   if (createdWorktree) input.onWorktreeCreated?.(createdWorktree);
 
   const intent = await resolveCreateAgentIntent({
-    explicitWorkspaceId: setupContinuation ? createdWorkspaceId : input.workspaceId,
+    explicitWorkspaceId: createdWorkspaceId ?? input.workspaceId,
     caller: parentAgent
       ? { id: parentAgent.id, cwd: parentAgent.cwd, workspaceId: parentAgent.workspaceId }
       : null,
-    labels: input.labels,
+    labels: isolation ? withIsolationLabels(input.labels, isolation) : input.labels,
     childAgentDefaultLabels: input.callerContext?.childAgentDefaultLabels,
     legacyDetached: input.detached ?? false,
     resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: resolvedCwd }),

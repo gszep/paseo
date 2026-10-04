@@ -111,6 +111,14 @@ import type {
 import { createAgentCommand } from "./agent/create-agent/create.js";
 import { resolveCreateAgentIntent, type CreateAgentIntent } from "./agent/create-agent/intent.js";
 import {
+  logSubagentIsolation,
+  resolveSubagentWorktreeDecision,
+  SubagentIsolationError,
+  withIsolationLabels,
+  wrapSubagentWorktreeCreationError,
+  type SubagentWorktreeDecision,
+} from "./agent/create-agent/isolation.js";
+import {
   archiveAgentCommand,
   cancelAgentRunCommand,
   closeAgentCommand,
@@ -4400,6 +4408,7 @@ export class Session {
                   },
                   id,
                   onReady,
+                  { dedicatedWorktree: request.source.kind === "worktree" },
                 );
               }
             : undefined,
@@ -4500,6 +4509,7 @@ export class Session {
     msg: CreateAgentRequestMessage,
     agentId?: string,
     onAgentReady?: (agent: AgentSnapshotPayload) => Promise<void>,
+    placement: { dedicatedWorktree: boolean } = { dedicatedWorktree: false },
   ): Promise<AgentSnapshotPayload> {
     const {
       config,
@@ -4541,15 +4551,19 @@ export class Session {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       const workspacePromptTitle = resolveFirstAgentPromptTitle(firstAgentContext);
-      const createdWorktree = await this.createAgentLifecycleDispatch.createWorktreeForRequest({
-        cwd: config.cwd,
-        target: worktree,
+      const subagentIsolation = await this.resolveSessionSubagentIsolation(
+        msg,
+        placement.dedicatedWorktree,
+      );
+      const createdWorktree = await this.createSessionAgentWorktree({
+        request: msg,
+        subagentIsolation,
         firstAgentContext,
-        hasLegacyGitOptions: Boolean(git),
       });
       createdWorktreeForCleanup = createdWorktree;
       const resolvedIntent = await this.resolveSessionCreateAgentIntent({
         request: msg,
+        subagentIsolation,
         createdWorktree,
         workspacePromptTitle,
       });
@@ -4603,10 +4617,12 @@ export class Session {
           { currentSelection: this.getFocusedAgentSelectionForCwd(resolvedIntent.config.cwd) },
         );
       }
-      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
-        autoArchive,
-        agentId: snapshot.id,
+      this.registerSessionAgentLifecycle({
+        request: msg,
+        snapshot,
+        subagentIsolation,
         createdWorktree,
+        autoArchive,
       });
       this.sessionLogger.info(
         { agentId: snapshot.id, provider: snapshot.provider },
@@ -4622,8 +4638,101 @@ export class Session {
     }
   }
 
+  private registerSessionAgentLifecycle(input: {
+    request: CreateAgentRequestMessage;
+    snapshot: ManagedAgent;
+    subagentIsolation: SubagentWorktreeDecision | null;
+    createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
+    autoArchive: boolean | undefined;
+  }): void {
+    const { request, snapshot, subagentIsolation } = input;
+    this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
+      autoArchive: input.autoArchive,
+      agentId: snapshot.id,
+      // Archiving a subagent keeps its default worktree; only workspace cleanup removes it.
+      createdWorktree: subagentIsolation?.kind === "worktree" ? null : input.createdWorktree,
+    });
+    if (subagentIsolation && request.callerAgentId) {
+      logSubagentIsolation({
+        logger: this.sessionLogger,
+        decision: subagentIsolation,
+        callerAgentId: request.callerAgentId,
+        agentId: snapshot.id,
+        workspaceId: snapshot.workspaceId,
+        cwd: snapshot.cwd,
+      });
+    }
+  }
+
+  private async createSessionAgentWorktree(input: {
+    request: CreateAgentRequestMessage;
+    subagentIsolation: SubagentWorktreeDecision | null;
+    firstAgentContext: FirstAgentContext;
+  }): Promise<CreatePaseoWorktreeWorkflowResult | null> {
+    const { request, subagentIsolation, firstAgentContext } = input;
+    if (subagentIsolation?.kind !== "worktree") {
+      return this.createAgentLifecycleDispatch.createWorktreeForRequest({
+        cwd: request.config.cwd,
+        target: request.worktree,
+        firstAgentContext,
+        hasLegacyGitOptions: Boolean(request.git),
+      });
+    }
+    if (request.git) {
+      throw new SubagentIsolationError(
+        "Legacy git options cannot be combined with a subagent's default worktree",
+      );
+    }
+    try {
+      return await this.createAgentLifecycleDispatch.createSubagentWorktree({
+        cwd: subagentIsolation.sourceCwd,
+        baseRef: subagentIsolation.baseRef,
+        firstAgentContext,
+      });
+    } catch (error) {
+      throw wrapSubagentWorktreeCreationError(error);
+    }
+  }
+
+  // Agent callers (paseo run with PASEO_AGENT_ID) get the same worktree default as
+  // agent-scoped MCP creation. Human-created agents keep their requested placement.
+  private async resolveSessionSubagentIsolation(
+    request: CreateAgentRequestMessage,
+    dedicatedWorktree: boolean,
+  ): Promise<SubagentWorktreeDecision | null> {
+    if (!request.callerAgentId) {
+      if (request.isolation) {
+        throw new SubagentIsolationError("isolation applies only to agent-created agents");
+      }
+      return null;
+    }
+    const callerAgent = this.agentManager.getAgent(request.callerAgentId);
+    if (!callerAgent) {
+      throw new Error(`Caller agent ${request.callerAgentId} not found`);
+    }
+    const explicitWorktree =
+      dedicatedWorktree ||
+      Boolean(request.worktree || request.worktreeName || request.git?.createWorktree);
+    let sourceCwd = callerAgent.cwd;
+    if (explicitWorktree) {
+      sourceCwd = request.config.cwd;
+    } else if (request.workspaceId) {
+      const workspace = await this.workspaceRegistry.get(request.workspaceId);
+      if (!workspace || workspace.archivedAt) {
+        throw new Error(`Workspace ${request.workspaceId} not found`);
+      }
+      sourceCwd = workspace.cwd;
+    }
+    return resolveSubagentWorktreeDecision({
+      request: request.isolation,
+      sourceCwd,
+      explicitWorktree,
+    });
+  }
+
   private async resolveSessionCreateAgentIntent(input: {
     request: CreateAgentRequestMessage;
+    subagentIsolation: SubagentWorktreeDecision | null;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
     workspacePromptTitle: string | null;
   }): Promise<ResolvedSessionCreateAgentIntent> {
@@ -4642,7 +4751,9 @@ export class Session {
       caller: callerAgent
         ? { id: callerAgent.id, cwd: callerAgent.cwd, workspaceId: callerAgent.workspaceId }
         : null,
-      labels: request.labels,
+      labels: input.subagentIsolation
+        ? withIsolationLabels(request.labels, input.subagentIsolation)
+        : request.labels,
       resolveWorkspace: async (workspaceId) => {
         if (createdWorktree?.workspace.workspaceId === workspaceId) {
           return { workspaceId, cwd: createdWorktree.workspace.cwd };

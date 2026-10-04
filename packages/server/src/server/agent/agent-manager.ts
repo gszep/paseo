@@ -14,6 +14,7 @@ import {
 } from "@getpaseo/protocol/agent-lifecycle";
 import {
   getParentAgentIdFromLabels,
+  hasCreatedIsolationWorktree,
   hasOpenAgentTab,
   isDelegatedAgent,
   isOpenAgentTabLabel,
@@ -700,10 +701,13 @@ function shouldDetachFromArchivedParent(
   parent: StoredAgentRecord,
   child: StoredAgentRecord,
 ): boolean {
+  // A subagent's own isolation worktree is not a separate home: it archives with
+  // its parent like a same-workspace child, and its worktree stays on disk.
   const isCrossWorkspace =
     parent.workspaceId !== undefined &&
     child.workspaceId !== undefined &&
-    parent.workspaceId !== child.workspaceId;
+    parent.workspaceId !== child.workspaceId &&
+    !hasCreatedIsolationWorktree(child.labels);
   return isCrossWorkspace || hasOpenAgentTab(child.labels);
 }
 
@@ -2079,6 +2083,12 @@ export class AgentManager {
         agent: describeHookAgent(archivedRecord),
         archivedAt: archivedRecord.archivedAt,
       });
+    }
+    if (!record.archivedAt && hasCreatedIsolationWorktree(record.labels)) {
+      this.logger.info(
+        { agentId: record.id, workspaceId: record.workspaceId, cwd: record.cwd },
+        "Archived subagent keeps its worktree workspace for cleanup",
+      );
     }
     return archivedRecord;
   }

@@ -9,6 +9,7 @@ import { createProviderSnapshotManagerStub } from "../../test-utils/session-stub
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
+import { ISOLATION_WORKTREE_LABEL } from "@getpaseo/protocol/agent-labels";
 import { createAgentCommand } from "./create.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
@@ -333,12 +334,30 @@ test("mcp create stamps the new worktree's workspaceId, not the parent's", async
         notifyOnFinish: false,
         callerAgentId: parent.id,
         worktree: { worktreeName: "feature", baseBranch: "main" },
+        subagentIsolation: { kind: "requested", sourceCwd: workdir },
       },
     );
 
     const storedChild = await storage.get(child.id);
     expect(storedChild?.workspaceId).toBe("ws-new-worktree");
+    expect(storedChild?.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
     expect(child.cwd).toBe(join(workdir, "worktree", "packages", "app"));
+
+    // Every agent-created agent passes through the isolation decision; no caller can skip it.
+    await expect(
+      createAgentCommand(
+        { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+        {
+          kind: "mcp",
+          provider: "codex/gpt-5.4",
+          title: "undecided child",
+          initialPrompt: "do the thing",
+          background: true,
+          notifyOnFinish: false,
+          callerAgentId: parent.id,
+        },
+      ),
+    ).rejects.toThrow("Agent-created agents require a worktree isolation decision");
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }
