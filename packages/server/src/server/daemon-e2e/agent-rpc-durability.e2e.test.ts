@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
@@ -32,6 +33,10 @@ test("mention intent is created only inside admitted message receipts, and trans
     loggedOut = false;
   const host = await createTestPaseoDaemon({
     mcpEnabled: false,
+    chi: {
+      destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
+      mappings: [{ repo, destination: "fixture", audience: "shared" }],
+    },
     agentClients: {
       opencode: createTestAgentClient("opencode", {
         onStartTurn(_prompt, options) {
@@ -77,7 +82,15 @@ test("mention intent is created only inside admitted message receipts, and trans
       cwd,
       workspaceId: workspace.id,
       labels: {
-        "chi.native": JSON.stringify({ repo, actor, sourceId: null, head: null, error: null }),
+        "chi.native": JSON.stringify({
+          repo,
+          actor,
+          sourceId: null,
+          head: null,
+          error: null,
+          endpoint: "https://chi.invalid",
+          destination: "fixture",
+        }),
       },
     });
     const scope = await client.chiMentions({
@@ -224,7 +237,11 @@ test("agent fetch RPCs tolerate an agent whose workspace project record is gone"
   let client: DaemonClient | null = null;
 
   try {
-    daemon = await createTestPaseoDaemon({ paseoHomeRoot: fixture.paseoHomeRoot, cleanup: false });
+    daemon = await createTestPaseoDaemon({
+      paseoHomeRoot: fixture.paseoHomeRoot,
+      cleanup: false,
+      agentClients: { codex: createTestAgentClient("codex") },
+    });
     client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     await client.connect();
 
@@ -267,7 +284,9 @@ test("agent fetch RPCs tolerate an agent whose workspace project record is gone"
     await client?.close().catch(() => undefined);
     await daemon?.close().catch(() => undefined);
     for (const target of fixture.cleanupPaths) {
-      rmSync(target, { recursive: true, force: true });
+      // Match createTestPaseoDaemon's cleanup: Windows can retain filesystem
+      // handles briefly after daemon shutdown. Retry only transient OS errors.
+      await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   }
 });
@@ -294,7 +313,11 @@ test("history search filters before pagination and keeps newest matches first", 
         lastActivityAt: updatedAt,
       });
     }
-    daemon = await createTestPaseoDaemon({ paseoHomeRoot: fixture.paseoHomeRoot, cleanup: false });
+    daemon = await createTestPaseoDaemon({
+      paseoHomeRoot: fixture.paseoHomeRoot,
+      cleanup: false,
+      agentClients: { codex: createTestAgentClient("codex") },
+    });
     client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });
     await client.connect();
     const first = await client.fetchAgentHistory({ search: "bill", page: { limit: 1 } });
@@ -311,7 +334,8 @@ test("history search filters before pagination and keeps newest matches first", 
   } finally {
     await client?.close().catch(() => undefined);
     await daemon?.close().catch(() => undefined);
-    for (const target of fixture.cleanupPaths) rmSync(target, { recursive: true, force: true });
+    for (const target of fixture.cleanupPaths)
+      await rm(target, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 

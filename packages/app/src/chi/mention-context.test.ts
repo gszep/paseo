@@ -1,6 +1,11 @@
 import { expect, test } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
-import { createMentionScope, mentionQueryKey, type ScopedMentionResult } from "./mention-context";
+import {
+  createMentionScope,
+  mentionQueryKey,
+  reconcileMentionScope,
+  type ScopedMentionResult,
+} from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { createInboxAuthority, inboxHostsSettled } from "./inbox-authority";
@@ -66,6 +71,34 @@ const identity: ChiMentionContext = {
   repo: "github:fixture/repo",
   generation: "a".repeat(64),
 };
+test("host verification synchronously drops cached scope on account, repo, credential, deployment or availability loss", async () => {
+  for (const change of [
+    { actor: "github:other" },
+    { repo: "github:other/repo" },
+    { generation: "b".repeat(64) },
+    { deployment: "https://other.example" },
+    undefined,
+  ]) {
+    let cleared = 0;
+    let context = identity;
+    const scope = createMentionScope(
+      async () => ({ kind: "scope", actor: context.actor, context }),
+      () => {
+        cleared++;
+      },
+    );
+    await scope.acquire();
+    const before = scope.getState().generation;
+    reconcileMentionScope(scope, change ? { ...identity, ...change } : undefined, before);
+    expect(cleared).toBe(1);
+    expect(scope.getState().context).toBeNull();
+    context = { ...identity, generation: "c".repeat(64) };
+    await scope.acquire();
+    reconcileMentionScope(scope, identity, before);
+    expect(scope.getState().context).toEqual(context);
+    expect(cleared).toBe(1);
+  }
+});
 test("a transient read failure preserves scope and is not reported as access loss", async () => {
   let clears = 0;
   const scope = createMentionScope(

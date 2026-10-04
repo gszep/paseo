@@ -407,6 +407,7 @@ export interface CreateAgentRequestOptions extends AgentConfigOverrides {
   attachments?: CreateAgentRequestMessage["attachments"];
   git?: GitSetupOptions;
   worktree?: CreateAgentRequestMessage["worktree"];
+  isolation?: CreateAgentRequestMessage["isolation"];
   autoArchive?: CreateAgentRequestMessage["autoArchive"];
   // COMPAT(createAgentWorktree): low-level old callers may still send the
   // create-agent worktree field. Added in v0.2.0; remove after 2027-01-17.
@@ -2899,6 +2900,7 @@ export class DaemonClient {
         : {}),
       ...(options.git ? { git: options.git } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
+      ...(options.isolation ? { isolation: options.isolation } : {}),
       ...(options.autoArchive !== undefined ? { autoArchive: options.autoArchive } : {}),
       ...(options.worktreeName ? { worktreeName: options.worktreeName } : {}),
       ...(options.labels && Object.keys(options.labels).length > 0
@@ -7093,6 +7095,7 @@ function resolveAgentConfig(options: CreateAgentRequestOptions): AgentSessionCon
     outputSchema: _outputSchema,
     attachments: _attachments,
     worktree: _worktree,
+    isolation: _isolation,
     autoArchive: _autoArchive,
     env: _env,
     workspaceId: _workspaceId,

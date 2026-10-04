@@ -132,3 +132,15 @@ export function createMentionScope(
   };
 }
 export type MentionScope = ReturnType<typeof createMentionScope>;
+
+/** Host verification runs outside scope.run; reconcile its result before any
+ * cached inbox can be rendered under a changed account/credential/deployment. */
+export function reconcileMentionScope(
+  scope: MentionScope,
+  context?: ChiMentionContext,
+  generation = scope.getState().generation,
+) {
+  if (scope.getState().generation !== generation) return;
+  const current = scope.getState().context;
+  if (current && (!context || !sameMentionContext(current, context))) scope.lose();
+}

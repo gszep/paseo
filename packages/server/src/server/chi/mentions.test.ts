@@ -179,24 +179,28 @@ test("inbox retries a read fence conflict but does not automatically retry a mut
 test("inbox carries incomplete coverage through backend and wire parsing; legacy pages remain valid", async () => {
   const f = await fixture();
   for (const unavailableRepos of [undefined, [], ["github:fixture/broken"]]) {
-    f.authority.request = async () =>
-      Response.json({
-        ok: true,
+    for (const unreadCountIsLowerBound of [undefined, true]) {
+      f.authority.request = async () =>
+        Response.json({
+          ok: true,
+          handoffs: [],
+          nextCursor: "next",
+          unreadCount: 3,
+          ...(unreadCountIsLowerBound ? { unreadCountIsLowerBound } : {}),
+          ...(unavailableRepos ? { unavailableRepos } : {}),
+        });
+      const result = await f.restart().execute(f.input.identity, { action: "inbox", inbox: true });
+      const parsed = ChiMentionResultSchema.parse(result);
+      expect(parsed).toEqual({
+        kind: "inbox",
+        actor: f.input.identity.actor,
         handoffs: [],
         nextCursor: "next",
         unreadCount: 3,
+        ...(unreadCountIsLowerBound ? { unreadCountIsLowerBound } : {}),
         ...(unavailableRepos ? { unavailableRepos } : {}),
       });
-    const result = await f.restart().execute(f.input.identity, { action: "inbox", inbox: true });
-    const parsed = ChiMentionResultSchema.parse(result);
-    expect(parsed).toEqual({
-      kind: "inbox",
-      actor: f.input.identity.actor,
-      handoffs: [],
-      nextCursor: "next",
-      unreadCount: 3,
-      ...(unavailableRepos ? { unavailableRepos } : {}),
-    });
+    }
   }
 });
 

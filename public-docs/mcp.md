@@ -76,10 +76,11 @@ that can access the host through a shell.
 
 Workspaces decide where work happens; agent parentage decides who owns the work.
 
-- An agent that calls `create_agent` without a `workspaceId` gets a subagent in its own workspace.
-- Passing a `workspaceId` places that subagent in another workspace without detaching it from its parent.
+- An agent that calls `create_agent` gets a subagent in its own new worktree workspace when the caller's checkout is in a git repository, and in the caller's workspace otherwise.
+- Passing a `workspaceId` picks which checkout that worktree branches from, without detaching the subagent from its parent.
+- `isolation: { worktree: false, reason }` shares the checkout instead; the reason is recorded on the agent.
 - A top-level MCP caller without a workspace gets a new local workspace.
-- Create a workspace first when you need worktree isolation, a specific branch, or a pull request checkout.
+- Top-level callers create a workspace first when they need worktree isolation, a specific branch, or a pull request checkout.
 
 MCP does not expose an agent-detach tool. Detaching is a manual user action in the app or CLI.
 
@@ -89,7 +90,7 @@ MCP does not expose an agent-detach tool. Detaching is a manual user action in t
 
 | Tool                 | Function                                                                                |
 | -------------------- | --------------------------------------------------------------------------------------- |
-| `create_agent`       | Create an agent, optionally placing it in an existing workspace with `workspaceId`.     |
+| `create_agent`       | Create an agent; agent callers get a worktree per subagent unless they opt out.         |
 | `send_agent_prompt`  | Send a prompt to an existing agent using its `agentId` and a `prompt`.                  |
 | `get_agent_status`   | Return the latest snapshot for an agent.                                                |
 | `list_agents`        | List recent agents as compact metadata.                                                 |

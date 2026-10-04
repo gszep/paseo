@@ -18,7 +18,11 @@ import { AgentStorage } from "./agent-storage.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
-import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  getOpenAgentTabLabel,
+  ISOLATION_WORKTREE_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
@@ -53,6 +57,10 @@ import type { PaseoToolCatalog } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
 
 const DESKTOP_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("desktop-client");
+const admittedChiConfig = (endpoint = "https://chi-backend-vadmp23swa-an.a.run.app") => ({
+  destinations: { fixture: { name: "Fixture", endpoint } },
+  mappings: [{ repo: "github:fixture/repo", destination: "fixture", audience: "shared" as const }],
+});
 
 test("Chi label updates merge in the real lifecycle lane despite stale public snapshots", async () => {
   const manager = new AgentManager({
@@ -187,10 +195,11 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
     try {
       for (const manager of [makeManager(), makeManager()]) {
         const listing = await manager.listImportableSessions();
-        if (status === "forking" || status === "failed-forking") {
+        if (process.platform === "win32" || status === "forking" || status === "failed-forking") {
           expect(listing.sessions).toEqual([]);
           expect(listing.providerErrors).toHaveLength(1);
-          // The provider knows the fork exists; the durable receipt does not.
+          // Windows cannot establish POSIX receipt privacy. Otherwise the
+          // provider knows the fork exists but the durable receipt does not.
           // Neither discovery nor guessed direct IDs may evade the owner gate.
           for (const row of rows) {
             await expect(
@@ -219,7 +228,8 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
         }
         expect(client.importSession).not.toHaveBeenCalled();
       }
-      if (status === "forking" || status === "failed-forking") return;
+      if (process.platform === "win32" || status === "forking" || status === "failed-forking")
+        return;
       if (status === "ready") {
         execFileSync("git", ["init", "--quiet", home]);
         execFileSync("git", [
@@ -313,6 +323,7 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
           chi: {
             home,
             serverId: "host",
+            getChiConfig: () => admittedChiConfig(identity.endpoint),
             authority: {
               endpoint: identity.endpoint,
               invalidate: vi.fn(),
@@ -413,7 +424,7 @@ test("Chi admission checks queued prompts at the execution boundary and releases
   const manager = new AgentManager({
     clients: { codex: new TestAgentClient() },
     logger,
-    chi: { home: "/private/tmp/opencode", serverId: "fixture" },
+    chi: { home: "/private/tmp/opencode", serverId: "fixture", getChiConfig: admittedChiConfig },
   });
   const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
     workspaceId: undefined,
@@ -490,7 +501,7 @@ test("Chi admission blocks a persisted predecessor unarchive after manager resta
     clients: { codex: new TestAgentClient() },
     logger,
     registry: storage,
-    chi: { home: directory, serverId: "fixture" },
+    chi: { home: directory, serverId: "fixture", getChiConfig: admittedChiConfig },
   };
   const manager = new AgentManager(options);
   try {
@@ -8808,6 +8819,51 @@ test("archiveAgent detaches a cross-workspace child even when its tab is closed"
   expect(storedChild?.archivedAt).toBeUndefined();
   expect(storedChild?.workspaceId).toBe("workspace-b");
   expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+});
+
+test("archiveAgent archives a child in its own isolation worktree unless a tab keeps it open", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-cascade-isolated-child-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Parent" },
+    undefined,
+    { workspaceId: "workspace-a" },
+  );
+  const isolatedChild = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Isolated child" },
+    undefined,
+    {
+      workspaceId: "workspace-isolated",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent.id, [ISOLATION_WORKTREE_LABEL]: "created" },
+    },
+  );
+  const openIsolatedChild = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Open isolated child" },
+    undefined,
+    {
+      workspaceId: "workspace-isolated-open",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: parent.id,
+        [ISOLATION_WORKTREE_LABEL]: "created",
+        [DESKTOP_OPEN_AGENT_TAB_LABEL]: "true",
+      },
+    },
+  );
+
+  await manager.archiveAgent(parent.id);
+
+  const storedIsolated = await storage.get(isolatedChild.id);
+  expect(storedIsolated?.archivedAt).toBeTruthy();
+  expect(storedIsolated?.workspaceId).toBe("workspace-isolated");
+  expect(storedIsolated?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+  const storedOpen = await storage.get(openIsolatedChild.id);
+  expect(storedOpen?.archivedAt).toBeUndefined();
+  expect(storedOpen?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
 });
 
 test("archiveAgent re-reads a child before deciding whether to cascade", async () => {

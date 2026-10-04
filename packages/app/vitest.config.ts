@@ -29,6 +29,14 @@ export default defineConfig({
       },
       {
         extends: true,
+        resolve: {
+          alias: [
+            {
+              find: /^expo-router$/,
+              replacement: path.resolve(__dirname, "test-stubs/expo-router.ts"),
+            },
+          ],
+        },
         test: {
           name: "browser",
           fileParallelism: false,
@@ -71,8 +79,16 @@ export default defineConfig({
   // so it scans the native files and dies on imports react-native-web has no answer for.
   // Unbundled, the same imports go through the resolver below and land on the web files.
   optimizeDeps: {
+    esbuildOptions: {
+      resolveExtensions: [".web.tsx", ".web.ts", ".web.js", ".tsx", ".ts", ".jsx", ".js", ".json"],
+    },
     // Bundle the CJS dependencies of the excluded gesture-handler package for the browser.
     include: [
+      "react",
+      "react-dom/client",
+      "@tanstack/react-query",
+      "zustand",
+      "zod",
       "react/jsx-runtime",
       "react-native-gesture-handler > hoist-non-react-statics",
       "react-native-gesture-handler > invariant",

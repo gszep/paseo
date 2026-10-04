@@ -11,7 +11,7 @@ import { planTimelinePromptJump } from "@/timeline/timeline-sync-plan";
 import { useEntryTarget, type EntryTarget } from "./entry-target";
 const associationSchema = z.object({ sourceId: z.string().nullable(), repo: z.string() });
 
-export function matchesSource(label: string | undefined, sourceId: string, repo: string) {
+function matchesSource(label: string | undefined, sourceId: string, repo: string) {
   if (!label) return false;
   try {
     const value = associationSchema.parse(JSON.parse(label));

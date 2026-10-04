@@ -7,7 +7,7 @@ import type { Theme } from "@/styles/theme";
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
-export interface FilterTriggerProps {
+interface FilterTriggerProps {
   label: string;
   onPress: () => void;
   /** Leading glyph or status dot; the chevron is added for every caller. */

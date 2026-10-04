@@ -205,7 +205,11 @@ npx vitest run src/server/agent/confinement/execution.test.ts --bail=1
 npx vitest run src/server/agent/confinement/admission.test.ts --bail=1
 ```
 
-The existing Ubuntu server-test CI job installs bubblewrap. Kernel tests skip
+The existing Ubuntu server-test CI job installs bubblewrap and activates the
+distro-supplied `bwrap-userns-restrict` AppArmor profile. Without that profile,
+Ubuntu's namespace restrictions can refuse loopback setup before the target runs
+(`RTM_NEWADDR: Operation not permitted`). CI probes namespace setup as the runner
+user; it does not disable AppArmor or its global namespace restrictions. Kernel tests skip
 Windows, which has no backend; opting in on an unsupported platform never falls
 back to unconfined execution.
 

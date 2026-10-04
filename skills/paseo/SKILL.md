@@ -51,11 +51,13 @@ paseo script stop <name> [--cwd <path> | --workspace <workspace-id>]
 
 ## Agents
 
-**`create_agent`** — required: `title`, `provider` (`claude/opus`, `codex/gpt-5.4`, …), `initialPrompt`. Optional: `workspaceId`, `notifyOnFinish`, `settings`, `labels`. Returns `{ agentId, workspaceId, … }`.
+**`create_agent`** — required: `title`, `provider` (`claude/opus`, `codex/gpt-5.4`, …), `initialPrompt`. Optional: `workspaceId`, `isolation`, `notifyOnFinish`, `settings`, `labels`. Returns `{ agentId, workspaceId, isolation, … }`.
 
 Initial runtime settings live under `settings`: `modeId`, `thinkingOptionId`, and provider-specific `features`. Agent profiles are the preferred source for these values. For Codex fast mode, pass `settings: { features: { "fast_mode": true } }` when creating the agent.
 
-Agent-scoped creation always creates your subagent. Omit `workspaceId` to use your current workspace; pass a workspace returned by `create_workspace` for isolated delegation. Placement never changes parentage.
+Agent-scoped creation always creates your subagent. Inside a git repository each subagent gets its own new worktree workspace, branched from your checkout's current branch, so parallel subagents never share a working tree. Uncommitted changes are not copied: commit what the subagent needs first. `workspaceId` only picks which checkout to branch from. To share the checkout instead (for example a read-only review of your uncommitted diff), pass `isolation: { worktree: false, reason: "<one line>" }`; the reason is recorded. Outside git the subagent runs in the same directory and the response says so. Placement never changes parentage.
+
+Archiving a subagent keeps its worktree. Merge or push its branch, then archive its workspace with `archive_workspace` to remove the worktree.
 
 Detach is an explicit user action in the subagents track, not an agent tool. A cross-workspace child remains your subagent even though it also appears as a normal tab in its workspace.
 
@@ -119,6 +121,7 @@ paseo workspace create --isolation worktree --mode branch-off --new-branch fix-x
 paseo workspace create --isolation worktree --mode checkout-branch --branch existing-work
 paseo workspace create --isolation worktree --mode checkout-pr --pr-number 42
 paseo run --provider codex/gpt-5.4 --mode full-access --workspace <workspace-id> "<prompt>"
+paseo run --provider codex/gpt-5.4 --mode full-access --share-checkout "<reason>" "<prompt>"
 paseo run --provider codex/gpt-5.4 --mode full-access --new-workspace worktree --worktree-mode branch-off --new-branch fix-x --base origin/main "<prompt>"
 paseo send <agent-id> "<follow-up>"
 paseo ls
