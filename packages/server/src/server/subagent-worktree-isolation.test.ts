@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -32,6 +32,11 @@ let tempRoot: string;
 const logLines: string[] = [];
 const mcpClients: Client[] = [];
 
+// Windows temp paths can be 8.3 short names while git prints long, forward-slash paths.
+function canonical(target: string): string {
+  return path.normalize(realpathSync.native(target));
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, stdio: "pipe" }).toString().trim();
 }
@@ -51,20 +56,20 @@ function createRepo(name: string): string {
   writeFileSync(path.join(repoDir, "feature.txt"), "feature\n");
   git(repoDir, ["add", "feature.txt"]);
   git(repoDir, ["commit", "-m", "feature work"]);
-  return realpathSync(repoDir);
+  return canonical(repoDir);
 }
 
 function createPlainDirectory(name: string): string {
   const dir = path.join(tempRoot, name);
-  execFileSync("mkdir", ["-p", dir]);
-  return realpathSync(dir);
+  mkdirSync(dir, { recursive: true });
+  return canonical(dir);
 }
 
 function worktreePaths(repoDir: string): string[] {
   return git(repoDir, ["worktree", "list", "--porcelain"])
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
-    .map((line) => realpathSync(line.slice("worktree ".length)));
+    .map((line) => canonical(line.slice("worktree ".length)));
 }
 
 async function activeWorkspaceIds(): Promise<string[]> {
@@ -135,7 +140,7 @@ function isolationLogEntries(): Array<Record<string, unknown>> {
 }
 
 beforeAll(async () => {
-  tempRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "subagent-isolation-")));
+  tempRoot = canonical(mkdtempSync(path.join(tmpdir(), "subagent-isolation-")));
   const logStream = new Writable({
     write(chunk, _encoding, callback) {
       for (const line of chunk.toString().split("\n")) {
@@ -154,7 +159,12 @@ afterAll(async () => {
   for (const mcp of mcpClients) await mcp.close().catch(() => undefined);
   await client?.close().catch(() => undefined);
   await daemon?.close();
-  rmSync(tempRoot, { recursive: true, force: true });
+  try {
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    // Windows can keep a just-exited git or setup process's handle on a worktree briefly.
+    if (process.platform !== "win32") throw error;
+  }
 });
 
 describe("agent-scoped create_agent worktree isolation", () => {
@@ -163,7 +173,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     const before = worktreePaths(repoDir);
 
     const human = await createHumanAgent(repoDir, "Human agent");
-    expect(realpathSync(human.cwd)).toBe(repoDir);
+    expect(canonical(human.cwd)).toBe(repoDir);
     expect(Object.keys(human.labels).filter((key) => key.startsWith("paseo.isolation."))).toEqual(
       [],
     );
@@ -181,7 +191,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     const topLevelRecord = await daemon.daemon.agentStorage.get(
       String(result.structuredContent?.agentId),
     );
-    expect(realpathSync(topLevelRecord?.cwd ?? "")).toBe(repoDir);
+    expect(canonical(topLevelRecord?.cwd ?? "")).toBe(repoDir);
     expect(topLevelRecord?.labels[ISOLATION_WORKTREE_LABEL]).toBeUndefined();
     expect(result.structuredContent?.isolation).toBeUndefined();
 
@@ -204,8 +214,8 @@ describe("agent-scoped create_agent worktree isolation", () => {
       createSubagent(mcp, { title: "Second" }),
     ]);
 
-    const firstCwd = realpathSync(first.record.cwd);
-    const secondCwd = realpathSync(second.record.cwd);
+    const firstCwd = canonical(first.record.cwd);
+    const secondCwd = canonical(second.record.cwd);
     expect(firstCwd).not.toBe(repoDir);
     expect(secondCwd).not.toBe(repoDir);
     expect(firstCwd).not.toBe(secondCwd);
@@ -246,14 +256,14 @@ describe("agent-scoped create_agent worktree isolation", () => {
     const mcp = await mcpClientFor(parent.id);
 
     const explicit = await createSubagent(mcp, { workspaceId: parent.workspaceId });
-    expect(realpathSync(explicit.record.cwd)).not.toBe(repoDir);
+    expect(canonical(explicit.record.cwd)).not.toBe(repoDir);
     expect(explicit.record.workspaceId).not.toBe(parent.workspaceId);
 
     const legacyCurrent = await createSubagent(mcp, {
       relationship: { kind: "subagent" },
       workspace: { kind: "current" },
     });
-    expect(realpathSync(legacyCurrent.record.cwd)).not.toBe(repoDir);
+    expect(canonical(legacyCurrent.record.cwd)).not.toBe(repoDir);
     expect(legacyCurrent.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
 
     const workspacesBefore = await activeWorkspaceIds();
@@ -261,7 +271,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
       relationship: { kind: "detached" },
       workspace: { kind: "create", source: { kind: "directory", path: repoDir } },
     });
-    expect(realpathSync(legacyDirectory.record.cwd)).not.toBe(repoDir);
+    expect(canonical(legacyDirectory.record.cwd)).not.toBe(repoDir);
     // Only the worktree workspace is created; no directory workspace is minted first.
     const workspacesAfter = await activeWorkspaceIds();
     expect(workspacesAfter.filter((id) => !workspacesBefore.includes(id))).toEqual([
@@ -284,7 +294,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
     expect(child.record.labels[ISOLATION_REASON_LABEL]).toBeUndefined();
     expect(child.record.labels.purpose).toBe("review");
-    expect(realpathSync(child.record.cwd)).not.toBe(repoDir);
+    expect(canonical(child.record.cwd)).not.toBe(repoDir);
   });
 
   test("opting out requires a single-line reason and records it", async () => {
@@ -328,7 +338,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
 
     const reason = "read-only review of the orchestrator's uncommitted diff";
     const child = await createSubagent(mcp, { isolation: { worktree: false, reason } });
-    expect(realpathSync(child.record.cwd)).toBe(repoDir);
+    expect(canonical(child.record.cwd)).toBe(repoDir);
     expect(child.record.workspaceId).toBe(parent.workspaceId);
     expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("opted-out");
     expect(child.record.labels[ISOLATION_REASON_LABEL]).toBe(reason);
@@ -352,7 +362,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     const mcp = await mcpClientFor(parent.id);
 
     const child = await createSubagent(mcp);
-    expect(realpathSync(child.record.cwd)).toBe(dir);
+    expect(canonical(child.record.cwd)).toBe(dir);
     expect(child.record.workspaceId).toBe(parent.workspaceId);
     expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("not-git");
     expect(child.content.isolation).toEqual({
@@ -393,7 +403,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     const cascadedRecord = await daemon.daemon.agentStorage.get(cascaded.record.id);
     expect(cascadedRecord?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
     expect(existsSync(cascaded.record.cwd)).toBe(true);
-    expect(worktreePaths(repoDir)).toContain(realpathSync(cascaded.record.cwd));
+    expect(worktreePaths(repoDir)).toContain(canonical(cascaded.record.cwd));
   });
 });
 
@@ -423,19 +433,19 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
       createCliSubagent(parent.id, repoDir),
     ]);
     for (const child of [first, second]) {
-      expect(realpathSync(child.cwd)).not.toBe(repoDir);
+      expect(canonical(child.cwd)).not.toBe(repoDir);
       expect(child.workspaceId).not.toBe(parent.workspaceId);
       expect(child.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
       expect(child.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
       expect(git(child.cwd, ["rev-parse", "HEAD"])).toBe(git(repoDir, ["rev-parse", "HEAD"]));
     }
-    expect(realpathSync(first.cwd)).not.toBe(realpathSync(second.cwd));
+    expect(canonical(first.cwd)).not.toBe(canonical(second.cwd));
 
     // Selecting the caller's workspace only names the source checkout.
     const selected = await createCliSubagent(parent.id, repoDir, {
       workspaceId: parent.workspaceId,
     });
-    expect(realpathSync(selected.cwd)).not.toBe(repoDir);
+    expect(canonical(selected.cwd)).not.toBe(repoDir);
 
     const worktreesBefore = worktreePaths(repoDir);
     await expect(
@@ -453,7 +463,7 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
     const shared = await createCliSubagent(parent.id, repoDir, {
       isolation: { worktree: false, reason },
     });
-    expect(realpathSync(shared.cwd)).toBe(repoDir);
+    expect(canonical(shared.cwd)).toBe(repoDir);
     expect(shared.workspaceId).toBe(parent.workspaceId);
     expect(shared.labels[ISOLATION_WORKTREE_LABEL]).toBe("opted-out");
     expect(shared.labels[ISOLATION_REASON_LABEL]).toBe(reason);
@@ -491,7 +501,7 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
     const agent = created.agent;
     if (!agent || !created.workspace) throw new Error(created.error ?? "workspace create failed");
     expect(agent.workspaceId).toBe(created.workspace.id);
-    expect(realpathSync(agent.cwd)).toBe(realpathSync(created.workspace.workspaceDirectory ?? ""));
+    expect(canonical(agent.cwd)).toBe(canonical(created.workspace.workspaceDirectory ?? ""));
     expect(agent.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
     expect(worktreePaths(repoDir)).toHaveLength(worktreesBefore.length + 1);
   });
@@ -503,7 +513,7 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
       autoArchive: true,
       initialPrompt: "Say done.",
     });
-    expect(realpathSync(child.cwd)).not.toBe(repoDir);
+    expect(canonical(child.cwd)).not.toBe(repoDir);
 
     await expect
       .poll(async () => (await daemon.daemon.agentStorage.get(child.id))?.archivedAt, {
@@ -529,7 +539,7 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
     const dir = createPlainDirectory("cli-plain");
     const parent = await createHumanAgent(dir, "Plain CLI orchestrator");
     const child = await createCliSubagent(parent.id, dir);
-    expect(realpathSync(child.cwd)).toBe(dir);
+    expect(canonical(child.cwd)).toBe(dir);
     expect(child.labels[ISOLATION_WORKTREE_LABEL]).toBe("not-git");
 
     await expect(
