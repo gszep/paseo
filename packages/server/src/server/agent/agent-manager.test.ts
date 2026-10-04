@@ -492,6 +492,44 @@ test("foreground admission carries and acknowledges the Chi reminder through the
   }
 });
 
+test("a stalled Chi boundary logs through the daemon logger and stops when its agent closes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "human-boundary-close-"));
+  const logger = createTestLogger();
+  const warn = vi.spyOn(logger, "warn");
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    logger,
+    chi: { home: directory, serverId: "fixture" },
+  });
+  const agent = await manager.createAgent({ provider: "codex", cwd: process.cwd() }, undefined, {
+    workspaceId: undefined,
+  });
+  try {
+    const chi = manager.chi!;
+    vi.spyOn(chi.humanPrompts, "hasItems").mockResolvedValue(true);
+    vi.spyOn(
+      chi as unknown as { humanPromptAuthority: () => Promise<never> },
+      "humanPromptAuthority",
+    ).mockReturnValue(new Promise<never>(() => undefined));
+    await manager.runAgent(agent.id, "foreground");
+    expect(warn).toHaveBeenCalledWith(
+      { agentId: agent.id, reason: "foreground-budget" },
+      "Chi human prompt boundary wait timed out",
+    );
+    const worker = (
+      chi as unknown as { humanPromptBoundaries: Map<string, { done: Promise<boolean> }> }
+    ).humanPromptBoundaries.get(agent.id)!;
+    await manager.closeAgent(agent.id);
+    expect(await worker.done).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      { agentId: agent.id, reason: "agent-closed" },
+      "Chi human prompt boundary aborted",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 15000);
+
 test("Chi admission blocks a persisted predecessor unarchive after manager restart", async () => {
   const directory = mkdtempSync(join(tmpdir(), "chi-unarchive-"));
   const logger = createTestLogger();

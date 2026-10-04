@@ -770,7 +770,9 @@ export class AgentManager {
   private readonly admissionTickets = new Set<symbol>();
 
   constructor(options: AgentManagerOptions) {
-    this.chi = options.chi ? new ChiConnection(this, options.chi) : null;
+    this.chi = options.chi
+      ? new ChiConnection(this, { ...options.chi, logger: options.logger })
+      : null;
     this.pluginLifecycle = options.pluginLifecycle;
     this.idFactory = options.idFactory ?? (() => randomUUID());
     this.registry = options?.registry;
@@ -3960,6 +3962,8 @@ export class AgentManager {
   ): ManagedAgentClosed {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
     this.agents.delete(agent.id);
+    // Close, archive and reload end detached human-prompt reads for this agent.
+    this.chi?.agentClosed(agent.id);
     this.previousStatuses.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
