@@ -51,7 +51,11 @@ import type { GeneratedWorkspaceName } from "../worktree-branch-name-generator.j
 import type { ForgeService } from "../../services/forge-service.js";
 import { areEquivalentPaths } from "../../utils/path.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  ISOLATION_REASON_LABEL,
+  ISOLATION_WORKTREE_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { MutableDaemonConfigSchema, type AgentProfile } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
 import type { BrowserToolsBroker, BrowserToolsExecuteInput } from "../browser-tools/broker.js";
@@ -1218,6 +1222,12 @@ describe("create_agent MCP tool", () => {
     workspace: { kind: "existing" as const, workspaceId, ...(cwd ? { cwd } : {}) },
   });
   const ensureWorkspaceForCreate = async () => "workspace-created";
+  const sharedCheckoutReason = "fixture parent checkout is shared on purpose";
+  const sharedCheckout = { isolation: { worktree: false, reason: sharedCheckoutReason } };
+  const sharedCheckoutLabels = {
+    [ISOLATION_WORKTREE_LABEL]: "opted-out",
+    [ISOLATION_REASON_LABEL]: sharedCheckoutReason,
+  };
 
   it("requires a concise title no longer than 60 characters", async () => {
     const { agentManager, agentStorage } = createTestDeps();
@@ -3108,6 +3118,7 @@ describe("create_agent MCP tool", () => {
         labels: {
           [PARENT_AGENT_ID_LABEL]: "voice-agent",
           source: "voice",
+          [ISOLATION_WORKTREE_LABEL]: "not-git",
         },
         workspaceId: "wks_voice",
       },
@@ -3196,6 +3207,7 @@ describe("create_agent MCP tool", () => {
     const tool = registeredTool(server, "create_agent");
     const response = await tool.handler({
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Child",
       provider: "codex/gpt-5.4",
       initialPrompt: "Do work",
@@ -3235,6 +3247,7 @@ describe("create_agent MCP tool", () => {
     const tool = registeredTool(server, "create_agent");
     await tool.handler({
       ...detachedCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Detached",
       provider: "codex/gpt-5.4",
       initialPrompt: "Take over",
@@ -3252,6 +3265,7 @@ describe("create_agent MCP tool", () => {
       {
         labels: {
           source: "handoff",
+          ...sharedCheckoutLabels,
         },
         workspaceId: "wks_parent",
       },
@@ -3291,6 +3305,7 @@ describe("create_agent MCP tool", () => {
     const tool = registeredTool(server, "create_agent");
     const input = {
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Child",
       provider: "codex/gpt-5.4",
       initialPrompt: "Do work",
@@ -3312,6 +3327,7 @@ describe("create_agent MCP tool", () => {
       {
         labels: {
           [PARENT_AGENT_ID_LABEL]: "parent-agent",
+          ...sharedCheckoutLabels,
         },
         workspaceId: "wks_parent",
       },
@@ -3352,6 +3368,7 @@ describe("create_agent MCP tool", () => {
 
     await registeredTool(server, "create_agent").handler({
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Codex child",
       provider: "codex/gpt-5.4",
       initialPrompt: "Do work",
@@ -3364,6 +3381,7 @@ describe("create_agent MCP tool", () => {
 
     await registeredTool(server, "create_agent").handler({
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Claude child",
       provider: "claude/sonnet",
       initialPrompt: "Do work",
@@ -3376,7 +3394,7 @@ describe("create_agent MCP tool", () => {
     );
   });
 
-  it("inherits the parent's workspaceId when an MCP child is created in the parent's working tree", async () => {
+  it("inherits the parent's workspaceId when an MCP child shares the parent's working tree", async () => {
     const workdir = await mkdtemp(join(tmpdir(), "mcp-workspace-inherit-"));
     const storage = new AgentStorage(join(workdir, "agents"), logger);
     const agentManager = new AgentManager({
@@ -3402,6 +3420,7 @@ describe("create_agent MCP tool", () => {
       const tool = registeredTool(server, "create_agent");
       const result = await tool.handler({
         ...subagentCurrentWorkspace(),
+        ...sharedCheckout,
         title: "Child",
         provider: "codex/gpt-5.4",
         initialPrompt: "Do work",
@@ -3411,6 +3430,7 @@ describe("create_agent MCP tool", () => {
       const storedChild = await storage.get(childId);
       expect(storedChild?.workspaceId).toBe("wks_parent");
       expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+      expect(storedChild?.labels[ISOLATION_REASON_LABEL]).toBe(sharedCheckoutReason);
     } finally {
       rmSync(workdir, { recursive: true, force: true });
     }
@@ -3606,6 +3626,7 @@ describe("create_agent MCP tool", () => {
     const tool = registeredTool(server, "create_agent");
     await tool.handler({
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Child",
       provider: "claude/claude-sonnet-4-20250514",
       initialPrompt: "Do work",
@@ -3652,6 +3673,7 @@ describe("create_agent MCP tool", () => {
     const tool = registeredTool(server, "create_agent");
     await tool.handler({
       ...subagentCurrentWorkspace(),
+      ...sharedCheckout,
       title: "Child",
       provider: "opencode/gpt-5.4",
       settings: { modeId: "build" },

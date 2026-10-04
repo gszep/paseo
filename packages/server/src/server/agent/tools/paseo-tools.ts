@@ -32,6 +32,11 @@ import {
   type ArchiveDependencies,
 } from "../../workspace-archive-service.js";
 import { createAgentCommand, type CreateAgentFromMcpInput } from "../create-agent/create.js";
+import {
+  resolveSubagentWorktreeDecision,
+  summarizeIsolation,
+  type SubagentWorktreeDecision,
+} from "../create-agent/isolation.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
@@ -676,6 +681,70 @@ function createToolCatalog(
     return parentAgent;
   };
 
+  function toIsolationSummary(decision: SubagentWorktreeDecision | undefined): {
+    isolation?: ReturnType<typeof summarizeIsolation>;
+  } {
+    return decision ? { isolation: summarizeIsolation(decision) } : {};
+  }
+
+  async function runCreateAgentCommand(input: CreateAgentFromMcpInput) {
+    let createdWorktreeWorkspaceId: string | null = null;
+    let agentCreated = false;
+    try {
+      return await createAgentCommand(
+        {
+          agentManager,
+          agentStorage,
+          logger: childLogger,
+          paseoHome: options.paseoHome,
+          worktreesRoot: options.worktreesRoot,
+          terminalManager,
+          providerSnapshotManager,
+          createPaseoWorktree: options.createPaseoWorktree,
+          ...(options.ensureWorkspaceForCreate
+            ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
+            : {}),
+        },
+        {
+          ...input,
+          onWorktreeCreated: (createdWorktree) => {
+            if (createdWorktree.created) {
+              createdWorktreeWorkspaceId = createdWorktree.workspace.workspaceId;
+            }
+          },
+          onCreated: () => {
+            agentCreated = true;
+          },
+        },
+      );
+    } catch (error) {
+      // A subagent's fresh worktree holds no work until the agent exists.
+      if (input.subagentIsolation && createdWorktreeWorkspaceId && !agentCreated) {
+        await removeFailedSubagentWorktree(createdWorktreeWorkspaceId);
+      }
+      throw error;
+    }
+  }
+
+  async function removeFailedSubagentWorktree(workspaceId: string): Promise<void> {
+    try {
+      await archiveByScope(
+        archiveWorktreeDependencies(options, {
+          agentManager,
+          agentStorage,
+          terminalManager: terminalManager ?? null,
+          logger: childLogger,
+        }),
+        { requestId: "mcp:create_agent:failed", scope: { kind: "workspace", workspaceId } },
+      );
+    } catch (error) {
+      childLogger.warn(
+        { err: error, workspaceId },
+        "Failed to remove subagent worktree after create_agent failed",
+      );
+    }
+  }
+
   const resolveInheritedProviderConfig = (
     selectedProvider: string,
   ): Pick<AgentSessionConfig, "providerOptions"> | undefined => {
@@ -1050,8 +1119,35 @@ function createToolCatalog(
         "Existing workspace id. Agent-scoped calls default to the caller workspace; top-level calls create a new local workspace when omitted.",
       ),
   };
+  const subagentIsolationInputSchema = z
+    .object({
+      worktree: z
+        .boolean()
+        .describe(
+          "false runs the subagent in the source checkout instead of its own new worktree.",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe(
+          "Required when worktree is false: one line explaining why sharing the checkout is safe. Recorded on the agent labels and in the daemon log.",
+        ),
+    })
+    .strict();
   const agentToAgentInputSchema = {
     ...canonicalCreateAgentFields,
+    workspaceId: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Existing workspace id whose checkout the subagent branches from. Defaults to your workspace. The subagent still gets its own worktree unless isolation.worktree is false.",
+      ),
+    isolation: subagentIsolationInputSchema
+      .optional()
+      .describe(
+        "Default: in a git repository the subagent gets its own new worktree workspace, branched from the source checkout's current branch (uncommitted changes are not copied). Opt out per subagent with { worktree: false, reason }.",
+      ),
     notifyOnFinish: z
       .boolean()
       .optional()
@@ -1080,6 +1176,7 @@ function createToolCatalog(
   const legacyAgentToAgentInputSchema = {
     ...commonCreateAgentFields,
     ...legacyCreateAgentPlacementFields,
+    isolation: agentToAgentInputSchema.isolation,
     notifyOnFinish: agentToAgentInputSchema.notifyOnFinish,
   };
   const legacyTopLevelCreateAgentInputSchema = {
@@ -1441,7 +1538,9 @@ function createToolCatalog(
     {
       title: "Create agent",
       description:
-        "Create an agent. Agent-scoped creation defaults to your workspace and creates your subagent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
+        scope === "agent"
+          ? "Create a subagent. Inside a git repository every subagent gets its own new worktree workspace, branched from the current branch of your checkout (or of workspaceId's checkout), so parallel subagents never share a working tree; uncommitted changes are not copied, so commit what the subagent needs first. Outside git it runs in that directory. To share the checkout instead, pass isolation { worktree: false, reason }; the reason is recorded. Archiving a subagent keeps its worktree for later cleanup. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain."
+          : "Create an agent. Top-level creation without workspaceId creates a new local workspace. Requires provider/model (for example codex/gpt-5.4) and an initial prompt. Do not guess; call list_providers and list_models first if uncertain.",
       inputSchema: createAgentInputSchema,
       outputSchema: {
         agentId: z.string(),
@@ -1454,11 +1553,21 @@ function createToolCatalog(
         lastMessage: z.string().nullable().optional(),
         permission: AgentPermissionRequestPayloadSchema.nullable().optional(),
         guidance: z.string().optional(),
+        isolation: z
+          .object({
+            worktree: z.enum(["created", "opted-out", "not-git"]),
+            reason: z.string().optional(),
+            note: z.string().optional(),
+          })
+          .optional(),
       },
     },
     async (args: unknown) => {
       const resolvedArgs = await resolveCreateAgentToolArgs(args);
       const { parsedArgs, worktree } = resolvedArgs;
+      const subagentIsolation =
+        resolvedArgs.kind === "agent-scoped" ? resolvedArgs.subagentIsolation : undefined;
+      const isolationSummary = toIsolationSummary(subagentIsolation);
       let requestedBackground: boolean;
       let notifyOnFinish: boolean;
       if (resolvedArgs.kind === "agent-scoped") {
@@ -1474,40 +1583,26 @@ function createToolCatalog(
         snapshot,
         background: createdInBackground,
         initialPromptStarted,
-      } = await createAgentCommand(
-        {
-          agentManager,
-          agentStorage,
-          logger: childLogger,
-          paseoHome: options.paseoHome,
-          worktreesRoot: options.worktreesRoot,
-          terminalManager,
-          providerSnapshotManager,
-          createPaseoWorktree: options.createPaseoWorktree,
-          ...(options.ensureWorkspaceForCreate
-            ? { ensureWorkspaceForCreate: options.ensureWorkspaceForCreate }
-            : {}),
-        },
-        {
-          kind: "mcp",
-          provider: parsedArgs.provider,
-          title: parsedArgs.title,
-          initialPrompt: parsedArgs.initialPrompt,
-          config: inheritedConfig,
-          cwd: resolvedArgs.cwd,
-          workspaceId: resolvedArgs.workspaceId,
-          thinking: parsedArgs.settings?.thinkingOptionId,
-          features: parsedArgs.settings?.features,
-          labels: parsedArgs.labels,
-          mode: parsedArgs.settings?.modeId,
-          background: requestedBackground,
-          notifyOnFinish,
-          detached: resolvedArgs.detached,
-          callerAgentId,
-          callerContext,
-          worktree,
-        },
-      );
+      } = await runCreateAgentCommand({
+        kind: "mcp",
+        provider: parsedArgs.provider,
+        title: parsedArgs.title,
+        initialPrompt: parsedArgs.initialPrompt,
+        config: inheritedConfig,
+        cwd: resolvedArgs.cwd,
+        workspaceId: resolvedArgs.workspaceId,
+        thinking: parsedArgs.settings?.thinkingOptionId,
+        features: parsedArgs.settings?.features,
+        labels: parsedArgs.labels,
+        mode: parsedArgs.settings?.modeId,
+        background: requestedBackground,
+        notifyOnFinish,
+        detached: resolvedArgs.detached,
+        callerAgentId,
+        callerContext,
+        worktree,
+        subagentIsolation,
+      });
 
       try {
         if (!createdInBackground && initialPromptStarted) {
@@ -1526,6 +1621,7 @@ function createToolCatalog(
             availableModes: liveSnapshot.availableModes,
             lastMessage: result.lastMessage,
             permission: sanitizePermissionRequest(result.permission),
+            ...isolationSummary,
           };
           const validJson = ensureValidJson(responseData);
 
@@ -1559,6 +1655,7 @@ function createToolCatalog(
           lastMessage: null,
           permission: null,
           ...(guidance ? { guidance } : {}),
+          ...isolationSummary,
         }),
       };
       return response;
@@ -1573,6 +1670,7 @@ function createToolCatalog(
         cwd: string | undefined;
         workspaceId: string | undefined;
         worktree: CreateAgentFromMcpInput["worktree"];
+        subagentIsolation: SubagentWorktreeDecision;
       }
     | {
         kind: "top-level";
@@ -1589,29 +1687,29 @@ function createToolCatalog(
         // COMPAT(nestedCreateAgentPlacement): accept the old relationship/workspace shape without
         // advertising it to models. Added in v0.2.0; remove after 2027-01-17.
         const parsed = legacyAgentToAgentCreateAgentArgsSchema.parse(args);
-        const { cwd, workspaceId, worktree } = await resolveCreateAgentWorkspace(parsed.workspace, {
-          prompt: parsed.initialPrompt,
-        });
+        const placement = await resolveSubagentPlacement(
+          await resolveLegacySubagentPlacement(parsed.workspace),
+          parsed.isolation,
+          { prompt: parsed.initialPrompt },
+        );
         return {
           kind: "agent-scoped",
           parsedArgs: parsed,
           detached: parsed.relationship.kind === "detached",
-          cwd,
-          workspaceId,
-          worktree,
+          ...placement,
         };
       }
       const parsed = agentToAgentCreateAgentArgsSchema.parse(args);
-      const { cwd, workspaceId } = await resolveCanonicalCreateAgentWorkspace(parsed.workspaceId, {
-        prompt: parsed.initialPrompt,
-      });
+      const placement = await resolveSubagentPlacement(
+        await resolveCanonicalSubagentPlacement(parsed.workspaceId),
+        parsed.isolation,
+        { prompt: parsed.initialPrompt },
+      );
       return {
         kind: "agent-scoped",
         parsedArgs: parsed,
         detached: false,
-        cwd,
-        workspaceId,
-        worktree: undefined,
+        ...placement,
       };
     }
     if (hasLegacyCreateAgentPlacement(args)) {
@@ -1668,6 +1766,106 @@ function createToolCatalog(
       "refName",
       "githubPrNumber",
     ].some((key) => input[key] !== undefined);
+  }
+
+  type SubagentPlacement =
+    | { kind: "workspace"; workspaceId: string; cwd: string | undefined }
+    | { kind: "directory"; cwd: string }
+    | {
+        kind: "worktree";
+        cwd: string | undefined;
+        worktree: NonNullable<CreateAgentFromMcpInput["worktree"]>;
+      };
+
+  async function resolveCanonicalSubagentPlacement(
+    workspaceId: string | undefined,
+  ): Promise<SubagentPlacement> {
+    if (workspaceId) {
+      const resolved = await resolveCreateAgentWorkspace(
+        { kind: "existing", workspaceId },
+        undefined,
+      );
+      return { kind: "workspace", workspaceId, cwd: resolved.cwd };
+    }
+    const caller = resolveCallerAgent();
+    if (!caller?.workspaceId) {
+      throw new Error(`Caller agent ${callerAgentId} has no current workspace`);
+    }
+    return { kind: "workspace", workspaceId: caller.workspaceId, cwd: undefined };
+  }
+
+  async function resolveLegacySubagentPlacement(
+    workspace: LegacyAgentToAgentCreateAgentArgs["workspace"],
+  ): Promise<SubagentPlacement> {
+    // A directory workspace is minted only after isolation decides the agent stays in it.
+    if (workspace.kind === "create" && workspace.source.kind === "directory") {
+      return {
+        kind: "directory",
+        cwd: resolveScopedCwd(workspace.source.path, { required: true }),
+      };
+    }
+    const resolved = await resolveCreateAgentWorkspace(workspace, undefined);
+    if (resolved.worktree) {
+      return { kind: "worktree", cwd: resolved.cwd, worktree: resolved.worktree };
+    }
+    if (!resolved.workspaceId) {
+      throw new Error("Legacy create_agent placement could not be resolved");
+    }
+    return { kind: "workspace", workspaceId: resolved.workspaceId, cwd: resolved.cwd };
+  }
+
+  // Agent-created agents get their own worktree unless the caller opts out with a
+  // reason. The selected workspace is only the source checkout, never permission
+  // to share it.
+  async function resolveSubagentPlacement(
+    placement: SubagentPlacement,
+    isolation: AgentToAgentCreateAgentArgs["isolation"],
+    firstAgentContext: FirstAgentContext,
+  ): Promise<{
+    cwd: string | undefined;
+    workspaceId: string | undefined;
+    worktree: CreateAgentFromMcpInput["worktree"];
+    subagentIsolation: SubagentWorktreeDecision;
+  }> {
+    const subagentIsolation = await resolveSubagentWorktreeDecision({
+      request: isolation,
+      sourceCwd: resolveScopedCwd(placement.cwd),
+      explicitWorktree: placement.kind === "worktree",
+    });
+    if (subagentIsolation.kind === "worktree") {
+      return {
+        cwd: placement.cwd,
+        workspaceId: undefined,
+        worktree: { action: "branch-off", baseBranch: subagentIsolation.baseRef },
+        subagentIsolation,
+      };
+    }
+    switch (placement.kind) {
+      case "worktree":
+        return {
+          cwd: placement.cwd,
+          workspaceId: undefined,
+          worktree: placement.worktree,
+          subagentIsolation,
+        };
+      case "directory":
+        if (!options.ensureWorkspaceForCreate) {
+          throw new Error("Workspace creation is not configured");
+        }
+        return {
+          cwd: placement.cwd,
+          workspaceId: await options.ensureWorkspaceForCreate(placement.cwd, firstAgentContext),
+          worktree: undefined,
+          subagentIsolation,
+        };
+      case "workspace":
+        return {
+          cwd: placement.cwd,
+          workspaceId: placement.workspaceId,
+          worktree: undefined,
+          subagentIsolation,
+        };
+    }
   }
 
   async function resolveCanonicalCreateAgentWorkspace(

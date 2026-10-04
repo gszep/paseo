@@ -3,7 +3,8 @@ import {
   getStructuredAgentResponse,
   StructuredAgentResponseError,
 } from "@getpaseo/server/agent-response";
-import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
+import type { AgentSnapshotPayload, CreateAgentWorktreeTarget } from "@getpaseo/protocol/messages";
+import { ISOLATION_WORKTREE_LABEL } from "@getpaseo/protocol/agent-labels";
 import { connectToDaemon } from "../../utils/client.js";
 import type {
   CommandOptions,
@@ -56,7 +57,11 @@ export function addRunOptions(cmd: Command): Command {
       .option("--forge <forge>", "Forge for checkout-pr mode")
       .option(
         "--workspace <id>",
-        "Run in an existing workspace (defaults to the caller workspace when agent-scoped)",
+        "Run in an existing workspace (agent-scoped: the checkout the new worktree branches from)",
+      )
+      .option(
+        "--share-checkout <reason>",
+        "Agent-scoped runs only: share the source checkout instead of a new worktree (reason is recorded)",
       )
       .option(
         "--image <path>",
@@ -128,6 +133,7 @@ export interface AgentRunOptions extends CommandOptions {
   prNumber?: string;
   forge?: string;
   workspace?: string;
+  shareCheckout?: string;
   image?: string[];
   cwd?: string;
   env?: string[];
@@ -379,6 +385,130 @@ function validateRunWorkspaceOptions(options: AgentRunOptions): void {
   }
 }
 
+/**
+ * How an agent-scoped run (PASEO_AGENT_ID set) asks the daemon for placement.
+ * The daemon gives every agent-created agent its own worktree unless the run
+ * shares the checkout with a recorded reason, so the CLI must not pre-create a
+ * workspace the daemon would only branch from again.
+ */
+export interface AgentScopedRunRequest {
+  createLocalWorkspace: boolean;
+  worktree?: CreateAgentWorktreeTarget;
+  isolation?: { worktree: false; reason: string };
+}
+
+function invalidOptions(message: string, details?: string): CommandError {
+  return { code: "INVALID_OPTIONS", message, ...(details ? { details } : {}) };
+}
+
+export function resolveAgentScopedRunRequest(
+  options: AgentRunOptions,
+  callerAgentId: string | undefined,
+): AgentScopedRunRequest | null {
+  const shareCheckout = options.shareCheckout?.trim();
+  if (options.shareCheckout !== undefined && !shareCheckout) {
+    throw invalidOptions("--share-checkout requires a reason");
+  }
+  if (!callerAgentId) {
+    if (shareCheckout) {
+      throw invalidOptions(
+        "--share-checkout only applies to agent-scoped runs",
+        "It is valid when PASEO_AGENT_ID is set; other runs never create a worktree by default",
+      );
+    }
+    return null;
+  }
+  const isolation = shareCheckout ? { worktree: false as const, reason: shareCheckout } : undefined;
+  const newWorkspace = resolveNewWorkspaceKind(options);
+  if (newWorkspace === "local") {
+    if (!isolation) {
+      throw invalidOptions(
+        "Agent-scoped runs get their own worktree; --new-workspace local would share the checkout",
+        "Pass --share-checkout <reason> to share it, or drop --new-workspace",
+      );
+    }
+    return { createLocalWorkspace: true, isolation };
+  }
+  if (newWorkspace !== "worktree") {
+    return { createLocalWorkspace: false, ...(isolation ? { isolation } : {}) };
+  }
+  if (isolation) {
+    throw invalidOptions("--share-checkout cannot be combined with --new-workspace worktree");
+  }
+  const worktree = toAgentScopedWorktreeTarget(options);
+  return { createLocalWorkspace: false, ...(worktree ? { worktree } : {}) };
+}
+
+function toAgentScopedWorktreeTarget(
+  options: AgentRunOptions,
+): CreateAgentWorktreeTarget | undefined {
+  const slug = options.worktreeSlug ?? options.worktree;
+  if (options.forge !== undefined) {
+    throw invalidOptions("--forge is not supported for agent-scoped runs");
+  }
+  switch (options.worktreeMode ?? "branch-off") {
+    case "branch-off": {
+      if (slug && options.newBranch && slug !== options.newBranch) {
+        throw invalidOptions(
+          "--worktree-slug cannot differ from --new-branch for agent-scoped runs",
+        );
+      }
+      const newBranch = options.newBranch ?? slug;
+      if (!newBranch) {
+        if (options.base !== undefined) {
+          throw invalidOptions("--base requires --new-branch for agent-scoped runs");
+        }
+        // Daemon default: a new worktree off the caller's current branch.
+        return undefined;
+      }
+      return { mode: "branch-off", newBranch, ...(options.base ? { base: options.base } : {}) };
+    }
+    case "checkout-branch":
+      if (slug) throw invalidOptions("--worktree-slug is not supported for checkout modes here");
+      if (!options.branch) throw invalidOptions("--branch is required for checkout-branch");
+      return { mode: "checkout-branch", branch: options.branch };
+    case "checkout-pr": {
+      if (slug) throw invalidOptions("--worktree-slug is not supported for checkout modes here");
+      const prNumber = Number(options.prNumber);
+      if (!Number.isInteger(prNumber) || prNumber <= 0) {
+        throw invalidOptions("--pr-number must be a positive integer");
+      }
+      return { mode: "checkout-pr", prNumber };
+    }
+    default:
+      throw invalidOptions(`Unsupported worktree mode: ${String(options.worktreeMode)}`);
+  }
+}
+
+function toCreateAgentPlacement(agentScoped: AgentScopedRunRequest | null): {
+  worktree?: CreateAgentWorktreeTarget;
+  isolation?: { worktree: false; reason: string };
+} {
+  if (!agentScoped) return {};
+  return {
+    ...(agentScoped.worktree ? { worktree: agentScoped.worktree } : {}),
+    ...(agentScoped.isolation ? { isolation: agentScoped.isolation } : {}),
+  };
+}
+
+function reportSubagentIsolation(agent: AgentSnapshotPayload): void {
+  const message = describeSubagentIsolation(agent);
+  if (message) console.error(message);
+}
+
+function describeSubagentIsolation(agent: AgentSnapshotPayload): string | null {
+  switch (agent.labels[ISOLATION_WORKTREE_LABEL]) {
+    case "created":
+      return `Subagent runs in its own worktree: ${agent.cwd}`;
+    case "opted-out":
+      return `Subagent shares the checkout ${agent.cwd}`;
+    case "not-git":
+      return `Note: ${agent.cwd} is not inside a git repository, so the subagent shares that directory`;
+    default:
+      return null;
+  }
+}
+
 function validateRunOptions(prompt: string, options: AgentRunOptions, outputSchema: unknown): void {
   if (!prompt || prompt.trim().length === 0) {
     throw {
@@ -525,8 +655,10 @@ export async function resolveExistingRunWorkspace(
 }
 
 // Workspace policy for `paseo run`. Precedence:
-//   1. --workspace <id>            -> run in that existing workspace
-//   2. $PASEO_AGENT_ID             -> daemon resolves the caller's workspace
+//   1. --workspace <id>            -> run in that existing workspace (agent-scoped: its
+//                                     checkout is the source of the new worktree)
+//   2. $PASEO_AGENT_ID             -> daemon places the subagent: a new worktree by
+//                                     default, the caller workspace with --share-checkout
 //   3. $PASEO_WORKSPACE_ID         -> exported by workspace terminals
 //   4. --new-workspace <kind>      -> mint a new workspace explicitly
 //   5. bare run                    -> mint a new local-backed workspace for cwd
@@ -534,6 +666,7 @@ async function resolveRunWorkspace(
   client: ConnectedDaemonClient,
   options: AgentRunOptions,
   cwd: string,
+  agentScoped: AgentScopedRunRequest | null,
 ): Promise<RunWorkspace> {
   const newWorkspace = resolveNewWorkspaceKind(options);
   const explicit = newWorkspace ? undefined : options.workspace?.trim();
@@ -542,7 +675,7 @@ async function resolveRunWorkspace(
     return resolveExistingRunWorkspace(client, explicit);
   }
 
-  if (!newWorkspace && resolveRunCallerAgentId()) {
+  if (agentScoped && !agentScoped.createLocalWorkspace) {
     return { cwd };
   }
 
@@ -582,6 +715,8 @@ export async function runRunCommand(
   const outputSchema = options.outputSchema ? loadOutputSchema(options.outputSchema) : undefined;
 
   validateRunOptions(prompt, options, outputSchema);
+  const callerAgentId = resolveRunCallerAgentId();
+  const agentScoped = resolveAgentScopedRunRequest(options, callerAgentId);
   const waitTimeoutMs = parseWaitTimeoutOption(options.waitTimeout);
 
   const resolvedProviderModel = resolveProviderAndModel(options);
@@ -609,10 +744,10 @@ export async function runRunCommand(
     const env = parseRunEnv(options.env);
     const requestEnv = Object.keys(env).length > 0 ? env : undefined;
 
-    const workspace = await resolveRunWorkspace(client, options, cwd);
+    const workspace = await resolveRunWorkspace(client, options, cwd, agentScoped);
     const workspaceId = workspace.id;
-    const callerAgentId = resolveRunCallerAgentId();
     const runCwd = workspace.cwd;
+    const placement = toCreateAgentPlacement(agentScoped);
 
     if (outputSchema) {
       let structuredAgent: AgentSnapshotPayload | null = null;
@@ -633,7 +768,9 @@ export async function runRunCommand(
             images,
             env: requestEnv,
             labels: Object.keys(labels).length > 0 ? labels : undefined,
+            ...placement,
           });
+          reportSubagentIsolation(structuredAgent);
         } else {
           await client.sendMessage(structuredAgent.id, structuredPrompt);
         }
@@ -703,7 +840,9 @@ export async function runRunCommand(
       images,
       env: requestEnv,
       labels: Object.keys(labels).length > 0 ? labels : undefined,
+      ...placement,
     });
+    reportSubagentIsolation(agent);
 
     // Default run behavior is foreground: wait for completion unless background execution is set.
     if (!runsInBackground(options)) {

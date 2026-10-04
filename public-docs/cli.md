@@ -53,7 +53,7 @@ From a human shell, a bare `paseo run` creates a new local workspace for the cur
 
 Worktree creation accepts `--worktree-mode branch-off|checkout-branch|checkout-pr` plus the matching `--new-branch`/`--base`, `--branch`, or `--pr-number`/`--forge` options. Use `--worktree-slug` to choose the managed directory slug.
 
-When an existing Paseo agent runs the same command, Paseo recognizes it through `PASEO_AGENT_ID`. Without explicit placement, the new agent becomes its subagent in the same workspace. `--workspace` can place that subagent elsewhere without changing its parent.
+When an existing Paseo agent runs the same command, Paseo recognizes it through `PASEO_AGENT_ID` and the new agent becomes its subagent. Inside a git repository the subagent gets its own new worktree workspace, branched from the caller's current branch; `--workspace` only picks the checkout it branches from, and `--new-workspace worktree` options pick the branch. Pass `--share-checkout "<reason>"` to run it in the caller's checkout instead; the reason is recorded on the agent. Outside git the subagent runs in the same directory.
 
 Use `--output-schema` to return only matching JSON output. You can pass a schema file path or an inline JSON schema object. This mode cannot be used with `--background`.
 

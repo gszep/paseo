@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  resolveAgentScopedRunRequest,
   resolveExistingRunWorkspace,
   resolveRunCallerAgentId,
   runRunCommand,
@@ -54,9 +55,11 @@ describe("existing run workspace resolution", () => {
 // invalid combinations reject without one running.
 describe("runRunCommand option validation", () => {
   const originalWorkspaceId = process.env.PASEO_WORKSPACE_ID;
+  const originalAgentId = process.env.PASEO_AGENT_ID;
 
   beforeEach(() => {
     delete process.env.PASEO_WORKSPACE_ID;
+    delete process.env.PASEO_AGENT_ID;
   });
 
   afterEach(() => {
@@ -64,6 +67,11 @@ describe("runRunCommand option validation", () => {
       delete process.env.PASEO_WORKSPACE_ID;
     } else {
       process.env.PASEO_WORKSPACE_ID = originalWorkspaceId;
+    }
+    if (originalAgentId === undefined) {
+      delete process.env.PASEO_AGENT_ID;
+    } else {
+      process.env.PASEO_AGENT_ID = originalAgentId;
     }
   });
 
@@ -115,5 +123,77 @@ describe("runRunCommand option validation", () => {
       { newWorkspace: "worktree", worktreeMode: "container" },
       /Unsupported worktree mode/,
     );
+  });
+
+  it("rejects --share-checkout outside an agent-scoped run before connecting", async () => {
+    await expectInvalidOptions({ shareCheckout: "pairing" }, /only applies to agent-scoped runs/);
+  });
+
+  it("requires --share-checkout for an agent-scoped local workspace before connecting", async () => {
+    process.env.PASEO_AGENT_ID = "parent-agent";
+    await expectInvalidOptions({ newWorkspace: "local" }, /would share the checkout/);
+  });
+});
+
+describe("agent-scoped run placement", () => {
+  const run = (options: Omit<AgentRunOptions, "daemonTarget">, callerAgentId?: string) =>
+    resolveAgentScopedRunRequest({ ...options, daemonTarget }, callerAgentId);
+
+  it("leaves human runs unchanged", () => {
+    expect(run({})).toBeNull();
+    expect(run({ newWorkspace: "local" })).toBeNull();
+    expect(run({ newWorkspace: "worktree", newBranch: "x" })).toBeNull();
+  });
+
+  it("lets the daemon create the default worktree instead of pre-creating a workspace", () => {
+    expect(run({}, "parent")).toEqual({ createLocalWorkspace: false });
+    expect(run({ workspace: "wks_source" }, "parent")).toEqual({ createLocalWorkspace: false });
+    expect(run({ newWorkspace: "worktree" }, "parent")).toEqual({ createLocalWorkspace: false });
+  });
+
+  it("forwards explicit worktree targets to the daemon", () => {
+    expect(run({ newWorkspace: "worktree", newBranch: "feat/x", base: "main" }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      worktree: { mode: "branch-off", newBranch: "feat/x", base: "main" },
+    });
+    expect(run({ worktree: "legacy-slug" }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      worktree: { mode: "branch-off", newBranch: "legacy-slug" },
+    });
+    expect(
+      run({ newWorkspace: "worktree", worktreeMode: "checkout-branch", branch: "dev" }, "parent"),
+    ).toEqual({
+      createLocalWorkspace: false,
+      worktree: { mode: "checkout-branch", branch: "dev" },
+    });
+    expect(
+      run({ newWorkspace: "worktree", worktreeMode: "checkout-pr", prNumber: "12" }, "parent"),
+    ).toEqual({ createLocalWorkspace: false, worktree: { mode: "checkout-pr", prNumber: 12 } });
+  });
+
+  it("records an opt-out reason and rejects contradictory or unsupported options", () => {
+    expect(run({ shareCheckout: "  pairing  " }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      isolation: { worktree: false, reason: "pairing" },
+    });
+    expect(run({ newWorkspace: "local", shareCheckout: "pairing" }, "parent")).toEqual({
+      createLocalWorkspace: true,
+      isolation: { worktree: false, reason: "pairing" },
+    });
+    const invalid: Array<[Omit<AgentRunOptions, "daemonTarget">, RegExp]> = [
+      [{ shareCheckout: "   " }, /requires a reason/],
+      [{ newWorkspace: "worktree", shareCheckout: "x" }, /cannot be combined/],
+      [{ newWorkspace: "worktree", base: "main" }, /--base requires --new-branch/],
+      [{ newWorkspace: "worktree", forge: "github" }, /--forge is not supported/],
+      [{ newWorkspace: "worktree", worktreeSlug: "a", newBranch: "b" }, /cannot differ/],
+    ];
+    for (const [options, message] of invalid) {
+      expect(() => run(options, "parent")).toThrow(
+        expect.objectContaining({
+          code: "INVALID_OPTIONS",
+          message: expect.stringMatching(message),
+        }),
+      );
+    }
   });
 });

@@ -1703,6 +1703,15 @@ export const CreateAgentWorktreeTargetSchema = z.discriminatedUnion("mode", [
 
 export type CreateAgentWorktreeTarget = z.infer<typeof CreateAgentWorktreeTargetSchema>;
 
+// Agent-created agents get a fresh worktree by default. `worktree: false` shares
+// the source checkout instead; the daemon requires and records a reason.
+export const CreateAgentIsolationSchema = z.object({
+  worktree: z.boolean(),
+  reason: z.string().optional(),
+});
+
+export type CreateAgentIsolation = z.infer<typeof CreateAgentIsolationSchema>;
+
 export const CreateAgentRequestMessageSchema = z.object({
   type: z.literal("create_agent_request"),
   // Legacy create_agent_request uses a separate initial-message receipt when keyed.
@@ -1721,6 +1730,7 @@ export const CreateAgentRequestMessageSchema = z.object({
   attachments: AgentAttachmentsSchema,
   git: GitSetupOptionsSchema.optional(),
   worktree: CreateAgentWorktreeTargetSchema.optional(),
+  isolation: CreateAgentIsolationSchema.optional(),
   autoArchive: z.boolean().optional(),
   labels: z.record(z.string(), z.string()).default({}),
   requestId: z.string(),

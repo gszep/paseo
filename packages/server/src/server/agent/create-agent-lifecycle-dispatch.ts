@@ -73,6 +73,25 @@ export class CreateAgentLifecycleDispatch {
     return this.createWorktreeForTarget(input.cwd, input.target, input.firstAgentContext);
   }
 
+  /** A subagent's default worktree: auto-named branch off the source checkout's current ref. */
+  async createSubagentWorktree(input: {
+    cwd: string;
+    baseRef: string;
+    firstAgentContext: FirstAgentContext;
+  }): Promise<CreatePaseoWorktreeWorkflowResult> {
+    return this.dependencies.createPaseoWorktreeWorkflow(
+      {
+        cwd: input.cwd,
+        action: "branch-off",
+        firstAgentContext: input.firstAgentContext,
+        runSetup: false,
+        paseoHome: this.dependencies.paseoHome,
+        worktreesRoot: this.dependencies.worktreesRoot,
+      },
+      { resolveDefaultBranch: async () => input.baseRef },
+    );
+  }
+
   registerAutoArchiveIfRequested(input: {
     autoArchive: boolean | undefined;
     agentId: string;

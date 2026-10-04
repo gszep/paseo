@@ -18,7 +18,11 @@ import { AgentStorage } from "./agent-storage.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
-import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  getOpenAgentTabLabel,
+  ISOLATION_WORKTREE_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
@@ -8815,6 +8819,51 @@ test("archiveAgent detaches a cross-workspace child even when its tab is closed"
   expect(storedChild?.archivedAt).toBeUndefined();
   expect(storedChild?.workspaceId).toBe("workspace-b");
   expect(storedChild?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
+});
+
+test("archiveAgent archives a child in its own isolation worktree unless a tab keeps it open", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-cascade-isolated-child-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+  });
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Parent" },
+    undefined,
+    { workspaceId: "workspace-a" },
+  );
+  const isolatedChild = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Isolated child" },
+    undefined,
+    {
+      workspaceId: "workspace-isolated",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent.id, [ISOLATION_WORKTREE_LABEL]: "created" },
+    },
+  );
+  const openIsolatedChild = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Open isolated child" },
+    undefined,
+    {
+      workspaceId: "workspace-isolated-open",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: parent.id,
+        [ISOLATION_WORKTREE_LABEL]: "created",
+        [DESKTOP_OPEN_AGENT_TAB_LABEL]: "true",
+      },
+    },
+  );
+
+  await manager.archiveAgent(parent.id);
+
+  const storedIsolated = await storage.get(isolatedChild.id);
+  expect(storedIsolated?.archivedAt).toBeTruthy();
+  expect(storedIsolated?.workspaceId).toBe("workspace-isolated");
+  expect(storedIsolated?.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
+  const storedOpen = await storage.get(openIsolatedChild.id);
+  expect(storedOpen?.archivedAt).toBeUndefined();
+  expect(storedOpen?.labels[PARENT_AGENT_ID_LABEL]).toBeUndefined();
 });
 
 test("archiveAgent re-reads a child before deciding whether to cascade", async () => {
