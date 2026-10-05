@@ -207,3 +207,19 @@ test("escaped native strings split before the one-request codec bound without sp
   for (const body of f.calls)
     expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(1024 * 1024);
 });
+
+test("initial coverage matches the frozen native-export digest, including fractions and numeric-looking keys", async () => {
+  const f = await fixture();
+  const native = {
+    info: { ...info, cost: 0.125 },
+    messages: [{ ...message(0), metadata: { "2": "two", "10": "ten" } }],
+  };
+  await captureAppend({ ...f.input, native });
+  // Independent Python sorted-key JSON/SHA256 vector; a JSON.stringify-only
+  // digest (or integer-only envelope encoder) does not satisfy this contract.
+  expect(f.calls[0]).toMatchObject({
+    creation: {
+      coverage: { digest: "cd3ee8a262923ca7d81f72daf3e5169dec6bce5abed17db19ff55ffe7d51b180" },
+    },
+  });
+});

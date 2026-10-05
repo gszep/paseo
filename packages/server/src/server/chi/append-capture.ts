@@ -67,6 +67,25 @@ export function supportsAppendCapture(platform: NodeJS.Platform = process.platfo
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
+/** Frozen opencode-chi1-r1 native-export digest form. Unlike the envelope
+ * codec, native JSON permits fractional numbers. Only the coverage digest
+ * uses this form; uploaded native strings keep their original bytes. */
+function canonicalNative(value: unknown): string {
+  if (value === null || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string" && !/[\uD800-\uDFFF]/u.test(value)) return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || (Number.isInteger(value) && !Number.isSafeInteger(value)))
+      throw new Error("capture-native-projection-invalid");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalNative).join(",")}]`;
+  if (typeof value !== "object") throw new Error("capture-native-projection-invalid");
+  const object = record.parse(value);
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalNative(object[key])}`)
+    .join(",")}}`;
+}
 function nativeExport(input: unknown): NativeExport {
   if (typeof input === "object" && input !== null && Object.hasOwn(input, "data")) {
     return wrappedSchema.parse(input).data;
@@ -194,7 +213,7 @@ export async function captureAppend(input: AppendCaptureInput): Promise<AppendCa
         kind: "minimised",
         minimiser: "min-v1",
         initialCount: native.messages.length,
-        digest: digest(initial.minimised.native),
+        digest: digest(canonicalNative(initial.projected)),
       },
       parent: null,
       runtime: "2.0.15-chi.1",
