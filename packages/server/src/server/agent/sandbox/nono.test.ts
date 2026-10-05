@@ -10,6 +10,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { isPlatform } from "../../../test-utils/platform.js";
 
 import {
   buildSandboxProfile,
@@ -90,7 +91,10 @@ describe("resolveNono", () => {
   });
 });
 
-describe("buildSandboxProfile", () => {
+// nono runs on macOS and Linux only; these cases use POSIX paths and modes.
+const posixOnly = describe.skipIf(isPlatform("win32"));
+
+posixOnly("buildSandboxProfile", () => {
   const paths = sandboxPaths("/paseo", "agent-1");
   const worktree = "/work/subagent-1";
   const git = {
@@ -218,7 +222,7 @@ describe("buildSandboxProfile", () => {
   });
 });
 
-describe("prepareSandboxLaunch", () => {
+posixOnly("prepareSandboxLaunch", () => {
   it("launches the server under nono with a scrubbed environment and private state", async () => {
     const paseoHome = tempDir("paseo-sandbox-home-");
     const bin = tempDir("paseo-sandbox-bin-");
@@ -390,7 +394,7 @@ describe("hostTempDenyPaths", () => {
   });
 });
 
-describe("localPluginDirs", () => {
+posixOnly("localPluginDirs", () => {
   it("grants only local plugin packages the server must load", () => {
     expect(
       localPluginDirs(

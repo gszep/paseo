@@ -11,6 +11,7 @@ import Ajv from "ajv";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
+import { isPlatform } from "../../../../test-utils/platform.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import { AgentManager } from "../../agent-manager.js";
 import { AgentStorage } from "../../agent-storage.js";
@@ -783,7 +784,7 @@ describe("OpenCodeBridge", () => {
           "",
         ].join("\n"),
       );
-      expect((await stat(gitConfig)).mode & 0o777).toBe(0o600);
+      if (!isPlatform("win32")) expect((await stat(gitConfig)).mode & 0o777).toBe(0o600);
     } finally {
       for (const key of keys) {
         if (previous[key] === undefined) delete process.env[key];
