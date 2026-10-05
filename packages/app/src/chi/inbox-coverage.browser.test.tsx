@@ -31,7 +31,16 @@ vi.mock("expo-router", () => ({
 }));
 vi.mock("@/components/headers/menu-header", () => ({ MenuHeader: () => null }));
 vi.mock("@/components/ui/form-field", () => ({ FormTextInput: () => null }));
-vi.mock("./repository-filter", () => ({ RepositoryFilter: () => null }));
+vi.mock("./repository-filter", () => ({
+  RepositoryFilter: function RepositoryFilter({ onSelect }: { onSelect(repo: string): void }) {
+    const select = React.useCallback(() => onSelect("github:o/a"), [onSelect]);
+    return (
+      <button type="button" data-testid="choose-test-repo" onClick={select}>
+        Choose fixture repository
+      </button>
+    );
+  },
+}));
 vi.mock("./entry-navigation", () => ({ locateMention: vi.fn(), openMentionTarget: vi.fn() }));
 vi.mock("./reply-model", () => ({ openReplyForm: vi.fn() }));
 vi.mock("@/constants/layout", async (importOriginal) => ({
@@ -162,7 +171,7 @@ test.each(["account", "credential", "deployment", "failure"])(
     let transport!: ReturnType<typeof useInboxTransport>;
     function Probe() {
       transport = useInboxTransport();
-      const inbox = useInbox(transport);
+      const inbox = useInbox(transport, { repo: "github:o/a" });
       return <div>{inbox.data ? "protected" : "empty"}</div>;
     }
     const view = mount(
@@ -171,7 +180,7 @@ test.each(["account", "credential", "deployment", "failure"])(
       </QueryClientProvider>,
     );
     await vi.waitFor(() => expect(view.container.textContent).toBe("protected"));
-    const oldKey = [...transport.queryKey, "inbox", true];
+    const oldKey = [...transport.queryKey, "inbox", true, "github:o/a"];
     expect(queryClient.getQueryData(oldKey)).toMatchObject({ unreadCount: 7 });
     // Keep the real scope alive, but remount only transport verification so neither
     // an inbox query nor scope.acquire can accidentally mask missing reconciliation.
@@ -220,7 +229,7 @@ test.each(["account", "credential", "deployment", "failure"])(
   },
 );
 
-test("the real sidebar displays the backend lower-bound badge even with complete repository availability", async () => {
+test("the v3 sidebar does not invent a global unread count from a repository inbox", async () => {
   const context: ChiMentionContext = {
     actor: "github:alice",
     deployment: "synthetic-deployment",
@@ -248,12 +257,10 @@ test("the real sidebar displays the backend lower-bound badge even with complete
       <SidebarMentionsRow />
     </QueryClientProvider>,
   );
-  await vi.waitFor(() =>
-    expect(
-      view.container.querySelector('[aria-label="0 unread mentions, count incomplete"]'),
-    ).not.toBeNull(),
-  );
-  expect(view.container.textContent).toContain("0+");
+  expect(
+    view.container.querySelector('[aria-label="0 unread mentions, count incomplete"]'),
+  ).toBeNull();
+  expect(host.client.chiMentions).not.toHaveBeenCalled();
 });
 
 test("empty cursor pages continue automatically, stop on data, and bound repeated or endless cursors", async () => {
@@ -398,7 +405,7 @@ test("scroll pause suppresses both route and sidebar interval/focus refresh and 
   }
 });
 
-test("production screen connects empty-page continuation and scroll pause to the shared sidebar query", async () => {
+test("production screen scopes empty-page continuation and scroll pause to the selected repository", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const context: ChiMentionContext = {
     actor: "github:alice",
@@ -428,6 +435,14 @@ test("production screen connects empty-page continuation and scroll pause to the
     </QueryClientProvider>,
   );
   try {
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[data-testid="choose-test-repo"]')).not.toBeNull(),
+    );
+    act(() =>
+      (
+        view.container.querySelector('[data-testid="choose-test-repo"]') as HTMLButtonElement
+      ).click(),
+    );
     await vi.waitFor(() => expect(calls).toEqual([undefined, "1", "2"]));
     const list = view.container.querySelector('[data-testid="chi-flat-inbox"]') as HTMLDivElement;
     expect(list).not.toBeNull();
@@ -505,6 +520,14 @@ test("compact discussion unmount releases the list pause and returning to its to
     </QueryClientProvider>,
   );
   try {
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[data-testid="choose-test-repo"]')).not.toBeNull(),
+    );
+    act(() =>
+      (
+        view.container.querySelector('[data-testid="choose-test-repo"]') as HTMLButtonElement
+      ).click(),
+    );
     await vi.waitFor(() =>
       expect(
         view.container.querySelector('[aria-label="Discuss mention Compact fixture"]'),
@@ -819,7 +842,7 @@ test("unavailable refresh clears cached head synchronously before the error is o
       await query.refetch();
     });
     expect(view.container.textContent).toBe("empty");
-    expect(cache.getQueryData(["fail-test", "inbox", true])).toBeUndefined();
+    expect(cache.getQueryData(["fail-test", "inbox", true, undefined])).toBeUndefined();
   } finally {
     cache.clear();
   }
@@ -881,7 +904,9 @@ test("a cancelled older-page failure cannot erase a newly reauthorized head", as
       release.resolve();
     });
     expect(view.container.textContent).toBe("2");
-    expect(cache.getQueryData(["late-test", "inbox", true])).toMatchObject({ unreadCount: 2 });
+    expect(cache.getQueryData(["late-test", "inbox", true, undefined])).toMatchObject({
+      unreadCount: 2,
+    });
   } finally {
     cache.clear();
   }

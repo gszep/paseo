@@ -39,7 +39,7 @@ export function MentionDelivery({ serverId, agentId }: AgentTarget) {
     (state) => state.sessions[serverId]?.agents.get(agentId)?.workspaceId,
   );
   const supported = useSessionStore(
-    (state) => state.sessions[serverId]?.serverInfo?.features?.chiMentions === true,
+    (state) => state.sessions[serverId]?.serverInfo?.features?.chiAppendV3 === true,
   );
   const { destination, mentionsAvailable } = useSyncDestination(serverId, workspaceId ?? "");
   const active =

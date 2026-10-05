@@ -1,6 +1,7 @@
 import {
   CAPTURE_HEAD_DIVERGED_MESSAGE,
   CAPTURE_RECOVERY_INVALID_MESSAGE,
+  CAPTURE_SCAN_TIMEOUT_MESSAGE,
   CHI_OPERATION_TIMEOUT_MESSAGE,
 } from "./sync-destination";
 
@@ -9,6 +10,24 @@ export function mentionError(error: unknown): string {
   const copy: Record<string, string> = {
     "capture-head-diverged": CAPTURE_HEAD_DIVERGED_MESSAGE,
     "capture-recovery-invalid": CAPTURE_RECOVERY_INVALID_MESSAGE,
+    "capture-local-scan-timeout": CAPTURE_SCAN_TIMEOUT_MESSAGE,
+    "append-recovery-required": CAPTURE_RECOVERY_INVALID_MESSAGE,
+    "append-local-conflict": CAPTURE_RECOVERY_INVALID_MESSAGE,
+    "append-local-state-invalid": CAPTURE_RECOVERY_INVALID_MESSAGE,
+    "capture-native-projection-invalid":
+      "Chi rejected this batch's projection. Sync stopped. Update this host or keep the session local.",
+    "chi-native-v3-required": "Update this host and its Chi backend to use v3 sync and mentions.",
+    "chi-native-reset-required":
+      "This session still has snapshot-format sync state. Keep it paused until the operator completes the v3 cutover.",
+    "chi-native-fork-unsupported":
+      "Sync for native forks is not available in this v3 release. Keep this fork local.",
+    "chi-native-workspace-mismatch":
+      "The native session belongs to a different checkout. Sync stopped to avoid sharing it with the wrong repository.",
+    "chi-operation-unsupported":
+      "This operation is not available in the v3 sync and mentions release.",
+    "chi-mention-repository-required": "Choose a repository to read its mentions.",
+    "append-http-404":
+      "This source is no longer available to the host identity. Sync stopped; the source will not be recreated.",
     "chi-operation-timeout": CHI_OPERATION_TIMEOUT_MESSAGE,
     "chi-destination-required":
       "Configure a Chi destination and repository mapping on this host before Share, Continue or mentions. Inbox and mentions require one configured deployment; restart the daemon after changing it.",
@@ -24,13 +43,15 @@ export function mentionError(error: unknown): string {
     "chi-share-required":
       "This workspace is local. Only workspaces mapped to a destination deliver human mentions.",
     "capture-local-secret-rejected":
-      "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.",
+      "A secret was detected in this batch. Sync stopped. Remove or rotate the secret, or keep this session local.",
     "capture-local-cut-scan-limit":
-      "This session exceeds the local truncation safety-scan limit. Nothing was uploaded. Start a shorter session or keep this session local.",
+      "This batch exceeds the local truncation safety-scan limit. Sync stopped. Keep the session local until the oversized record is resolved.",
+    "capture-local-secret-scan-limit":
+      "This batch exceeds the local secret-scan limit. Sync stopped; keep the session local until the oversized record is resolved.",
     "capture-local-scanner-unavailable":
-      "The secret scanner is unavailable on this host, so nothing was uploaded. Install gitleaks on the host to sync this session.",
+      "The secret scanner is unavailable on this host. Check the pinned Gitleaks installation, then retry sync.",
     "evidence-http-422-server-secret-scan-rejected":
-      "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.",
+      "A secret was detected in this batch. Sync stopped. Remove or rotate the secret, or keep this session local.",
     "chi-mentions-unsupported": "Update this host to use Chi mentions.",
     "chi-mention-plain-text-required":
       "Send human mentions as plain text. Remove attachments and slash/skill commands before sending.",

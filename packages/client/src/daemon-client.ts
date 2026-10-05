@@ -3246,6 +3246,7 @@ export class DaemonClient {
     action?: "status" | "retry";
     requestId?: string;
   }) {
+    this.requireChiAppend();
     const requestId = this.createRequestId(input.requestId);
     return this.sendRequest({
       requestId,
@@ -3283,10 +3284,7 @@ export class DaemonClient {
       "type" | "requestId"
     >,
   ) {
-    if (this.lastServerInfoMessage?.features?.chiMentions !== true)
-      throw new Error("Update this host to use human mentions.");
-    if (!input.workspaceId && this.lastServerInfoMessage?.features?.chiInbox !== true)
-      throw new Error("Update this host to use the deployment inbox.");
+    this.requireChiAppend();
     const requestId = this.createRequestId();
     const payload = await this.sendRequest({
       requestId,
@@ -3305,6 +3303,10 @@ export class DaemonClient {
   private requireChiCanonical(): void {
     if (this.getLastServerInfoMessage()?.features?.chiCanonical !== true)
       throw new Error("Update the selected host to continue a Chi transfer.");
+  }
+  private requireChiAppend(): void {
+    if (this.lastServerInfoMessage?.features?.chiAppendV3 !== true)
+      throw new Error("chi-native-v3-required");
   }
 
   async refreshAgent(agentId: string, requestId?: string): Promise<AgentRefreshedStatusPayload> {
@@ -3553,7 +3555,7 @@ export class DaemonClient {
     text: string,
     options?: SendMessageOptions,
   ): Promise<void> {
-    if (options?.chiMentions?.length && this.lastServerInfoMessage?.features?.chiMentions !== true)
+    if (options?.chiMentions?.length && this.lastServerInfoMessage?.features?.chiAppendV3 !== true)
       throw new ChiOperationError("chi-mentions-unsupported", {
         accessLost: false,
         // A downgraded host may already have admitted an earlier attempt.

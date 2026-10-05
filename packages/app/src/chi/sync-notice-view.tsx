@@ -3,11 +3,7 @@ import { View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  CAPTURE_HEAD_DIVERGED_MESSAGE,
-  CAPTURE_RECOVERY_INVALID_MESSAGE,
-  CHI_OPERATION_TIMEOUT_MESSAGE,
-} from "./sync-destination";
+import { mentionError } from "./mention-errors";
 
 const NOTICE_TITLE =
   "For others to see this session and for its mentions to appear, sync needs to succeed.";
@@ -24,20 +20,25 @@ export function syncWarningReason(code: string): string {
 /** Safe, non-diagnostic reasons for a failed or paused sync. */
 export function syncNoticeReason(code: string | null): string {
   if (!code) return "Sync did not complete. Retry when this host is back online.";
-  if (code === "capture-head-diverged") return CAPTURE_HEAD_DIVERGED_MESSAGE;
-  if (code === "capture-recovery-invalid") return CAPTURE_RECOVERY_INVALID_MESSAGE;
-  if (code === "chi-operation-timeout") return CHI_OPERATION_TIMEOUT_MESSAGE;
+  if (
+    [
+      "capture-head-diverged",
+      "capture-recovery-invalid",
+      "capture-local-scan-timeout",
+      "capture-native-projection-invalid",
+      "chi-operation-timeout",
+      "capture-local-cut-scan-limit",
+      "capture-local-secret-scan-limit",
+      "capture-local-secret-rejected",
+      "evidence-http-422-server-secret-scan-rejected",
+      "capture-local-scanner-unavailable",
+    ].includes(code)
+  )
+    return mentionError(new Error(code));
+  if (["append-", "chi-native-"].some((prefix) => code.startsWith(prefix)))
+    return mentionError(new Error(code));
   if (code === "chi-destination-required")
     return "Configure a Chi destination and repository mapping on this host before Share, Continue or mentions. Existing history stays paused until its original endpoint is configured.";
-  if (code === "capture-local-cut-scan-limit")
-    return "This session exceeds the local truncation safety-scan limit. Nothing was uploaded. Start a shorter session or keep this session local.";
-  if (
-    code === "capture-local-secret-rejected" ||
-    code === "evidence-http-422-server-secret-scan-rejected"
-  )
-    return "A secret was detected in this session's history. Nothing was uploaded. Remove or rotate the secret, or keep this session local.";
-  if (code === "capture-local-scanner-unavailable")
-    return "The secret scanner is unavailable on this host, so nothing was uploaded. Install gitleaks on the host to sync this session.";
   if (code.startsWith("chi-destination-unmapped"))
     return "This repository is not mapped to a configured destination.";
   if (code.startsWith("chi-destination-mismatch") || code.startsWith("chi-destination-changed"))

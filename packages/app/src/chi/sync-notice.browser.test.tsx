@@ -147,9 +147,7 @@ describe("SyncNoticeView", () => {
       />,
     );
     expect(button(container, "Retry")).toBeUndefined();
-    expect(container.textContent).toContain(
-      "A secret was detected in this session's history. Nothing was uploaded.",
-    );
+    expect(container.textContent).toContain("A secret was detected in this batch. Sync stopped.");
     expect(container.textContent).not.toContain("Reconnect");
   });
 
@@ -164,6 +162,19 @@ describe("SyncNoticeView", () => {
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
     expect(container.textContent).toContain("The secret scanner is unavailable on this host");
   });
+  it("explains scan deadlines separately and retries the saved batch", () => {
+    const retry = vi.fn();
+    const { container } = mount(
+      <SyncNoticeView error="capture-local-scan-timeout" onDismiss={vi.fn()} onRetry={retry} />,
+    );
+    expect(container.textContent).toContain("The secret scan exceeded its deadline");
+    expect(container.textContent).toContain(
+      "earlier attempts or batches may already have committed",
+    );
+    expect(container.textContent).not.toContain("Install gitleaks");
+    act(() => button(container, "Retry")!.click());
+    expect(retry).toHaveBeenCalledOnce();
+  });
   it("explains a terminal cut-scan limit without claiming a secret finding", () => {
     const { container } = mount(
       <SyncNoticeView
@@ -174,7 +185,7 @@ describe("SyncNoticeView", () => {
       />,
     );
     expect(container.textContent).toContain(
-      "This session exceeds the local truncation safety-scan limit. Nothing was uploaded.",
+      "This batch exceeds the local truncation safety-scan limit. Sync stopped.",
     );
     expect(container.textContent).not.toContain("A secret was detected");
     expect(button(container, "Retry")).toBeUndefined();

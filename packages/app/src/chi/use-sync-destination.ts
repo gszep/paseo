@@ -29,7 +29,7 @@ export function useSyncDestination(
   const client = useHostRuntimeClient(serverId);
   const connected = useHostRuntimeIsConnected(serverId);
   const supported = useSessionStore(
-    (state) => state.sessions[serverId]?.serverInfo?.features?.chiNative === true,
+    (state) => state.sessions[serverId]?.serverInfo?.features?.chiAppendV3 === true,
   );
   const labelSignature = useSessionStore((state) => {
     const agents = state.sessions[serverId]?.agents;
