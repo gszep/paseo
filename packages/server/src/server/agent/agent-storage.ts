@@ -9,6 +9,7 @@ import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { AgentIsolationSchema } from "./subagent-isolation.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -75,6 +76,8 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  // Absent for top-level agents and every agent created before the isolation policy.
+  isolation: AgentIsolationSchema.optional(),
 });
 
 export type SerializableAgentConfig = Pick<

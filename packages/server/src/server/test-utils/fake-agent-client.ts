@@ -1361,6 +1361,9 @@ class FakeAgentClient implements AgentClient {
   async isAvailable(): Promise<boolean> {
     return true;
   }
+
+  // Fakes ignore the launch context, so they model a provider that can run sandboxed.
+  async assertSandboxAvailable(): Promise<void> {}
 }
 
 export function createTestAgentClients(

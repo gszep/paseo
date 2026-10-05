@@ -111,13 +111,17 @@ import type {
 import { createAgentCommand } from "./agent/create-agent/create.js";
 import { resolveCreateAgentIntent, type CreateAgentIntent } from "./agent/create-agent/intent.js";
 import {
+  isolationRecord,
   logSubagentIsolation,
+  resolveSubagentSandboxDecision,
   resolveSubagentWorktreeDecision,
   SubagentIsolationError,
   withIsolationLabels,
   wrapSubagentWorktreeCreationError,
+  type SubagentSandboxDecision,
   type SubagentWorktreeDecision,
 } from "./agent/create-agent/isolation.js";
+import { newSubagentBranch, type AgentIsolation } from "./agent/subagent-isolation.js";
 import {
   archiveAgentCommand,
   cancelAgentRunCommand,
@@ -4551,19 +4555,20 @@ export class Session {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       const workspacePromptTitle = resolveFirstAgentPromptTitle(firstAgentContext);
-      const subagentIsolation = await this.resolveSessionSubagentIsolation(
+      const { subagentIsolation, subagentSandbox, isolation } = await this.admitSessionSubagent(
         msg,
         placement.dedicatedWorktree,
       );
       const createdWorktree = await this.createSessionAgentWorktree({
         request: msg,
         subagentIsolation,
+        sandboxed: subagentSandbox?.kind === "nono",
         firstAgentContext,
       });
       createdWorktreeForCleanup = createdWorktree;
       const resolvedIntent = await this.resolveSessionCreateAgentIntent({
         request: msg,
-        subagentIsolation,
+        isolation,
         createdWorktree,
         workspacePromptTitle,
       });
@@ -4599,6 +4604,7 @@ export class Session {
           git,
           labels: resolvedIntent.intent.labels,
           env,
+          ...(isolation ? { isolation } : {}),
           provisionalTitle,
           firstAgentContext,
           buildSessionConfig: (sessionConfig, gitOptions, legacyWorktreeName, ctx) =>
@@ -4621,6 +4627,7 @@ export class Session {
         request: msg,
         snapshot,
         subagentIsolation,
+        subagentSandbox,
         createdWorktree,
         autoArchive,
       });
@@ -4642,20 +4649,22 @@ export class Session {
     request: CreateAgentRequestMessage;
     snapshot: ManagedAgent;
     subagentIsolation: SubagentWorktreeDecision | null;
+    subagentSandbox: SubagentSandboxDecision | null;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
     autoArchive: boolean | undefined;
   }): void {
-    const { request, snapshot, subagentIsolation } = input;
+    const { request, snapshot, subagentIsolation, subagentSandbox } = input;
     this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
       autoArchive: input.autoArchive,
       agentId: snapshot.id,
       // Archiving a subagent keeps its default worktree; only workspace cleanup removes it.
       createdWorktree: subagentIsolation?.kind === "worktree" ? null : input.createdWorktree,
     });
-    if (subagentIsolation && request.callerAgentId) {
+    if (subagentIsolation && subagentSandbox && request.callerAgentId) {
       logSubagentIsolation({
         logger: this.sessionLogger,
         decision: subagentIsolation,
+        sandbox: subagentSandbox,
         callerAgentId: request.callerAgentId,
         agentId: snapshot.id,
         workspaceId: snapshot.workspaceId,
@@ -4667,6 +4676,7 @@ export class Session {
   private async createSessionAgentWorktree(input: {
     request: CreateAgentRequestMessage;
     subagentIsolation: SubagentWorktreeDecision | null;
+    sandboxed: boolean;
     firstAgentContext: FirstAgentContext;
   }): Promise<CreatePaseoWorktreeWorkflowResult | null> {
     const { request, subagentIsolation, firstAgentContext } = input;
@@ -4688,6 +4698,7 @@ export class Session {
         cwd: subagentIsolation.sourceCwd,
         baseRef: subagentIsolation.baseRef,
         firstAgentContext,
+        ...(input.sandboxed ? { branch: newSubagentBranch() } : {}),
       });
     } catch (error) {
       throw wrapSubagentWorktreeCreationError(error);
@@ -4730,9 +4741,51 @@ export class Session {
     });
   }
 
+  // Both halves of the policy for `paseo run` inside an agent, decided before any
+  // worktree or agent exists.
+  private async admitSessionSubagent(
+    request: CreateAgentRequestMessage,
+    dedicatedWorktree: boolean,
+  ): Promise<{
+    subagentIsolation: SubagentWorktreeDecision | null;
+    subagentSandbox: SubagentSandboxDecision | null;
+    isolation: AgentIsolation | undefined;
+  }> {
+    const subagentIsolation = await this.resolveSessionSubagentIsolation(
+      request,
+      dedicatedWorktree,
+    );
+    const subagentSandbox = await this.resolveSessionSubagentSandbox(request, subagentIsolation);
+    const isolation =
+      subagentIsolation && subagentSandbox && request.callerAgentId
+        ? isolationRecord({
+            worktree: subagentIsolation,
+            sandbox: subagentSandbox,
+            callerAgentId: request.callerAgentId,
+          })
+        : undefined;
+    return { subagentIsolation, subagentSandbox, isolation };
+  }
+
+  private async resolveSessionSubagentSandbox(
+    request: CreateAgentRequestMessage,
+    subagentIsolation: SubagentWorktreeDecision | null,
+  ): Promise<SubagentSandboxDecision | null> {
+    if (!subagentIsolation || !request.callerAgentId) return null;
+    const sandbox = resolveSubagentSandboxDecision({
+      request: request.isolation,
+      callerIsolation: this.agentManager.getAgent(request.callerAgentId)?.isolation,
+      worktree: subagentIsolation,
+    });
+    if (sandbox.kind === "nono") {
+      await this.agentManager.assertSandboxAvailable(request.config.provider);
+    }
+    return sandbox;
+  }
+
   private async resolveSessionCreateAgentIntent(input: {
     request: CreateAgentRequestMessage;
-    subagentIsolation: SubagentWorktreeDecision | null;
+    isolation: AgentIsolation | undefined;
     createdWorktree: CreatePaseoWorktreeWorkflowResult | null;
     workspacePromptTitle: string | null;
   }): Promise<ResolvedSessionCreateAgentIntent> {
@@ -4751,8 +4804,8 @@ export class Session {
       caller: callerAgent
         ? { id: callerAgent.id, cwd: callerAgent.cwd, workspaceId: callerAgent.workspaceId }
         : null,
-      labels: input.subagentIsolation
-        ? withIsolationLabels(request.labels, input.subagentIsolation)
+      labels: input.isolation
+        ? withIsolationLabels(request.labels, input.isolation)
         : request.labels,
       resolveWorkspace: async (workspaceId) => {
         if (createdWorktree?.workspace.workspaceId === workspaceId) {

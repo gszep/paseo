@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
@@ -3703,7 +3703,11 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   );
 
   expect(policyInputs).toEqual([
-    { callerAgentId: codexAgent.id, paseoToolPolicy: { disabledTools: ["list_agents"] } },
+    {
+      callerAgentId: codexAgent.id,
+      paseoToolPolicy: { disabledTools: ["list_agents"] },
+      sandboxed: false,
+    },
   ]);
   expect(codex.launchContexts[0]?.paseoTools).toBe(paseoTools);
   expect(claude.launchContexts[0]?.paseoTools).toBeUndefined();
@@ -3728,10 +3732,15 @@ test("uses each provider's current policy for new sessions and snapshots it by a
     disabledTools: ["create_agent"],
   });
   expect(policyInputs).toEqual([
-    { callerAgentId: codexAgent.id, paseoToolPolicy: { disabledTools: ["list_agents"] } },
+    {
+      callerAgentId: codexAgent.id,
+      paseoToolPolicy: { disabledTools: ["list_agents"] },
+      sandboxed: false,
+    },
     {
       callerAgentId: nextCodexAgent.id,
       paseoToolPolicy: { disabledTools: ["create_agent"] },
+      sandboxed: false,
     },
   ]);
 
@@ -11548,4 +11557,153 @@ test("concurrent native restores run once before resuming the same agent", async
     await storage.flush();
     rmSync(workdir, { recursive: true, force: true });
   }
+});
+
+describe("agent-launched agent isolation", () => {
+  const isolation = {
+    worktree: "created" as const,
+    sandbox: "nono" as const,
+    decidedBy: "00000000-0000-4000-8000-0000000000aa",
+  };
+
+  class SandboxCaptureClient extends TestAgentClient {
+    override readonly capabilities = { ...TEST_CAPABILITIES, supportsNativePaseoTools: true };
+    readonly launchContexts: AgentLaunchContext[] = [];
+    sandboxChecks = 0;
+
+    async assertSandboxAvailable(): Promise<void> {
+      this.sandboxChecks += 1;
+    }
+
+    override async createSession(
+      config: AgentSessionConfig,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      if (launchContext) this.launchContexts.push(launchContext);
+      return new TestAgentSession(config);
+    }
+
+    override async resumeSession(
+      handle: AgentPersistenceHandle,
+      config?: Partial<AgentSessionConfig>,
+      launchContext?: AgentLaunchContext,
+    ): Promise<AgentSession> {
+      if (launchContext) this.launchContexts.push(launchContext);
+      return super.resumeSession(handle, config, launchContext);
+    }
+  }
+
+  function setup() {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-isolation-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const client = new SandboxCaptureClient("codex");
+    const catalogInputs: Array<{ callerAgentId?: string; sandboxed?: boolean }> = [];
+    const manager = new AgentManager({
+      clients: { codex: client },
+      registry: storage,
+      logger,
+      paseoToolCatalogFactory: async (context) => {
+        catalogInputs.push(context);
+        return {
+          tools: new Map(),
+          getTool: () => undefined,
+          executeTool: async () => {
+            throw new Error("No tools registered in test catalog");
+          },
+        };
+      },
+    });
+    return { workdir, storage, client, catalogInputs, manager };
+  }
+
+  test("launches a sandboxed agent confined, with the restricted catalog, and persists the decision", async () => {
+    const { workdir, storage, client, catalogInputs, manager } = setup();
+    const agentId = "00000000-0000-4000-8000-0000000000b1";
+    await manager.createAgent({ provider: "codex", cwd: workdir }, agentId, {
+      workspaceId: undefined,
+      isolation,
+    });
+
+    expect(client.sandboxChecks).toBe(1);
+    expect(client.launchContexts[0]?.sandbox).toEqual({ agentId, cwd: workdir });
+    expect(catalogInputs.at(-1)).toMatchObject({ callerAgentId: agentId, sandboxed: true });
+    await storage.flush();
+    expect((await storage.get(agentId))?.isolation).toEqual(isolation);
+
+    await manager.reloadAgentSession(agentId);
+    expect(client.launchContexts.at(-1)?.sandbox).toEqual({ agentId, cwd: workdir });
+    await storage.flush();
+    expect((await storage.get(agentId))?.isolation).toEqual(isolation);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("resume takes confinement from the durable record, never from the caller", async () => {
+    const { workdir, storage, client, manager } = setup();
+    const agentId = "00000000-0000-4000-8000-0000000000b2";
+    const created = await manager.createAgent({ provider: "codex", cwd: workdir }, agentId, {
+      workspaceId: undefined,
+      isolation,
+    });
+    const handle = created.persistence!;
+    await manager.closeAgent(agentId);
+    await storage.flush();
+
+    // A resume that omits isolation must not downgrade the agent.
+    await manager.resumeAgentFromPersistence(handle, { cwd: workdir }, agentId, {});
+    expect(client.launchContexts.at(-1)?.sandbox).toEqual({ agentId, cwd: workdir });
+    expect(manager.getAgent(agentId)?.isolation).toEqual(isolation);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("refuses to launch a sandboxed agent on a provider that cannot be confined", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-isolation-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const plain = new TestAgentClient("codex");
+    const manager = new AgentManager({ clients: { codex: plain }, registry: storage, logger });
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+        isolation,
+      }),
+    ).rejects.toThrow(/cannot run inside the nono sandbox/);
+    expect(plain.createdConfigs).toHaveLength(0);
+    await expect(manager.assertSandboxAvailable("codex")).rejects.toThrow(/nono sandbox/);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("refuses to launch when the sandbox is unavailable on this host", async () => {
+    const { workdir, client, manager } = setup();
+    client.assertSandboxAvailable = async () => {
+      throw new Error("nono is not installed on PATH");
+    };
+    await expect(
+      manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+        isolation,
+      }),
+    ).rejects.toThrow(/nono is not installed/);
+    expect(client.launchContexts).toHaveLength(0);
+    rmSync(workdir, { recursive: true, force: true });
+  });
+
+  test("top-level agents and recorded opt-outs launch without a sandbox", async () => {
+    const { workdir, storage, client, catalogInputs, manager } = setup();
+    const topLevel = "00000000-0000-4000-8000-0000000000b3";
+    const optedOut = "00000000-0000-4000-8000-0000000000b4";
+    const optOut = { ...isolation, sandbox: "opted-out" as const, reason: "needs docker" };
+    await manager.createAgent({ provider: "codex", cwd: workdir }, topLevel, {
+      workspaceId: undefined,
+    });
+    await manager.createAgent({ provider: "codex", cwd: workdir }, optedOut, {
+      workspaceId: undefined,
+      isolation: optOut,
+    });
+    expect(client.sandboxChecks).toBe(0);
+    expect(client.launchContexts.map((context) => context.sandbox)).toEqual([undefined, undefined]);
+    expect(catalogInputs.map((input) => input.sandboxed)).toEqual([false, false]);
+    await storage.flush();
+    expect((await storage.get(topLevel))?.isolation).toBeUndefined();
+    expect((await storage.get(optedOut))?.isolation).toEqual(optOut);
+    rmSync(workdir, { recursive: true, force: true });
+  });
 });

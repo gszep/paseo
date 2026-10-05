@@ -231,6 +231,8 @@ import {
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
+import { isSandboxed } from "./agent/subagent-isolation.js";
+import { protectSandboxedCheckouts } from "./agent/sandbox/nono.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
 const MCP_DEBUG_SECRET = "[redacted]";
@@ -971,6 +973,9 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before any workspace git polling: daemon git in a sandboxed agent's checkout
+  // runs read-only under nono, because the agent controls that checkout's config.
+  protectSandboxedCheckouts(await agentStorage.list());
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -1441,6 +1446,11 @@ export async function createPaseoDaemon(
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
+    sandboxed:
+      runtime.sandboxed ??
+      (runtime.callerAgentId
+        ? isSandboxed(agentManager.getAgent(runtime.callerAgentId)?.isolation)
+        : false),
     enableVoiceTools: runtime.enableVoiceTools,
     voiceOnly: runtime.voiceOnly,
     resolveSpeakHandler: (agentId) => wsServer?.resolveVoiceSpeakHandler(agentId) ?? null,

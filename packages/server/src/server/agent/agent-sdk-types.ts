@@ -631,9 +631,16 @@ export interface AgentSessionConfig {
   internal?: boolean;
 }
 
+/** Runtime-only: confine this agent's provider process tree to its checkout with nono. */
+export interface AgentSandboxRequest {
+  agentId: string;
+  cwd: string;
+}
+
 export interface AgentLaunchContext {
   agentId?: string;
   env?: Record<string, string>;
+  sandbox?: AgentSandboxRequest;
   /**
    * Runtime-only internal Paseo tools. This must never be persisted into
    * AgentSessionConfig; providers may adapt it to their native tool surface.
@@ -749,6 +756,11 @@ export interface AgentClient {
   ): Promise<T>;
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
+  /**
+   * Present only on providers that honor `AgentLaunchContext.sandbox`. Rejects when
+   * the sandbox cannot be launched on this host (for example, nono is missing).
+   */
+  assertSandboxAvailable?(): Promise<void>;
   createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,

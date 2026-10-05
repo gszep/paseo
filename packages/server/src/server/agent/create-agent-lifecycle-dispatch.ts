@@ -78,11 +78,14 @@ export class CreateAgentLifecycleDispatch {
     cwd: string;
     baseRef: string;
     firstAgentContext: FirstAgentContext;
+    /** A sandboxed subagent needs a branch in its own ref directory. */
+    branch?: { slug: string; name: string };
   }): Promise<CreatePaseoWorktreeWorkflowResult> {
     return this.dependencies.createPaseoWorktreeWorkflow(
       {
         cwd: input.cwd,
         action: "branch-off",
+        ...(input.branch ? { worktreeSlug: input.branch.slug, branchName: input.branch.name } : {}),
         firstAgentContext: input.firstAgentContext,
         runSetup: false,
         paseoHome: this.dependencies.paseoHome,

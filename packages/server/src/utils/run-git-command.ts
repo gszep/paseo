@@ -14,6 +14,11 @@ import {
 } from "./git-command-trace.js";
 import { spawnProcess } from "./spawn.js";
 import {
+  sandboxedGitInvocation,
+  sandboxedGitWrapperFor,
+  type SandboxedGitWrapper,
+} from "./sandboxed-git.js";
+import {
   GitProcessScheduler,
   type GitProcessPriority,
   resolveGitProcessPolicy,
@@ -281,6 +286,22 @@ function executeGitCommand<Output>(
   decode: (output: Buffer) => Output,
   provenance?: string,
 ): Promise<GitCommandResult<Output>> {
+  const sandboxed = sandboxedGitWrapperFor(options.cwd);
+  if (sandboxed) {
+    return sandboxed.then((wrapper) =>
+      executeScheduledGitCommand(args, options, decode, provenance, wrapper),
+    );
+  }
+  return executeScheduledGitCommand(args, options, decode, provenance, null);
+}
+
+function executeScheduledGitCommand<Output>(
+  args: string[],
+  options: GitCommandOptions,
+  decode: (output: Buffer) => Output,
+  provenance: string | undefined,
+  sandbox: SandboxedGitWrapper | null,
+): Promise<GitCommandResult<Output>> {
   const metricsState = submitGitCommandMetric(args, options.cwd);
   const commandTrace = submitGitCommandTrace(args, options.cwd, {
     active: gitProcessScheduler.activeCount,
@@ -396,16 +417,16 @@ function executeGitCommand<Output>(
         // `core.quotepath=false` makes git emit raw UTF-8 paths instead of
         // octal-escaping non-ASCII bytes (e.g. `测试文件.txt` vs `"\346\265\213..."`).
         // `core.fsmonitor=false` prevents repository config from launching a command.
-        child = spawnProcess(
-          "git",
-          ["-c", "core.quotepath=false", "-c", "core.fsmonitor=false", ...args],
-          {
-            cwd: options.cwd,
-            envOverlay,
-            shell: false,
-            stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-          },
-        );
+        const gitArgs = ["-c", "core.quotepath=false", "-c", "core.fsmonitor=false", ...args];
+        const invocation = sandbox
+          ? sandboxedGitInvocation(sandbox, options.cwd, gitArgs)
+          : { command: "git", args: gitArgs };
+        child = spawnProcess(invocation.command, invocation.args, {
+          cwd: options.cwd,
+          envOverlay,
+          shell: false,
+          stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+        });
         spawnGitCommandTrace(commandTrace, child.pid);
       } catch (error) {
         rejectSpawnFailure(error);

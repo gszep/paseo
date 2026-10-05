@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import { realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,6 +10,9 @@ import { z } from "zod";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createAgentMcpServer } from "./mcp-server.js";
+import { SANDBOXED_AGENT_PASEO_TOOLS } from "./subagent-isolation.js";
+import { createPaseoToolCatalog } from "./tools/paseo-tools.js";
+import { SandboxUnavailableError } from "./sandbox/nono.js";
 import { AgentManager, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
@@ -53,6 +56,7 @@ import { areEquivalentPaths } from "../../utils/path.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import {
   ISOLATION_REASON_LABEL,
+  ISOLATION_SANDBOX_LABEL,
   ISOLATION_WORKTREE_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
@@ -235,6 +239,8 @@ function buildAgentManagerSpies() {
     getPendingPermissions: vi.fn(),
     getRegisteredProviderIds: vi.fn().mockReturnValue(["claude"]),
     listDraftFeatures: vi.fn(),
+    // Models a sandbox-capable provider; confinement itself is covered by the real e2e.
+    assertSandboxAvailable: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -1226,8 +1232,15 @@ describe("create_agent MCP tool", () => {
   const sharedCheckout = { isolation: { worktree: false, reason: sharedCheckoutReason } };
   const sharedCheckoutLabels = {
     [ISOLATION_WORKTREE_LABEL]: "opted-out",
+    [ISOLATION_SANDBOX_LABEL]: "nono",
     [ISOLATION_REASON_LABEL]: sharedCheckoutReason,
   };
+  const sharedCheckoutRecord = (decidedBy: string) => ({
+    worktree: "opted-out",
+    sandbox: "nono",
+    reason: sharedCheckoutReason,
+    decidedBy,
+  });
 
   it("requires a concise title no longer than 60 characters", async () => {
     const { agentManager, agentStorage } = createTestDeps();
@@ -3119,8 +3132,10 @@ describe("create_agent MCP tool", () => {
           [PARENT_AGENT_ID_LABEL]: "voice-agent",
           source: "voice",
           [ISOLATION_WORKTREE_LABEL]: "not-git",
+          [ISOLATION_SANDBOX_LABEL]: "nono",
         },
         workspaceId: "wks_voice",
+        isolation: { worktree: "not-git", sandbox: "nono", decidedBy: "voice-agent" },
       },
     );
     await rm(baseDir, { recursive: true, force: true });
@@ -3268,6 +3283,7 @@ describe("create_agent MCP tool", () => {
           ...sharedCheckoutLabels,
         },
         workspaceId: "wks_parent",
+        isolation: sharedCheckoutRecord("parent-agent"),
       },
     );
   });
@@ -3330,6 +3346,7 @@ describe("create_agent MCP tool", () => {
           ...sharedCheckoutLabels,
         },
         workspaceId: "wks_parent",
+        isolation: sharedCheckoutRecord("parent-agent"),
       },
     );
   });
@@ -5932,5 +5949,215 @@ describe("agent snapshot MCP serialization", () => {
     expect(content).not.toContain("[User] u2");
     expect(content).not.toContain("second answer");
     expect(content).not.toContain("first answer");
+  });
+});
+
+describe("agent-launched agent sandbox", () => {
+  const logger = createTestLogger();
+
+  function gitRepo(): { repo: string; head: string } {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "paseo-sandbox-repo-")));
+    const env = {
+      ...process.env,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_AUTHOR_NAME: "fixture",
+      GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+      GIT_COMMITTER_NAME: "fixture",
+      GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+    };
+    execFileSync("git", ["init", "-q", "-b", "main", repo], { env });
+    execFileSync("git", ["commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo, env });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo }).toString().trim();
+    return { repo, head };
+  }
+
+  function worktreeResult() {
+    return {
+      worktree: { branchName: "paseo-subagents/x/work", worktreePath: "/tmp/worktrees/child" },
+      intent: { kind: "branch-off" as const, branchName: "paseo-subagents/x/work" },
+      workspace: createPersistedWorkspaceRecord({
+        workspaceId: "wks-child",
+        projectId: "project-1",
+        cwd: "/tmp/worktrees/child",
+        kind: "worktree",
+        displayName: "child",
+        createdAt: "2026-10-05T00:00:00.000Z",
+        updatedAt: "2026-10-05T00:00:00.000Z",
+      }),
+      repoRoot: "/tmp/repo",
+      created: true,
+    };
+  }
+
+  function caller(spies: TestDeps["spies"], cwd: string, isolation?: Record<string, string>) {
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "parent-agent",
+      cwd,
+      workspaceId: "wks_parent",
+      provider: "opencode",
+      currentModeId: null,
+      config: {},
+      ...(isolation ? { isolation } : {}),
+    } as unknown as ManagedAgent);
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "child-agent",
+      cwd: "/tmp/worktrees/child",
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+  }
+
+  const childInput = {
+    title: "Child",
+    provider: "opencode/gpt-5.4",
+    settings: { modeId: "build" },
+    initialPrompt: "Do work",
+  };
+
+  async function server(deps: TestDeps, createPaseoWorktree: ReturnType<typeof vi.fn>) {
+    return createAgentMcpServer({
+      agentManager: deps.agentManager,
+      agentStorage: deps.agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      createPaseoWorktree: createPaseoWorktree as unknown as CreatePaseoWorktreeWorkflowFn,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+  }
+
+  it("checks nono before the worktree exists and gives the sandboxed subagent its own ref directory", async () => {
+    const deps = createTestDeps();
+    const { repo, head } = gitRepo();
+    caller(deps.spies, repo);
+    const createPaseoWorktree = vi.fn(async () => worktreeResult());
+    await registeredTool(await server(deps, createPaseoWorktree), "create_agent").handler(
+      childInput,
+    );
+
+    expect(deps.spies.agentManager.assertSandboxAvailable).toHaveBeenCalledWith("opencode");
+    expect(deps.spies.agentManager.assertSandboxAvailable.mock.invocationCallOrder[0]).toBeLessThan(
+      createPaseoWorktree.mock.invocationCallOrder[0]!,
+    );
+    const [input, options] = createPaseoWorktree.mock.calls[0] as unknown as [
+      CreatePaseoWorktreeInput,
+      { resolveDefaultBranch: (root: string) => Promise<string> },
+    ];
+    expect(input.worktreeSlug).toMatch(/^subagent-[0-9a-f]{8}$/);
+    expect(input.branchName).toBe(`paseo-subagents/${input.worktreeSlug}/work`);
+    await expect(options.resolveDefaultBranch(repo)).resolves.toBe("refs/heads/main");
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    expect(deps.spies.agentManager.createAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      undefined,
+      expect.objectContaining({
+        isolation: { worktree: "created", sandbox: "nono", decidedBy: "parent-agent" },
+        labels: expect.objectContaining({ [ISOLATION_SANDBOX_LABEL]: "nono" }),
+      }),
+    );
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("refuses before creating anything when the sandbox is unavailable", async () => {
+    const deps = createTestDeps();
+    const { repo } = gitRepo();
+    caller(deps.spies, repo);
+    deps.spies.agentManager.assertSandboxAvailable.mockRejectedValue(
+      new SandboxUnavailableError("nono is not installed on PATH"),
+    );
+    const createPaseoWorktree = vi.fn(async () => worktreeResult());
+    await expect(
+      registeredTool(await server(deps, createPaseoWorktree), "create_agent").handler(childInput),
+    ).rejects.toThrow(/nono is not installed/);
+    expect(createPaseoWorktree).not.toHaveBeenCalled();
+    expect(deps.spies.agentManager.createAgent).not.toHaveBeenCalled();
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("records a sandbox opt-out without checking nono, and keeps the worktree default", async () => {
+    const deps = createTestDeps();
+    const { repo } = gitRepo();
+    caller(deps.spies, repo);
+    const createPaseoWorktree = vi.fn(async () => worktreeResult());
+    await registeredTool(await server(deps, createPaseoWorktree), "create_agent").handler({
+      ...childInput,
+      isolation: { worktree: true, sandbox: false, reason: "needs the host docker socket" },
+    });
+    expect(deps.spies.agentManager.assertSandboxAvailable).not.toHaveBeenCalled();
+    expect(createPaseoWorktree).toHaveBeenCalledTimes(1);
+    expect(deps.spies.agentManager.createAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      undefined,
+      expect.objectContaining({
+        isolation: {
+          worktree: "created",
+          sandbox: "opted-out",
+          reason: "needs the host docker socket",
+          decidedBy: "parent-agent",
+        },
+        labels: expect.objectContaining({
+          [ISOLATION_SANDBOX_LABEL]: "opted-out",
+          [ISOLATION_REASON_LABEL]: "needs the host docker socket",
+        }),
+      }),
+    );
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("keeps a sandboxed caller's subagents sandboxed in its own worktree", async () => {
+    const deps = createTestDeps();
+    const { repo } = gitRepo();
+    caller(deps.spies, repo, { worktree: "created", sandbox: "nono", decidedBy: "root" });
+    const createPaseoWorktree = vi.fn(async () => worktreeResult());
+    const tool = registeredTool(await server(deps, createPaseoWorktree), "create_agent");
+    await expect(tool.handler(childInput)).rejects.toThrow(/share its worktree/);
+    await expect(
+      tool.handler({ ...childInput, isolation: { worktree: false, sandbox: false, reason: "x" } }),
+    ).rejects.toThrow(/cannot create an unsandboxed agent/);
+    await tool.handler({ ...childInput, isolation: { worktree: false, reason: "shared review" } });
+    expect(createPaseoWorktree).not.toHaveBeenCalled();
+    expect(deps.spies.agentManager.createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: repo }),
+      undefined,
+      expect.objectContaining({
+        isolation: {
+          worktree: "opted-out",
+          sandbox: "nono",
+          reason: "shared review",
+          decidedBy: "parent-agent",
+        },
+      }),
+    );
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("gives a sandboxed agent only reviewed tools, so daemon-side execution is absent", () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const catalog = createPaseoToolCatalog({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      terminalManager: createTerminalManagerStub(),
+      callerAgentId: "child-agent",
+      sandboxed: true,
+      logger,
+    });
+    const names = [...catalog.tools.keys()];
+    expect(names).toContain("create_agent");
+    for (const name of names) expect(SANDBOXED_AGENT_PASEO_TOOLS.has(name)).toBe(true);
+    const full = createPaseoToolCatalog({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      terminalManager: createTerminalManagerStub(),
+      callerAgentId: "child-agent",
+      logger,
+    });
+    expect([...full.tools.keys()]).toContain("create_terminal");
+    expect(catalog.getTool("create_terminal")).toBeUndefined();
+    return expect(catalog.executeTool("create_terminal", { cwd: "/" })).rejects.toThrow(
+      /Paseo tool not found: create_terminal/,
+    );
   });
 });

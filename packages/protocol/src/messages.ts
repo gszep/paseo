@@ -1703,10 +1703,13 @@ export const CreateAgentWorktreeTargetSchema = z.discriminatedUnion("mode", [
 
 export type CreateAgentWorktreeTarget = z.infer<typeof CreateAgentWorktreeTargetSchema>;
 
-// Agent-created agents get a fresh worktree by default. `worktree: false` shares
-// the source checkout instead; the daemon requires and records a reason.
+// Agent-created agents get a fresh worktree and a nono sandbox by default.
+// `worktree: false` shares the source checkout; `sandbox: false` runs unconfined.
+// Either opt-out requires a reason, which the daemon records. `sandbox` is
+// optional so older daemons, which never sandbox, still parse the request.
 export const CreateAgentIsolationSchema = z.object({
   worktree: z.boolean(),
+  sandbox: z.boolean().optional(),
   reason: z.string().optional(),
 });
 

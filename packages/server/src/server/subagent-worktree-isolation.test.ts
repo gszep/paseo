@@ -9,6 +9,7 @@ import pino from "pino";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import {
   ISOLATION_REASON_LABEL,
+  ISOLATION_SANDBOX_LABEL,
   ISOLATION_WORKTREE_LABEL,
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
@@ -230,7 +231,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
       expect(git(cwd, ["branch", "--show-current"])).not.toBe("feature/base");
       expect(child.record.labels[PARENT_AGENT_ID_LABEL]).toBe(parent.id);
       expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
-      expect(child.content.isolation).toEqual({ worktree: "created" });
+      expect(child.content.isolation).toEqual({ worktree: "created", sandbox: "nono" });
     }
     expect(git(firstCwd, ["branch", "--show-current"])).not.toBe(
       git(secondCwd, ["branch", "--show-current"]),
@@ -342,7 +343,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     expect(child.record.workspaceId).toBe(parent.workspaceId);
     expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("opted-out");
     expect(child.record.labels[ISOLATION_REASON_LABEL]).toBe(reason);
-    expect(child.content.isolation).toEqual({ worktree: "opted-out", reason });
+    expect(child.content.isolation).toEqual({ worktree: "opted-out", sandbox: "nono", reason });
     expect(worktreePaths(repoDir)).toEqual(worktreesBefore);
     expect(isolationLogEntries()).toEqual(
       expect.arrayContaining([
@@ -353,6 +354,40 @@ describe("agent-scoped create_agent worktree isolation", () => {
           reason,
         }),
       ]),
+    );
+
+    // The sandbox half: an opt-out keeps the default worktree and is recorded
+    // durably, on labels and in the log; the record is what resume enforces.
+    const unsandboxedReason = "needs the host docker socket";
+    const unsandboxed = await createSubagent(mcp, {
+      isolation: { worktree: true, sandbox: false, reason: unsandboxedReason },
+    });
+    expect(unsandboxed.record.isolation).toEqual({
+      worktree: "created",
+      sandbox: "opted-out",
+      reason: unsandboxedReason,
+      decidedBy: parent.id,
+    });
+    expect(unsandboxed.record.labels[ISOLATION_SANDBOX_LABEL]).toBe("opted-out");
+    expect(unsandboxed.record.labels[ISOLATION_REASON_LABEL]).toBe(unsandboxedReason);
+    expect(unsandboxed.content.isolation).toEqual({
+      worktree: "created",
+      sandbox: "opted-out",
+      reason: unsandboxedReason,
+    });
+    expect(isolationLogEntries()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          agentId: unsandboxed.record.id,
+          sandbox: "opted-out",
+          reason: unsandboxedReason,
+        }),
+      ]),
+    );
+    await expectToolError(
+      mcp,
+      { isolation: { worktree: true, sandbox: false } },
+      /sandbox false requires a non-empty reason/,
     );
   });
 
@@ -367,6 +402,7 @@ describe("agent-scoped create_agent worktree isolation", () => {
     expect(child.record.labels[ISOLATION_WORKTREE_LABEL]).toBe("not-git");
     expect(child.content.isolation).toEqual({
       worktree: "not-git",
+      sandbox: "nono",
       note: expect.stringContaining("not inside a git repository"),
     });
   });
@@ -472,6 +508,30 @@ describe("paseo run with PASEO_AGENT_ID (create_agent_request callerAgentId)", (
         expect.objectContaining({ agentId: shared.id, worktree: "opted-out", reason }),
       ]),
     );
+    // The durable record, not the labels, is what resume enforces.
+    expect((await daemon.daemon.agentStorage.get(first.id))?.isolation).toEqual({
+      worktree: "created",
+      sandbox: "nono",
+      decidedBy: parent.id,
+    });
+    expect((await daemon.daemon.agentStorage.get(shared.id))?.isolation).toEqual({
+      worktree: "opted-out",
+      sandbox: "nono",
+      reason,
+      decidedBy: parent.id,
+    });
+
+    const unsandboxedReason = "needs the host docker socket";
+    const unsandboxed = await createCliSubagent(parent.id, repoDir, {
+      isolation: { worktree: true, sandbox: false, reason: unsandboxedReason },
+    });
+    expect(unsandboxed.labels[ISOLATION_SANDBOX_LABEL]).toBe("opted-out");
+    expect((await daemon.daemon.agentStorage.get(unsandboxed.id))?.isolation).toEqual({
+      worktree: "created",
+      sandbox: "opted-out",
+      reason: unsandboxedReason,
+      decidedBy: parent.id,
+    });
   });
 
   test("a failed create removes the default worktree; a dedicated worktree workspace is reused", async () => {

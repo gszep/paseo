@@ -27,11 +27,14 @@ import {
 } from "../timeline-append.js";
 import { resolveCreateAgentIntent } from "./intent.js";
 import {
+  isolationRecord,
   logSubagentIsolation,
   withIsolationLabels,
   wrapSubagentWorktreeCreationError,
+  type SubagentSandboxDecision,
   type SubagentWorktreeDecision,
 } from "./isolation.js";
+import type { AgentIsolation } from "../subagent-isolation.js";
 
 export interface CreateAgentSessionWorktreeResult {
   sessionConfig: AgentSessionConfig;
@@ -74,6 +77,8 @@ export interface CreateAgentFromSessionInput {
   git?: GitSetupOptions;
   labels: Record<string, string>;
   env?: Record<string, string>;
+  // Agent-created agents only; the labels already mirror it.
+  isolation?: AgentIsolation;
   provisionalTitle: string | null;
   firstAgentContext: FirstAgentContext;
   buildSessionConfig: (
@@ -125,6 +130,7 @@ export interface CreateAgentFromMcpInput {
   };
   // Set for agent-created agents; `worktree` already carries the decision's placement.
   subagentIsolation?: SubagentWorktreeDecision;
+  subagentSandbox?: SubagentSandboxDecision;
 }
 
 export type CreateAgentCommandInput = CreateAgentFromSessionInput | CreateAgentFromMcpInput;
@@ -205,10 +211,11 @@ export async function createAgentCommand(
   let initialPromptStarted = false;
   let initialPromptError: unknown | null = null;
   if (input.kind === "mcp") {
-    if (input.subagentIsolation && input.callerAgentId) {
+    if (input.subagentIsolation && input.subagentSandbox && input.callerAgentId) {
       logSubagentIsolation({
         logger: dependencies.logger,
         decision: input.subagentIsolation,
+        sandbox: input.subagentSandbox,
         callerAgentId: input.callerAgentId,
         agentId: snapshot.id,
         workspaceId: snapshot.workspaceId,
@@ -304,6 +311,7 @@ async function resolveSessionCreateAgent(
       labels: input.labels,
       initialPrompt: trimmedPrompt,
       env: input.env,
+      ...(input.isolation ? { isolation: input.isolation } : {}),
       initialTitle: input.provisionalTitle,
       // A legacy git/worktreeName worktree creates a fresh workspace, so the
       // agent belongs to that workspace, not the source one. createdWorkspaceId
@@ -331,9 +339,7 @@ async function resolveMcpCreateAgent(
     ? requireParentAgent(dependencies.agentManager, input.callerAgentId)
     : null;
   const isolation = input.subagentIsolation;
-  if (parentAgent && !isolation) {
-    throw new Error("Agent-created agents require a worktree isolation decision");
-  }
+  const record = resolveMcpIsolationRecord(input, parentAgent !== null);
   const cwd = resolveMcpInitialCwd(input, parentAgent);
   let mcpCwd: Awaited<ReturnType<typeof resolveMcpCwd>>;
   try {
@@ -354,7 +360,7 @@ async function resolveMcpCreateAgent(
     caller: parentAgent
       ? { id: parentAgent.id, cwd: parentAgent.cwd, workspaceId: parentAgent.workspaceId }
       : null,
-    labels: isolation ? withIsolationLabels(input.labels, isolation) : input.labels,
+    labels: record ? withIsolationLabels(input.labels, record) : input.labels,
     childAgentDefaultLabels: input.callerContext?.childAgentDefaultLabels,
     legacyDetached: input.detached ?? false,
     resolveWorkspace: async (workspaceId) => ({ workspaceId, cwd: resolvedCwd }),
@@ -389,6 +395,7 @@ async function resolveMcpCreateAgent(
       workspaceId: intent.workspaceId,
       owner: input.owner,
       env: input.env,
+      ...(record ? { isolation: record } : {}),
     },
     prompt: trimmedPrompt ? trimmedPrompt : undefined,
     setupContinuation,
@@ -396,6 +403,26 @@ async function resolveMcpCreateAgent(
     background: input.background,
     promptFailure: input.promptFailure ?? "log",
   };
+}
+
+// Every agent-created agent carries both halves of the decision; nothing launches
+// a child of an agent without them.
+function resolveMcpIsolationRecord(
+  input: CreateAgentFromMcpInput,
+  hasParent: boolean,
+): AgentIsolation | undefined {
+  const { subagentIsolation, subagentSandbox, callerAgentId } = input;
+  if (subagentIsolation && subagentSandbox && callerAgentId) {
+    return isolationRecord({
+      worktree: subagentIsolation,
+      sandbox: subagentSandbox,
+      callerAgentId,
+    });
+  }
+  if (hasParent) {
+    throw new Error("Agent-created agents require a worktree and sandbox isolation decision");
+  }
+  return undefined;
 }
 
 function resolveMcpInitialCwd(

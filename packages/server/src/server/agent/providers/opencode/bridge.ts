@@ -24,7 +24,20 @@ interface OpenCodeBridgeOptions {
 interface OpenCodeSessionBinding {
   env: Record<string, string>;
   tools?: PaseoToolCatalog;
+  /** Paseo agent that owns the session; scoped bridge tokens reach only its sessions. */
+  agentId?: string;
 }
+
+export interface ScopedBridgeAccess {
+  upstream: string;
+  token: string;
+  revoke(): void;
+}
+
+/** Env names a sandboxed plugin reads; nono exports `<ROUTE>_BASE_URL` and the phantom token. */
+export const SANDBOX_BRIDGE_ROUTE = "paseo_bridge";
+export const SANDBOX_BRIDGE_TOKEN_ENV = "PASEO_BRIDGE_TOKEN";
+const SANDBOX_BRIDGE_BASE_URL_ENV = `${SANDBOX_BRIDGE_ROUTE.toUpperCase()}_BASE_URL`;
 
 interface BindOpenCodeSessionInput extends OpenCodeSessionBinding {
   sessionId: string;
@@ -44,6 +57,7 @@ export class OpenCodeBridge {
   private readonly paseoHome: string;
   private readonly logger: Logger;
   private readonly token = randomBytes(32).toString("hex");
+  private readonly scopedTokens = new Map<string, string>();
   private readonly sessions = new Map<string, OpenCodeSessionBinding>();
   private server: Server | null = null;
   private baseUrl: string | null = null;
@@ -87,6 +101,7 @@ export class OpenCodeBridge {
     const binding: OpenCodeSessionBinding = {
       env: { ...input.env },
       ...(input.tools ? { tools: input.tools } : {}),
+      ...(input.agentId ? { agentId: input.agentId } : {}),
     };
     this.sessions.set(input.sessionId, binding);
     return () => {
@@ -125,11 +140,36 @@ export class OpenCodeBridge {
     });
   }
 
+  /**
+   * A credential for one sandboxed agent's server. It never enters the sandbox:
+   * nono's reverse proxy injects it, and it reaches only that agent's sessions.
+   */
+  issueScopedAccess(agentId: string): ScopedBridgeAccess {
+    const token = randomBytes(32).toString("hex");
+    this.scopedTokens.set(token, agentId);
+    return {
+      upstream: this.requireBaseUrl(),
+      token,
+      revoke: () => {
+        this.scopedTokens.delete(token);
+      },
+    };
+  }
+
+  decorateSandboxedV2ServerEnv(env: Record<string, string>): Record<string, string> {
+    if (!this.v2PluginUrl) throw new Error("OpenCode v2 bridge plugin is not materialized");
+    return decorateOpenCodeV2Env(env, this.v2PluginUrl, {
+      baseUrlEnv: SANDBOX_BRIDGE_BASE_URL_ENV,
+      tokenEnv: SANDBOX_BRIDGE_TOKEN_ENV,
+    });
+  }
+
   async close(): Promise<void> {
     const server = this.server;
     this.server = null;
     this.baseUrl = null;
     this.sessions.clear();
+    this.scopedTokens.clear();
     if (server) await closeServer(server);
   }
 
@@ -144,7 +184,8 @@ export class OpenCodeBridge {
 
   private async route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
-      if (request.headers.authorization !== `Bearer ${this.token}`) {
+      const scope = this.authorize(request.headers.authorization);
+      if (scope === undefined) {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
       }
@@ -158,7 +199,7 @@ export class OpenCodeBridge {
         new RegExp(`^${INTERNAL_PREFIX}/sessions/([^/]+)/context$`),
       );
       if (request.method === "GET" && contextMatch) {
-        const binding = this.sessions.get(decodeURIComponent(contextMatch[1]));
+        const binding = this.scopedBinding(decodeURIComponent(contextMatch[1]), scope);
         if (!binding) {
           sendJson(response, 404, { error: "OpenCode session is not bound to a Paseo agent" });
           return;
@@ -179,6 +220,7 @@ export class OpenCodeBridge {
         await this.executeTool({
           sessionId: decodeURIComponent(toolMatch[1]),
           toolName: decodeURIComponent(toolMatch[2]),
+          scope,
           request,
           response,
         });
@@ -210,13 +252,29 @@ export class OpenCodeBridge {
     });
   }
 
+  /** null: the daemon-wide token (unsandboxed servers); a string: one agent's scope. */
+  private authorize(header: string | undefined): string | null | undefined {
+    if (header === `Bearer ${this.token}`) return null;
+    const prefix = "Bearer ";
+    if (!header?.startsWith(prefix)) return undefined;
+    return this.scopedTokens.get(header.slice(prefix.length));
+  }
+
+  private scopedBinding(sessionId: string, scope: string | null): OpenCodeSessionBinding | null {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return null;
+    if (scope !== null && binding.agentId !== scope) return null;
+    return binding;
+  }
+
   private async executeTool(input: {
     sessionId: string;
     toolName: string;
+    scope: string | null;
     request: IncomingMessage;
     response: ServerResponse;
   }): Promise<void> {
-    const binding = this.sessions.get(input.sessionId);
+    const binding = this.scopedBinding(input.sessionId, input.scope);
     if (!binding) {
       sendJson(input.response, 404, { error: "OpenCode session is not bound to a Paseo agent" });
       return;
@@ -270,6 +328,8 @@ export function decorateOpenCodeV2Env(
   pluginUrl: string,
   options: Record<string, string> = {},
 ): Record<string, string> {
+  if ("baseUrl" in options && "baseUrlEnv" in options)
+    throw new Error("OpenCode bridge options take a URL or an env name, not both");
   const config = parseOpenCodeConfig(env.OPENCODE_CONFIG_CONTENT);
   const plugins = config.plugins;
   if (plugins !== undefined && !Array.isArray(plugins))

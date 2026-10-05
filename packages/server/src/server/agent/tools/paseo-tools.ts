@@ -33,10 +33,13 @@ import {
 } from "../../workspace-archive-service.js";
 import { createAgentCommand, type CreateAgentFromMcpInput } from "../create-agent/create.js";
 import {
+  resolveSubagentSandboxDecision,
   resolveSubagentWorktreeDecision,
   summarizeIsolation,
+  type SubagentSandboxDecision,
   type SubagentWorktreeDecision,
 } from "../create-agent/isolation.js";
+import { newSubagentBranch, SANDBOXED_AGENT_PASEO_TOOLS } from "../subagent-isolation.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
@@ -144,6 +147,8 @@ export interface PaseoToolHostDependencies {
    * Used for cwd/mode inheritance when agents spawn child agents.
    */
   callerAgentId?: string;
+  /** The caller runs under nono; tools outside SANDBOXED_AGENT_PASEO_TOOLS are absent. */
+  sandboxed?: boolean;
   /**
    * Optional resolver for session-bound speak handlers.
    * Used by hidden voice agents to narrate through daemon-managed TTS.
@@ -602,6 +607,9 @@ function createToolCatalog(
     if (!isPaseoToolEnabled(options.paseoToolPolicy, name)) {
       return;
     }
+    if (options.sandboxed && !SANDBOXED_AGENT_PASEO_TOOLS.has(name)) {
+      return;
+    }
     tools.set(name, {
       name,
       title: config.title,
@@ -681,10 +689,13 @@ function createToolCatalog(
     return parentAgent;
   };
 
-  function toIsolationSummary(decision: SubagentWorktreeDecision | undefined): {
+  function toIsolationSummary(
+    decision: SubagentWorktreeDecision | undefined,
+    sandbox: SubagentSandboxDecision | undefined,
+  ): {
     isolation?: ReturnType<typeof summarizeIsolation>;
   } {
-    return decision ? { isolation: summarizeIsolation(decision) } : {};
+    return decision && sandbox ? { isolation: summarizeIsolation(decision, sandbox) } : {};
   }
 
   async function runCreateAgentCommand(input: CreateAgentFromMcpInput) {
@@ -1126,11 +1137,17 @@ function createToolCatalog(
         .describe(
           "false runs the subagent in the source checkout instead of its own new worktree.",
         ),
+      sandbox: z
+        .boolean()
+        .optional()
+        .describe(
+          "false runs the subagent without the nono sandbox. A sandboxed agent cannot set this.",
+        ),
       reason: z
         .string()
         .optional()
         .describe(
-          "Required when worktree is false: one line explaining why sharing the checkout is safe. Recorded on the agent labels and in the daemon log.",
+          "Required when worktree or sandbox is false: one line explaining why. Recorded on the agent and in the daemon log.",
         ),
     })
     .strict();
@@ -1146,7 +1163,7 @@ function createToolCatalog(
     isolation: subagentIsolationInputSchema
       .optional()
       .describe(
-        "Default: in a git repository the subagent gets its own new worktree workspace, branched from the source checkout's current branch (uncommitted changes are not copied). Opt out per subagent with { worktree: false, reason }.",
+        "Default: in a git repository the subagent gets its own new worktree workspace, branched from the source checkout's current branch (uncommitted changes are not copied), and runs inside the nono sandbox. Opt out per subagent with { worktree: false, reason } or { worktree: true, sandbox: false, reason }.",
       ),
     notifyOnFinish: z
       .boolean()
@@ -1556,6 +1573,7 @@ function createToolCatalog(
         isolation: z
           .object({
             worktree: z.enum(["created", "opted-out", "not-git"]),
+            sandbox: z.enum(["nono", "opted-out"]),
             reason: z.string().optional(),
             note: z.string().optional(),
           })
@@ -1567,7 +1585,9 @@ function createToolCatalog(
       const { parsedArgs, worktree } = resolvedArgs;
       const subagentIsolation =
         resolvedArgs.kind === "agent-scoped" ? resolvedArgs.subagentIsolation : undefined;
-      const isolationSummary = toIsolationSummary(subagentIsolation);
+      const subagentSandbox =
+        resolvedArgs.kind === "agent-scoped" ? resolvedArgs.subagentSandbox : undefined;
+      const isolationSummary = toIsolationSummary(subagentIsolation, subagentSandbox);
       let requestedBackground: boolean;
       let notifyOnFinish: boolean;
       if (resolvedArgs.kind === "agent-scoped") {
@@ -1602,6 +1622,7 @@ function createToolCatalog(
         callerContext,
         worktree,
         subagentIsolation,
+        subagentSandbox,
       });
 
       try {
@@ -1671,6 +1692,7 @@ function createToolCatalog(
         workspaceId: string | undefined;
         worktree: CreateAgentFromMcpInput["worktree"];
         subagentIsolation: SubagentWorktreeDecision;
+        subagentSandbox: SubagentSandboxDecision;
       }
     | {
         kind: "top-level";
@@ -1691,6 +1713,7 @@ function createToolCatalog(
           await resolveLegacySubagentPlacement(parsed.workspace),
           parsed.isolation,
           { prompt: parsed.initialPrompt },
+          parsed.provider,
         );
         return {
           kind: "agent-scoped",
@@ -1704,6 +1727,7 @@ function createToolCatalog(
         await resolveCanonicalSubagentPlacement(parsed.workspaceId),
         parsed.isolation,
         { prompt: parsed.initialPrompt },
+        parsed.provider,
       );
       return {
         kind: "agent-scoped",
@@ -1814,30 +1838,47 @@ function createToolCatalog(
     return { kind: "workspace", workspaceId: resolved.workspaceId, cwd: resolved.cwd };
   }
 
-  // Agent-created agents get their own worktree unless the caller opts out with a
-  // reason. The selected workspace is only the source checkout, never permission
-  // to share it.
+  // Agent-created agents get their own worktree and a nono sandbox unless the
+  // caller opts out with a reason. The selected workspace is only the source
+  // checkout, never permission to share it. Admission runs before any worktree.
   async function resolveSubagentPlacement(
     placement: SubagentPlacement,
     isolation: AgentToAgentCreateAgentArgs["isolation"],
     firstAgentContext: FirstAgentContext,
+    provider: string,
   ): Promise<{
     cwd: string | undefined;
     workspaceId: string | undefined;
     worktree: CreateAgentFromMcpInput["worktree"];
     subagentIsolation: SubagentWorktreeDecision;
+    subagentSandbox: SubagentSandboxDecision;
   }> {
     const subagentIsolation = await resolveSubagentWorktreeDecision({
       request: isolation,
       sourceCwd: resolveScopedCwd(placement.cwd),
       explicitWorktree: placement.kind === "worktree",
     });
+    const subagentSandbox = resolveSubagentSandboxDecision({
+      request: isolation,
+      callerIsolation: resolveCallerAgent()?.isolation,
+      worktree: subagentIsolation,
+    });
+    if (subagentSandbox.kind === "nono") {
+      await agentManager.assertSandboxAvailable(resolveRequiredProviderModel(provider).provider);
+    }
+    const decisions = { subagentIsolation, subagentSandbox };
     if (subagentIsolation.kind === "worktree") {
+      // nono grants a sandboxed subagent only its own ref directory.
+      const branch = subagentSandbox.kind === "nono" ? newSubagentBranch() : null;
       return {
         cwd: placement.cwd,
         workspaceId: undefined,
-        worktree: { action: "branch-off", baseBranch: subagentIsolation.baseRef },
-        subagentIsolation,
+        worktree: {
+          action: "branch-off",
+          baseBranch: subagentIsolation.baseRef,
+          ...(branch ? { worktreeName: branch.slug, branchName: branch.name } : {}),
+        },
+        ...decisions,
       };
     }
     switch (placement.kind) {
@@ -1846,7 +1887,7 @@ function createToolCatalog(
           cwd: placement.cwd,
           workspaceId: undefined,
           worktree: placement.worktree,
-          subagentIsolation,
+          ...decisions,
         };
       case "directory":
         if (!options.ensureWorkspaceForCreate) {
@@ -1856,14 +1897,14 @@ function createToolCatalog(
           cwd: placement.cwd,
           workspaceId: await options.ensureWorkspaceForCreate(placement.cwd, firstAgentContext),
           worktree: undefined,
-          subagentIsolation,
+          ...decisions,
         };
       case "workspace":
         return {
           cwd: placement.cwd,
           workspaceId: placement.workspaceId,
           worktree: undefined,
-          subagentIsolation,
+          ...decisions,
         };
     }
   }

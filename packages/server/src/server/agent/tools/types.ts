@@ -38,6 +38,8 @@ export interface PaseoToolCatalog {
 export interface PaseoToolRuntimeContext {
   callerAgentId?: string;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
+  /** The caller runs under nono; only SANDBOXED_AGENT_PASEO_TOOLS are registered. */
+  sandboxed?: boolean;
   enableVoiceTools?: boolean;
   voiceOnly?: boolean;
 }

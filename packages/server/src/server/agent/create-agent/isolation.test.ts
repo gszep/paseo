@@ -3,9 +3,20 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ISOLATION_REASON_LABEL, ISOLATION_WORKTREE_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  ISOLATION_REASON_LABEL,
+  ISOLATION_SANDBOX_LABEL,
+  ISOLATION_WORKTREE_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 
-import { resolveSubagentWorktreeDecision, withIsolationLabels } from "./isolation.js";
+import {
+  isolationRecord,
+  resolveSubagentSandboxDecision,
+  resolveSubagentWorktreeDecision,
+  summarizeIsolation,
+  withIsolationLabels,
+  type SubagentWorktreeDecision,
+} from "./isolation.js";
 
 const roots: string[] = [];
 
@@ -139,8 +150,120 @@ describe("withIsolationLabels", () => {
           "paseo.isolation.other": "forged",
           purpose: "review",
         },
-        { kind: "worktree", sourceCwd: "/repo", baseRef: "refs/heads/main" },
+        { worktree: "created", sandbox: "nono", decidedBy: "parent" },
       ),
-    ).toEqual({ purpose: "review", [ISOLATION_WORKTREE_LABEL]: "created" });
+    ).toEqual({
+      purpose: "review",
+      [ISOLATION_WORKTREE_LABEL]: "created",
+      [ISOLATION_SANDBOX_LABEL]: "nono",
+    });
+  });
+});
+
+describe("resolveSubagentSandboxDecision", () => {
+  const created: SubagentWorktreeDecision = {
+    kind: "worktree",
+    sourceCwd: "/repo",
+    baseRef: "refs/heads/main",
+  };
+  const shared: SubagentWorktreeDecision = { kind: "opted-out", sourceCwd: "/repo", reason: "r" };
+  const sandboxedCaller = {
+    worktree: "created" as const,
+    sandbox: "nono" as const,
+    decidedBy: "root",
+  };
+
+  it("sandboxes by default and records a sandbox-only opt-out with its reason", () => {
+    expect(
+      resolveSubagentSandboxDecision({
+        request: undefined,
+        callerIsolation: undefined,
+        worktree: created,
+      }),
+    ).toEqual({ kind: "nono" });
+    expect(
+      resolveSubagentSandboxDecision({
+        request: { worktree: true, sandbox: false, reason: " needs docker " },
+        callerIsolation: undefined,
+        worktree: created,
+      }),
+    ).toEqual({ kind: "opted-out", reason: "needs docker" });
+  });
+
+  it("never opts out of the sandbox silently", () => {
+    for (const request of [
+      { worktree: true, sandbox: false },
+      { worktree: true, sandbox: false, reason: "  " },
+      { worktree: true, sandbox: false, reason: "a\nb" },
+    ]) {
+      expect(() =>
+        resolveSubagentSandboxDecision({ request, callerIsolation: undefined, worktree: created }),
+      ).toThrow(/reason|single line/);
+    }
+  });
+
+  it("keeps a sandboxed caller's subagents sandboxed in its own checkout", () => {
+    expect(() =>
+      resolveSubagentSandboxDecision({
+        request: { worktree: false, sandbox: false, reason: "escape" },
+        callerIsolation: sandboxedCaller,
+        worktree: shared,
+      }),
+    ).toThrow(/cannot create an unsandboxed agent/);
+    expect(() =>
+      resolveSubagentSandboxDecision({
+        request: undefined,
+        callerIsolation: sandboxedCaller,
+        worktree: created,
+      }),
+    ).toThrow(/share its worktree/);
+    expect(
+      resolveSubagentSandboxDecision({
+        request: { worktree: false, reason: "r" },
+        callerIsolation: sandboxedCaller,
+        worktree: shared,
+      }),
+    ).toEqual({ kind: "nono" });
+  });
+});
+
+describe("isolationRecord and summary", () => {
+  it("records both dimensions with the one reason and who decided", () => {
+    const worktree: SubagentWorktreeDecision = {
+      kind: "opted-out",
+      sourceCwd: "/r",
+      reason: "why",
+    };
+    expect(isolationRecord({ worktree, sandbox: { kind: "nono" }, callerAgentId: "p" })).toEqual({
+      worktree: "opted-out",
+      sandbox: "nono",
+      reason: "why",
+      decidedBy: "p",
+    });
+    expect(
+      isolationRecord({
+        worktree: { kind: "requested", sourceCwd: "/r" },
+        sandbox: { kind: "opted-out", reason: "docker" },
+        callerAgentId: "p",
+      }),
+    ).toEqual({ worktree: "created", sandbox: "opted-out", reason: "docker", decidedBy: "p" });
+    expect(summarizeIsolation(worktree, { kind: "nono" })).toEqual({
+      worktree: "opted-out",
+      sandbox: "nono",
+      reason: "why",
+    });
+  });
+
+  it("labels mirror the record, including an unsandboxed opt-out", () => {
+    expect(
+      withIsolationLabels(
+        { [ISOLATION_SANDBOX_LABEL]: "nono" },
+        { worktree: "created", sandbox: "opted-out", reason: "docker", decidedBy: "p" },
+      ),
+    ).toEqual({
+      [ISOLATION_WORKTREE_LABEL]: "created",
+      [ISOLATION_SANDBOX_LABEL]: "opted-out",
+      [ISOLATION_REASON_LABEL]: "docker",
+    });
   });
 });
