@@ -1,4 +1,22 @@
-import { decorateOpenCodeV2Env, materializeOpenCodeV2Plugin } from "../bridge.js";
+import {
+  decorateOpenCodeV2Env,
+  materializeOpenCodeV2Plugin,
+  SANDBOX_BRIDGE_ROUTE,
+  SANDBOX_BRIDGE_TOKEN_ENV,
+  type OpenCodeBridge,
+} from "../bridge.js";
+import type { AgentSandboxRequest } from "../../../agent-sdk-types.js";
+import { findExecutable } from "../../../../../executable-resolution/executable-resolution.js";
+import {
+  gitHubRoutes,
+  localPluginDirs,
+  prepareSandboxLaunch,
+  protectCheckoutForSandboxedAgent,
+  reservePort,
+  resolveNono,
+  SandboxUnavailableError,
+  type ProxyCredentialRoute,
+} from "../../../sandbox/nono.js";
 import { resolvePaseoHome } from "../../../../paseo-home.js";
 import { OpenCode } from "@opencode/client";
 import type { V2Api } from "./api.js";
@@ -11,6 +29,7 @@ import {
   createProviderEnvSpec,
   resolveProviderLaunch,
   type ProviderRuntimeSettings,
+  type ResolvedProviderLaunch,
 } from "../../../provider-launch-config.js";
 import type { ManagedProcessRegistry } from "../../../../managed-processes/managed-processes.js";
 import { resolveOpenCodeHomeDir } from "../paths.js";
@@ -26,6 +45,8 @@ export interface V2Connection {
   release(): Promise<void>;
   retain(): V2Connection;
   readonly exited: Promise<Error>;
+  /** Agent whose nono-confined server this is; null for an unsandboxed server. */
+  readonly sandboxAgentId: string | null;
 }
 interface Generation {
   client: V2Api;
@@ -33,12 +54,31 @@ interface Generation {
   users: number;
   stop(): Promise<void>;
   exited: Promise<Error>;
+  sandboxAgentId: string | null;
 }
+export type SandboxBridge = Pick<
+  OpenCodeBridge,
+  "issueScopedAccess" | "decorateSandboxedV2ServerEnv"
+>;
 interface V2RuntimeOptions {
   logger: Logger;
   settings?: ProviderRuntimeSettings;
   managedProcesses?: ManagedProcessRegistry;
   decorateEnv?: (env: Record<string, string>) => Record<string, string>;
+  sandboxBridge?: SandboxBridge;
+  resolveNonoBinary?: () => Promise<string>;
+  /** Credentialed git upstreams reached through nono's proxy; defaults to GitHub. */
+  gitRoutes?: () => ProxyCredentialRoute[];
+}
+interface LaunchPlan {
+  command: string;
+  args: string[];
+  cwd: string;
+  /** Direct launches overlay the daemon env; sandboxed launches replace it. */
+  env:
+    | { kind: "overlay"; overlay: Record<string, string> }
+    | { kind: "replace"; env: Record<string, string> };
+  cleanup(): void;
 }
 
 // The runtime owns a credential for each subprocess; sessions only receive its authenticated client.
@@ -55,13 +95,16 @@ export class V2Runtime {
       fresh?: boolean;
       dedicated?: boolean;
       env?: Record<string, string>;
+      sandbox?: AgentSandboxRequest;
       signal?: AbortSignal;
     } = {},
   ): Promise<V2Connection> {
     if (this.closed) throw new Error("OpenCode runtime is closed");
     input.signal?.throwIfAborted();
     let pending: Promise<Generation>;
-    if (input.env || input.dedicated) {
+    if (input.sandbox) {
+      pending = this.startTracked(input.env, input.sandbox);
+    } else if (input.env || input.dedicated) {
       pending = this.startTracked(input.env);
     } else {
       if (input.fresh || !this.current) this.current = this.startTracked();
@@ -122,6 +165,7 @@ export class V2Runtime {
       release,
       retain: () => this.lease(generation, pending),
       exited: generation.exited,
+      sandboxAgentId: generation.sandboxAgentId,
     };
   }
 
@@ -133,8 +177,11 @@ export class V2Runtime {
     this.current = null;
   }
 
-  private startTracked(env?: Record<string, string>): Promise<Generation> {
-    const pending = this.start(env);
+  private startTracked(
+    env?: Record<string, string>,
+    sandbox?: AgentSandboxRequest,
+  ): Promise<Generation> {
+    const pending = this.start(env, sandbox);
     this.starts.add(pending);
     void pending.then(
       () => this.starts.delete(pending),
@@ -143,14 +190,15 @@ export class V2Runtime {
     return pending;
   }
 
-  private async start(env: Record<string, string> = {}): Promise<Generation> {
+  private async start(
+    env: Record<string, string> = {},
+    sandbox?: AgentSandboxRequest,
+  ): Promise<Generation> {
     const { settings, managedProcesses, logger } = this.options;
     const launch = await resolveProviderLaunch({
       commandConfig: settings?.command,
       defaultBinary: "opencode",
     });
-    const cwd = resolveOpenCodeHomeDir();
-    await mkdir(cwd, { recursive: true });
     const password = randomBytes(32).toString("base64url");
     const inheritedConfig = globalThis.process.env.OPENCODE_CONFIG_CONTENT;
     const configured = {
@@ -158,19 +206,24 @@ export class V2Runtime {
       ...settings?.env,
       ...env,
     };
-    const decorated = this.options.decorateEnv
-      ? this.options.decorateEnv(configured)
-      : decorateOpenCodeV2Env(configured, await materializeOpenCodeV2Plugin(resolvePaseoHome()));
-    const args = [...launch.args, "serve", "--hostname", "127.0.0.1", "--port", "0"];
-    const process = spawnProcess(launch.command, args, {
-      cwd,
+    const plan = sandbox
+      ? await this.planSandboxLaunch({ launch, configured, password, sandbox })
+      : await this.planDirectLaunch({ launch, configured, password });
+    const { command, args } = plan;
+    const process = spawnProcess(command, args, {
+      cwd: plan.cwd,
       detached: globalThis.process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
-      ...createProviderEnvSpec({
-        runtimeSettings: settings,
-        overlays: [{ ...decorated, OPENCODE_PASSWORD: password }],
-      }),
+      ...(plan.env.kind === "replace"
+        ? { baseEnv: plan.env.env, envOverlay: {} }
+        : createProviderEnvSpec({ runtimeSettings: settings, overlays: [plan.env.overlay] })),
     });
+    if (sandbox) {
+      logger.info(
+        { agentId: sandbox.agentId, cwd: sandbox.cwd, pid: process.pid },
+        "Sandboxed OpenCode server started under nono",
+      );
+    }
     const processAbort = new AbortController();
     const exited = new Promise<Error>((resolve) =>
       process.once("exit", (code) => {
@@ -186,7 +239,7 @@ export class V2Runtime {
             .record({
               owner: { provider: "opencode", kind: "helper-server" },
               pid: process.pid,
-              command: launch.command,
+              command,
               args,
             })
             .catch((error: unknown) => {
@@ -196,6 +249,7 @@ export class V2Runtime {
         : Promise.resolve(null);
     const stop = () => {
       stopped ??= (async () => {
+        plan.cleanup();
         await terminateWithTreeKill(process, { gracefulTimeoutMs: 5_000, forceTimeoutMs: 1_000 });
         const entry = await record;
         if (entry) await managedProcesses?.remove(entry.id);
@@ -223,14 +277,27 @@ export class V2Runtime {
           const match = buffer.match(/server listening on (http:\/\/127\.0\.0\.1:\d+)(?:\r?\n)/);
           if (match) finish(match[1]);
         };
+        // Drain stderr without retaining provider output that may contain credentials.
+        // A sandboxed launch keeps a bounded prefix: nono reports refusals there
+        // before OpenCode starts and before any provider traffic exists.
+        let startupStderr = "";
+        const onStderr = (chunk: Buffer) => {
+          if (sandbox) startupStderr = (startupStderr + chunk.toString()).slice(0, 2048);
+        };
         const onError = (error: Error) => finish(error);
         const onExit = (code: number | null) =>
-          finish(new Error(`OpenCode v2 server exited during startup (${code})`));
+          finish(
+            new Error(
+              `OpenCode v2 server exited during startup (${code})${
+                startupStderr.trim() ? `: ${startupStderr.trim()}` : ""
+              }`,
+            ),
+          );
         process.stdout?.on("data", onData);
         process.once("error", onError);
         process.once("exit", onExit);
-        // Drain stderr without retaining provider output that may contain credentials.
-        process.stderr?.on("data", () => undefined);
+        process.stderr?.on("data", onStderr);
+        void exited.then(() => process.stderr?.off("data", onStderr));
       });
       const client = OpenCode.make({
         baseUrl: url,
@@ -280,7 +347,14 @@ export class V2Runtime {
           >[0]),
         fork: (sessionId) => client.session.fork({ sessionID: sessionId }),
       };
-      const generation: Generation = { client, transfer, users: 0, stop, exited };
+      const generation: Generation = {
+        client,
+        transfer,
+        users: 0,
+        stop,
+        exited,
+        sandboxAgentId: sandbox?.agentId ?? null,
+      };
       this.generations.add(generation);
       process.once("exit", () => {
         this.generations.delete(generation);
@@ -291,6 +365,93 @@ export class V2Runtime {
       return generation;
     } catch (error) {
       await stop();
+      throw error;
+    }
+  }
+
+  private async planDirectLaunch(input: {
+    launch: ResolvedProviderLaunch;
+    configured: Record<string, string>;
+    password: string;
+  }): Promise<LaunchPlan> {
+    const cwd = resolveOpenCodeHomeDir();
+    await mkdir(cwd, { recursive: true });
+    const decorated = this.options.decorateEnv
+      ? this.options.decorateEnv(input.configured)
+      : decorateOpenCodeV2Env(
+          input.configured,
+          await materializeOpenCodeV2Plugin(resolvePaseoHome()),
+        );
+    return {
+      command: input.launch.command,
+      args: [...input.launch.args, "serve", "--hostname", "127.0.0.1", "--port", "0"],
+      cwd,
+      env: { kind: "overlay", overlay: { ...decorated, OPENCODE_PASSWORD: input.password } },
+      cleanup: () => undefined,
+    };
+  }
+
+  // The whole server process tree runs under nono: the agent's shells, tools and
+  // plugins inherit the confinement. Only the explicit environment crosses over.
+  private async planSandboxLaunch(input: {
+    launch: ResolvedProviderLaunch;
+    configured: Record<string, string>;
+    password: string;
+    sandbox: AgentSandboxRequest;
+  }): Promise<LaunchPlan> {
+    const nono = await (this.options.resolveNonoBinary ?? resolveNono)();
+    const executable = await findExecutable(input.launch.command);
+    if (!executable) {
+      throw new SandboxUnavailableError(
+        `OpenCode executable ${input.launch.command} was not found`,
+      );
+    }
+    const bridge = this.options.sandboxBridge;
+    const access = bridge?.issueScopedAccess(input.sandbox.agentId) ?? null;
+    try {
+      const decorated = bridge
+        ? bridge.decorateSandboxedV2ServerEnv(input.configured)
+        : decorateOpenCodeV2Env(
+            input.configured,
+            await materializeOpenCodeV2Plugin(resolvePaseoHome()),
+          );
+      const routes: ProxyCredentialRoute[] = [...(this.options.gitRoutes ?? gitHubRoutes)()];
+      if (access) {
+        routes.push({
+          name: SANDBOX_BRIDGE_ROUTE,
+          upstream: access.upstream,
+          envVar: SANDBOX_BRIDGE_TOKEN_ENV,
+          mode: "bearer",
+          secret: access.token,
+        });
+      }
+      const port = await reservePort();
+      protectCheckoutForSandboxedAgent(input.sandbox.cwd);
+      const prepared = await prepareSandboxLaunch({
+        nono,
+        agentId: input.sandbox.agentId,
+        cwd: input.sandbox.cwd,
+        paseoHome: resolvePaseoHome(),
+        executable,
+        args: [...input.launch.args, "serve", "--hostname", "127.0.0.1", "--port", String(port)],
+        port,
+        routes,
+        readPaths: localPluginDirs(decorated.OPENCODE_CONFIG_CONTENT),
+        childEnv: {
+          ...this.options.settings?.env,
+          ...decorated,
+          OPENCODE_PASSWORD: input.password,
+        },
+      });
+      return {
+        command: prepared.command,
+        args: prepared.args,
+        cwd: input.sandbox.cwd,
+        env: { kind: "replace", env: prepared.env },
+        cleanup: () => access?.revoke(),
+      };
+    } catch (error) {
+      access?.revoke();
       throw error;
     }
   }

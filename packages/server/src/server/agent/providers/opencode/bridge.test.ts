@@ -1,5 +1,7 @@
 import type { SessionMessageInfo } from "@opencode/client";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -9,6 +11,7 @@ import Ajv from "ajv";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
+import { isPlatform } from "../../../../test-utils/platform.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import { AgentManager } from "../../agent-manager.js";
 import { AgentStorage } from "../../agent-storage.js";
@@ -137,6 +140,8 @@ describe("OpenCodeBridge", () => {
         provider: "codex/gpt-5.4",
         initialPrompt: "Hello",
         notifyOnFinish: false,
+        // Codex cannot run under nono; agent-launched agents opt out explicitly.
+        isolation: { worktree: false, sandbox: false, reason: "bridge transport test" },
       };
       expect(ajv.compile(createDefinition.inputSchema)(createInput)).toBe(true);
 
@@ -188,6 +193,16 @@ describe("OpenCodeBridge", () => {
           content: [{ type: "text", text: expect.stringContaining(child.id) }],
         });
         expect(child.workspaceId).toBe("manifest-workspace");
+        expect(child.isolation).toEqual({
+          worktree: "opted-out",
+          sandbox: "opted-out",
+          reason: "bridge transport test",
+          decidedBy: parent.id,
+        });
+        expect(child.labels).toMatchObject({
+          "paseo.isolation.sandbox": "opted-out",
+          "paseo.isolation.reason": "bridge transport test",
+        });
         expect([...definitions.keys()]).toEqual([...catalog.tools.keys()]);
         for (const definition of manifest.tools) {
           const accepted = catalog.getTool(definition.name)!;
@@ -577,6 +592,206 @@ describe("OpenCodeBridge", () => {
       await bridge.close();
     }
   });
+
+  test("scopes a sandboxed server's credential to its own agent's sessions", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-scoped-"));
+    temporaryDirectories.push(paseoHome);
+    const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
+    await bridge.start();
+    try {
+      bridge.bindSession({
+        sessionId: "a-session",
+        env: {},
+        tools: createCatalog(),
+        agentId: "agent-a",
+      });
+      bridge.bindSession({
+        sessionId: "b-session",
+        env: {},
+        tools: createCatalog(),
+        agentId: "agent-b",
+      });
+      const daemonWide = readPluginOptions(bridge.decorateServerEnv({})).token;
+      const access = bridge.issueScopedAccess("agent-a");
+      const call = (token: string, session: string) =>
+        fetch(`${access.upstream}/_internal/opencode/sessions/${session}/tools/echo_context`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ value: "hi" }),
+        });
+      const context = (token: string, session: string) =>
+        fetch(`${access.upstream}/_internal/opencode/sessions/${session}/context`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+      expect((await call(access.token, "a-session")).status).toBe(200);
+      expect((await call(access.token, "b-session")).status).toBe(404);
+      expect((await context(access.token, "b-session")).status).toBe(404);
+      expect((await call(daemonWide, "b-session")).status).toBe(200);
+      access.revoke();
+      expect((await call(access.token, "a-session")).status).toBe(401);
+      expect((await call("guessed", "a-session")).status).toBe(401);
+    } finally {
+      await bridge.close();
+    }
+  });
+
+  test("v2 plugin reaches the bridge through a prefixed proxy that swaps a phantom token", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-sandbox-plugin-"));
+    temporaryDirectories.push(paseoHome);
+    const bridge = new OpenCodeBridge({ paseoHome, logger: createTestLogger() });
+    await bridge.start();
+    bridge.setManifestCatalog(createCatalog());
+    bridge.bindSession({
+      sessionId: "a-session",
+      env: {},
+      tools: createCatalog(),
+      agentId: "agent-a",
+    });
+    const access = bridge.issueScopedAccess("agent-a");
+    const phantom = "nono-phantom-token";
+    const seenByProxy: string[] = [];
+    // Stand-in for nono's reverse route: the child sees only the phantom token.
+    const proxy = createServer(async (request, response) => {
+      seenByProxy.push(`${request.method} ${request.url}`);
+      if (
+        request.headers.authorization !== `Bearer ${phantom}` ||
+        !request.url?.startsWith("/paseo_bridge/")
+      ) {
+        response.writeHead(401).end();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(chunk as Buffer);
+      const upstream = await fetch(
+        `${access.upstream}${request.url.slice("/paseo_bridge".length)}`,
+        {
+          method: request.method,
+          headers: { Authorization: `Bearer ${access.token}`, "Content-Type": "application/json" },
+          ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
+        },
+      );
+      response.writeHead(upstream.status, { "Content-Type": "application/json" });
+      response.end(Buffer.from(await upstream.arrayBuffer()));
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const address = proxy.address() as AddressInfo;
+    const previous = {
+      base: process.env.PASEO_BRIDGE_BASE_URL,
+      token: process.env.PASEO_BRIDGE_TOKEN,
+    };
+    process.env.PASEO_BRIDGE_BASE_URL = `http://127.0.0.1:${address.port}/paseo_bridge`;
+    process.env.PASEO_BRIDGE_TOKEN = phantom;
+    try {
+      const env = bridge.decorateSandboxedV2ServerEnv({});
+      const config = z
+        .object({
+          plugins: z.array(
+            z.object({ package: z.string(), options: z.record(z.string(), z.string()) }),
+          ),
+        })
+        .parse(JSON.parse(env.OPENCODE_CONFIG_CONTENT));
+      const plugin = config.plugins[0]!;
+      expect(plugin.options).toEqual({
+        baseUrlEnv: "PASEO_BRIDGE_BASE_URL",
+        tokenEnv: "PASEO_BRIDGE_TOKEN",
+      });
+      expect(JSON.stringify(config)).not.toContain(access.token);
+      const v2Module: {
+        default: { setup(context: V2TestPluginContext): Promise<() => Promise<void>> };
+      } = await import(pathToFileURL(path.join(fileURLToPath(plugin.package), "server.js")).href);
+      const tools = new Map<string, V2TestTool>();
+      const dispose = await v2Module.default.setup({
+        options: plugin.options,
+        tool: {
+          transform: async (transform) => {
+            transform({ add: (tool) => tools.set(tool.name, tool) });
+            return { dispose: async () => undefined };
+          },
+        },
+        session: {
+          context: async () => [],
+          get: async () => ({ parentID: "" }),
+          hook: async () => ({ dispose: async () => undefined }),
+        },
+      });
+      try {
+        const result = await tools
+          .get("paseo_echo_context")!
+          .execute({ value: "through the proxy" }, { sessionID: "a-session" });
+        expect(result).toMatchObject({ content: [{ type: "text", text: "through the proxy" }] });
+        expect(seenByProxy).toContain("GET /paseo_bridge/_internal/opencode/tools");
+        expect(seenByProxy).toContain(
+          "POST /paseo_bridge/_internal/opencode/sessions/a-session/tools/echo_context",
+        );
+      } finally {
+        await dispose();
+      }
+    } finally {
+      if (previous.base === undefined) delete process.env.PASEO_BRIDGE_BASE_URL;
+      else process.env.PASEO_BRIDGE_BASE_URL = previous.base;
+      if (previous.token === undefined) delete process.env.PASEO_BRIDGE_TOKEN;
+      else process.env.PASEO_BRIDGE_TOKEN = previous.token;
+      access.revoke();
+      proxy.close();
+      await bridge.close();
+    }
+  });
+
+  test("v2 plugin routes sandboxed git remotes through nono with the phantom credential", async () => {
+    const paseoHome = await mkdtemp(path.join(tmpdir(), "paseo-opencode-sandbox-git-"));
+    temporaryDirectories.push(paseoHome);
+    const configHome = path.join(paseoHome, "config");
+    const pluginUrl = await materializeOpenCodeV2Plugin(paseoHome);
+    const keys = [
+      "PASEO_SANDBOX_GIT_ROUTES",
+      "GITHUB_GIT_BASE_URL",
+      "PASEO_GITHUB_GIT_TOKEN",
+      "XDG_CONFIG_HOME",
+    ];
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.PASEO_SANDBOX_GIT_ROUTES = JSON.stringify([
+      {
+        baseUrlEnv: "GITHUB_GIT_BASE_URL",
+        tokenEnv: "PASEO_GITHUB_GIT_TOKEN",
+        rewrite: "https://github.com/",
+      },
+    ]);
+    process.env.GITHUB_GIT_BASE_URL = "http://127.0.0.1:4000/github_git";
+    process.env.PASEO_GITHUB_GIT_TOKEN = "phantom";
+    process.env.XDG_CONFIG_HOME = configHome;
+    try {
+      const v2Module: {
+        default: { setup(context: V2TestPluginContext): Promise<() => Promise<void>> };
+      } = await import(pathToFileURL(path.join(fileURLToPath(pluginUrl), "server.js")).href);
+      const dispose = await v2Module.default.setup({
+        options: {},
+        tool: { transform: async () => ({ dispose: async () => undefined }) },
+        session: {
+          context: async () => [],
+          get: async () => ({ parentID: "" }),
+          hook: async () => ({ dispose: async () => undefined }),
+        },
+      });
+      await dispose();
+      const gitConfig = path.join(configHome, "git", "config");
+      expect(await readFile(gitConfig, "utf8")).toBe(
+        [
+          '[url "http://127.0.0.1:4000/github_git/"]',
+          "\tinsteadOf = https://github.com/",
+          '[http "http://127.0.0.1:4000/github_git/"]',
+          `\textraHeader = Authorization: Basic ${Buffer.from("x-access-token:phantom").toString("base64")}`,
+          "",
+        ].join("\n"),
+      );
+      if (!isPlatform("win32")) expect((await stat(gitConfig)).mode & 0o777).toBe(0o600);
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+    }
+  });
 });
 
 interface V2TestTool {
@@ -590,7 +805,7 @@ interface V2TestContext {
   system?: Array<{ type: "text"; text: string }>;
 }
 interface V2TestPluginContext {
-  options: { baseUrl: string; token: string };
+  options: Record<string, string>;
   tool: {
     transform(
       callback: (editor: { add(tool: V2TestTool): void }) => void,

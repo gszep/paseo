@@ -116,15 +116,28 @@ export class V2Harness {
     },
     event: { subscribe: (options) => this.events(options?.signal) },
   };
-  readonly connection: V2Connection = {
-    client: this.api,
-    release: async () => {
-      this.releases += 1;
+  /** Every acquisition request, including the sandbox the launch asked for. */
+  readonly acquisitions: Array<{ sandbox?: { agentId: string; cwd: string } } | undefined> = [];
+  connectionFor(sandboxAgentId: string | null): V2Connection {
+    const connection: V2Connection = {
+      client: this.api,
+      release: async () => {
+        this.releases += 1;
+      },
+      retain: () => connection,
+      exited: new Promise<Error>(() => undefined),
+      sandboxAgentId,
+    };
+    return connection;
+  }
+  readonly connection: V2Connection = this.connectionFor(null);
+  readonly runtime = {
+    acquire: async (input?: { sandbox?: { agentId: string; cwd: string } }) => {
+      this.acquisitions.push(input);
+      return input?.sandbox ? this.connectionFor(input.sandbox.agentId) : this.connection;
     },
-    retain: () => this.connection,
-    exited: new Promise<Error>(() => undefined),
+    shutdown: async () => undefined,
   };
-  readonly runtime = { acquire: async () => this.connection, shutdown: async () => undefined };
 
   private async *events(signal?: AbortSignal): AsyncGenerator<OpenCodeEvent> {
     yield { id: "connected", created: 1, type: "server.connected", data: {} };

@@ -78,7 +78,8 @@ Workspaces decide where work happens; agent parentage decides who owns the work.
 
 - An agent that calls `create_agent` gets a subagent in its own new worktree workspace when the caller's checkout is in a git repository, and in the caller's workspace otherwise.
 - Passing a `workspaceId` picks which checkout that worktree branches from, without detaching the subagent from its parent.
-- `isolation: { worktree: false, reason }` shares the checkout instead; the reason is recorded on the agent.
+- The subagent also runs inside a nono sandbox, confined to its worktree with brokered credentials, when its provider supports it.
+- `isolation: { worktree: false, reason }` shares the checkout instead, and `isolation: { worktree: true, sandbox: false, reason }` runs without the sandbox; the reason is recorded on the agent.
 - A top-level MCP caller without a workspace gets a new local workspace.
 - Top-level callers create a workspace first when they need worktree isolation, a specific branch, or a pull request checkout.
 

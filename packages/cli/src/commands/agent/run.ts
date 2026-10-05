@@ -3,8 +3,12 @@ import {
   getStructuredAgentResponse,
   StructuredAgentResponseError,
 } from "@getpaseo/server/agent-response";
-import type { AgentSnapshotPayload, CreateAgentWorktreeTarget } from "@getpaseo/protocol/messages";
-import { ISOLATION_WORKTREE_LABEL } from "@getpaseo/protocol/agent-labels";
+import type {
+  AgentSnapshotPayload,
+  CreateAgentIsolation,
+  CreateAgentWorktreeTarget,
+} from "@getpaseo/protocol/messages";
+import { ISOLATION_SANDBOX_LABEL, ISOLATION_WORKTREE_LABEL } from "@getpaseo/protocol/agent-labels";
 import { connectToDaemon } from "../../utils/client.js";
 import type {
   CommandOptions,
@@ -62,6 +66,10 @@ export function addRunOptions(cmd: Command): Command {
       .option(
         "--share-checkout <reason>",
         "Agent-scoped runs only: share the source checkout instead of a new worktree (reason is recorded)",
+      )
+      .option(
+        "--unsandboxed <reason>",
+        "Agent-scoped runs only: run without the nono sandbox (reason is recorded)",
       )
       .option(
         "--image <path>",
@@ -134,6 +142,7 @@ export interface AgentRunOptions extends CommandOptions {
   forge?: string;
   workspace?: string;
   shareCheckout?: string;
+  unsandboxed?: string;
   image?: string[];
   cwd?: string;
   env?: string[];
@@ -394,7 +403,7 @@ function validateRunWorkspaceOptions(options: AgentRunOptions): void {
 export interface AgentScopedRunRequest {
   createLocalWorkspace: boolean;
   worktree?: CreateAgentWorktreeTarget;
-  isolation?: { worktree: false; reason: string };
+  isolation?: CreateAgentIsolation;
 }
 
 function invalidOptions(message: string, details?: string): CommandError {
@@ -409,19 +418,24 @@ export function resolveAgentScopedRunRequest(
   if (options.shareCheckout !== undefined && !shareCheckout) {
     throw invalidOptions("--share-checkout requires a reason");
   }
+  const unsandboxed = options.unsandboxed?.trim();
+  if (options.unsandboxed !== undefined && !unsandboxed) {
+    throw invalidOptions("--unsandboxed requires a reason");
+  }
   if (!callerAgentId) {
-    if (shareCheckout) {
+    if (shareCheckout || unsandboxed) {
       throw invalidOptions(
-        "--share-checkout only applies to agent-scoped runs",
-        "It is valid when PASEO_AGENT_ID is set; other runs never create a worktree by default",
+        `${shareCheckout ? "--share-checkout" : "--unsandboxed"} only applies to agent-scoped runs`,
+        "It is valid when PASEO_AGENT_ID is set; other runs never isolate by default",
       );
     }
     return null;
   }
-  const isolation = shareCheckout ? { worktree: false as const, reason: shareCheckout } : undefined;
+  const isolation = buildAgentScopedIsolation(shareCheckout, unsandboxed);
+  const sharesCheckout = isolation?.worktree === false;
   const newWorkspace = resolveNewWorkspaceKind(options);
   if (newWorkspace === "local") {
-    if (!isolation) {
+    if (!sharesCheckout) {
       throw invalidOptions(
         "Agent-scoped runs get their own worktree; --new-workspace local would share the checkout",
         "Pass --share-checkout <reason> to share it, or drop --new-workspace",
@@ -432,11 +446,29 @@ export function resolveAgentScopedRunRequest(
   if (newWorkspace !== "worktree") {
     return { createLocalWorkspace: false, ...(isolation ? { isolation } : {}) };
   }
-  if (isolation) {
+  if (sharesCheckout) {
     throw invalidOptions("--share-checkout cannot be combined with --new-workspace worktree");
   }
   const worktree = toAgentScopedWorktreeTarget(options);
-  return { createLocalWorkspace: false, ...(worktree ? { worktree } : {}) };
+  return {
+    createLocalWorkspace: false,
+    ...(worktree ? { worktree } : {}),
+    ...(isolation ? { isolation } : {}),
+  };
+}
+
+// One recorded reason covers every opt-out the run asks for.
+function buildAgentScopedIsolation(
+  shareCheckout: string | undefined,
+  unsandboxed: string | undefined,
+): CreateAgentIsolation | undefined {
+  if (!shareCheckout && !unsandboxed) return undefined;
+  const reasons = [...new Set([shareCheckout, unsandboxed].filter(Boolean))];
+  return {
+    worktree: !shareCheckout,
+    ...(unsandboxed ? { sandbox: false } : {}),
+    reason: reasons.join("; "),
+  };
 }
 
 function toAgentScopedWorktreeTarget(
@@ -482,7 +514,7 @@ function toAgentScopedWorktreeTarget(
 
 function toCreateAgentPlacement(agentScoped: AgentScopedRunRequest | null): {
   worktree?: CreateAgentWorktreeTarget;
-  isolation?: { worktree: false; reason: string };
+  isolation?: CreateAgentIsolation;
 } {
   if (!agentScoped) return {};
   return {
@@ -494,6 +526,9 @@ function toCreateAgentPlacement(agentScoped: AgentScopedRunRequest | null): {
 function reportSubagentIsolation(agent: AgentSnapshotPayload): void {
   const message = describeSubagentIsolation(agent);
   if (message) console.error(message);
+  if (agent.labels[ISOLATION_SANDBOX_LABEL] === "opted-out") {
+    console.error("Subagent runs without the nono sandbox");
+  }
 }
 
 function describeSubagentIsolation(agent: AgentSnapshotPayload): string | null {

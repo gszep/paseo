@@ -52,7 +52,7 @@ Accepting new work after an ambiguous interruption would create a split-brain se
 
 ## Relationships
 
-Agents can launch other agents via the agent-scoped `create_agent` MCP tool or `paseo run` with `PASEO_AGENT_ID`. Agent-scoped creation is always asynchronous and always stamps `paseo.parent-agent-id`, pointing back at the caller. Inside a git repository the child gets its own new worktree workspace unless the caller opts out with a recorded reason; `workspaceId` only selects the source checkout. See [subagent isolation](subagent-isolation.md). Placement never changes parentage.
+Agents can launch other agents via the agent-scoped `create_agent` MCP tool or `paseo run` with `PASEO_AGENT_ID`. Agent-scoped creation is always asynchronous and always stamps `paseo.parent-agent-id`, pointing back at the caller. Inside a git repository the child gets its own new worktree workspace, and it runs inside a nono sandbox, unless the caller opts out with a recorded reason; `workspaceId` only selects the source checkout. See [subagent isolation](subagent-isolation.md). Placement never changes parentage.
 
 - **Subagents** — exist as part of the creating agent's work, appear in that agent's subagent track, and are archived with it.
 - **Detached agents** — stand on their own after an explicit detach transition, do not appear in the former parent's subagent track, and are not archived with it.

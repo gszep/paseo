@@ -335,12 +335,19 @@ test("mcp create stamps the new worktree's workspaceId, not the parent's", async
         callerAgentId: parent.id,
         worktree: { worktreeName: "feature", baseBranch: "main" },
         subagentIsolation: { kind: "requested", sourceCwd: workdir },
+        subagentSandbox: { kind: "nono" },
       },
     );
 
     const storedChild = await storage.get(child.id);
     expect(storedChild?.workspaceId).toBe("ws-new-worktree");
     expect(storedChild?.labels[ISOLATION_WORKTREE_LABEL]).toBe("created");
+    // The durable record, not the labels, is what resume enforces.
+    expect(storedChild?.isolation).toEqual({
+      worktree: "created",
+      sandbox: "nono",
+      decidedBy: parent.id,
+    });
     expect(child.cwd).toBe(join(workdir, "worktree", "packages", "app"));
 
     // Every agent-created agent passes through the isolation decision; no caller can skip it.
@@ -357,7 +364,23 @@ test("mcp create stamps the new worktree's workspaceId, not the parent's", async
           callerAgentId: parent.id,
         },
       ),
-    ).rejects.toThrow("Agent-created agents require a worktree isolation decision");
+    ).rejects.toThrow("Agent-created agents require a worktree and sandbox isolation decision");
+    // A worktree decision without the sandbox decision cannot launch unconfined either.
+    await expect(
+      createAgentCommand(
+        { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+        {
+          kind: "mcp",
+          provider: "codex/gpt-5.4",
+          title: "half-decided child",
+          initialPrompt: "do the thing",
+          background: true,
+          notifyOnFinish: false,
+          callerAgentId: parent.id,
+          subagentIsolation: { kind: "not-git", sourceCwd: workdir },
+        },
+      ),
+    ).rejects.toThrow("Agent-created agents require a worktree and sandbox isolation decision");
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }

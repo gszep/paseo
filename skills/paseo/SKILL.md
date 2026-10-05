@@ -57,6 +57,8 @@ Initial runtime settings live under `settings`: `modeId`, `thinkingOptionId`, an
 
 Agent-scoped creation always creates your subagent. Inside a git repository each subagent gets its own new worktree workspace, branched from your checkout's current branch, so parallel subagents never share a working tree. Uncommitted changes are not copied: commit what the subagent needs first. `workspaceId` only picks which checkout to branch from. To share the checkout instead (for example a read-only review of your uncommitted diff), pass `isolation: { worktree: false, reason: "<one line>" }`; the reason is recorded. Outside git the subagent runs in the same directory and the response says so. Placement never changes parentage.
 
+Subagents also run inside a nono sandbox: confined to their worktree, no host credentials, git pushes through a credential proxy, and only `create_agent`, provider/model listing and `human_prompts` among Paseo tools. If a subagent genuinely needs the host (for example Docker), pass `isolation: { worktree: true, sandbox: false, reason: "<one line>" }`. If you are sandboxed yourself, your subagents must share your worktree (`worktree: false` with a reason) and stay sandboxed.
+
 Archiving a subagent keeps its worktree. Merge or push its branch, then archive its workspace with `archive_workspace` to remove the worktree.
 
 Detach is an explicit user action in the subagents track, not an agent tool. A cross-workspace child remains your subagent even though it also appears as a normal tab in its workspace.

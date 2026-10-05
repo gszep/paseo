@@ -186,6 +186,7 @@ describe("agent-scoped run placement", () => {
       [{ newWorkspace: "worktree", base: "main" }, /--base requires --new-branch/],
       [{ newWorkspace: "worktree", forge: "github" }, /--forge is not supported/],
       [{ newWorkspace: "worktree", worktreeSlug: "a", newBranch: "b" }, /cannot differ/],
+      [{ unsandboxed: "  " }, /--unsandboxed requires a reason/],
     ];
     for (const [options, message] of invalid) {
       expect(() => run(options, "parent")).toThrow(
@@ -195,5 +196,36 @@ describe("agent-scoped run placement", () => {
         }),
       );
     }
+  });
+
+  it("records a sandbox opt-out alone, with a worktree, or with a shared checkout", () => {
+    expect(run({ unsandboxed: " needs docker " }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      isolation: { worktree: true, sandbox: false, reason: "needs docker" },
+    });
+    expect(
+      run({ newWorkspace: "worktree", newBranch: "feat/x", unsandboxed: "docker" }, "parent"),
+    ).toEqual({
+      createLocalWorkspace: false,
+      worktree: { mode: "branch-off", newBranch: "feat/x" },
+      isolation: { worktree: true, sandbox: false, reason: "docker" },
+    });
+    expect(run({ shareCheckout: "pairing", unsandboxed: "docker" }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      isolation: { worktree: false, sandbox: false, reason: "pairing; docker" },
+    });
+    expect(run({ shareCheckout: "same", unsandboxed: "same" }, "parent")).toEqual({
+      createLocalWorkspace: false,
+      isolation: { worktree: false, sandbox: false, reason: "same" },
+    });
+  });
+
+  it("refuses a sandbox opt-out outside an agent", () => {
+    expect(() => run({ unsandboxed: "docker" })).toThrow(
+      expect.objectContaining({
+        code: "INVALID_OPTIONS",
+        message: expect.stringMatching(/--unsandboxed only applies to agent-scoped runs/),
+      }),
+    );
   });
 });

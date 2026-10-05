@@ -128,6 +128,7 @@ export async function ensureAgentLoaded(
         labels: record.labels,
         workspaceId: record.workspaceId,
         owner: record.owner,
+        isolation: record.isolation,
       });
       deps.logger.info({ agentId, provider: record.provider }, "Agent created from stored config");
     }

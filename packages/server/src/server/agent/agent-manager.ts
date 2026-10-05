@@ -60,6 +60,8 @@ import {
 import { buildArchivedAgentRecord, type ArchivedStoredAgentRecord } from "./agent-archive.js";
 import type { StoredAgentRecord, AgentStorage } from "./agent-storage.js";
 import type { AgentOwner } from "./agent-owner.js";
+import { isSandboxed, type AgentIsolation } from "./subagent-isolation.js";
+import { SandboxUnavailableError } from "./sandbox/nono.js";
 import {
   InMemoryAgentTimelineStore,
   type SeedAgentTimelineOptions,
@@ -295,6 +297,8 @@ export interface CreateAgentOptions {
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
+  /** Operator isolation policy for agent-launched agents; absent means unconfined. */
+  isolation?: AgentIsolation;
 }
 
 export interface AgentManagerOptions {
@@ -389,6 +393,7 @@ interface ManagedAgentBase {
    */
   workspaceId?: string;
   owner?: AgentOwner;
+  isolation?: AgentIsolation;
   capabilities: AgentCapabilityFlags;
   config: AgentSessionConfig;
   runtimeInfo?: AgentRuntimeInfo;
@@ -1498,6 +1503,7 @@ export class AgentManager {
       paseoToolPolicy,
       options?.env,
       { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+      options.isolation,
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
@@ -1508,6 +1514,7 @@ export class AgentManager {
       initialTitle: options.initialTitle,
       workspaceId: options.workspaceId,
       owner: options.owner,
+      isolation: options.isolation,
       historyPrimed: true,
     });
     if (!agent.internal) {
@@ -1516,6 +1523,17 @@ export class AgentManager {
       });
     }
     return agent;
+  }
+
+  /** Admission check before any side effect such as creating a worktree. */
+  async assertSandboxAvailable(provider: AgentProvider): Promise<void> {
+    const client = this.requireClient(provider);
+    if (!client.assertSandboxAvailable) {
+      throw new SandboxUnavailableError(
+        `Provider '${provider}' cannot run inside the nono sandbox`,
+      );
+    }
+    await client.assertSandboxAvailable();
   }
 
   private buildCreateSessionOptions(options?: {
@@ -1539,6 +1557,7 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      isolation?: AgentIsolation;
       attention?: AttentionState;
     },
     resumeOptions?: AgentResumeSessionOptions,
@@ -1571,6 +1590,7 @@ export class AgentManager {
       labels?: Record<string, string>;
       workspaceId?: string;
       owner?: AgentOwner;
+      isolation?: AgentIsolation;
       attention?: AttentionState;
     },
     resumeOptions?: AgentResumeSessionOptions,
@@ -1597,6 +1617,8 @@ export class AgentManager {
     const currentResumeOptions = record
       ? { purpose: record.archivedAt ? ("history" as const) : ("interactive" as const) }
       : resumeOptions;
+    // The durable record is authoritative: a caller cannot resume without its confinement.
+    const isolation = record ? record.isolation : options?.isolation;
     const client = this.requireClient(handle.provider);
     const available = await client.isAvailable();
     if (!available) {
@@ -1616,6 +1638,7 @@ export class AgentManager {
         purpose: currentResumeOptions?.purpose ?? "interactive",
         workspaceId: options?.workspaceId ?? null,
       },
+      isolation,
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const session = await client.resumeSession(
@@ -1627,6 +1650,7 @@ export class AgentManager {
     await this.requireExternalMcpSupport(session, storedConfig);
     return this.registerSession(session, storedConfig, resolvedAgentId, {
       ...options,
+      isolation,
       persistence: handle,
       restoring: true,
     });
@@ -1771,6 +1795,7 @@ export class AgentManager {
       paseoToolPolicy,
       undefined,
       { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      existing.isolation,
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
@@ -1814,6 +1839,7 @@ export class AgentManager {
         labels: existing.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
+        isolation: existing.isolation,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
         lastUserMessageAt: existing.lastUserMessageAt,
@@ -2116,6 +2142,7 @@ export class AgentManager {
         cwd: record.cwd,
         workspaceId: record.workspaceId,
         owner: record.owner,
+        isolation: record.isolation,
         session: null,
         capabilities: STORED_AGENT_CAPABILITIES,
         config: buildStoredAgentConfig(record),
@@ -3742,6 +3769,7 @@ export class AgentManager {
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      isolation?: AgentIsolation;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -3898,6 +3926,7 @@ export class AgentManager {
           persistence?: AgentPersistenceHandle;
           workspaceId?: string;
           owner?: AgentOwner;
+          isolation?: AgentIsolation;
         }
       | undefined;
   }): ActiveManagedAgent {
@@ -3908,6 +3937,7 @@ export class AgentManager {
       cwd: config.cwd,
       workspaceId: options?.workspaceId,
       owner: options?.owner,
+      isolation: options?.isolation,
       session,
       capabilities: session.capabilities,
       config,
@@ -5458,7 +5488,17 @@ export class AgentManager {
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
     },
+    isolation?: AgentIsolation,
   ): Promise<AgentLaunchContext> {
+    const sandboxed = isSandboxed(isolation);
+    if (sandboxed) {
+      if (!client.assertSandboxAvailable) {
+        throw new SandboxUnavailableError(
+          `Provider '${client.provider}' cannot run inside the nono sandbox`,
+        );
+      }
+      await client.assertSandboxAvailable();
+    }
     if (this.pluginLifecycle) {
       const request: PluginSessionOpenRequest = {
         agentId,
@@ -5479,6 +5519,7 @@ export class AgentManager {
         PASEO_AGENT_ID: agentId,
         PASEO_AGENT_CWD: cwd,
       },
+      ...(sandboxed ? { sandbox: { agentId, cwd } } : {}),
     };
     if (
       this.paseoToolsEnabled &&
@@ -5489,6 +5530,7 @@ export class AgentManager {
       context.paseoTools = await this.paseoToolCatalogFactory({
         callerAgentId: agentId,
         paseoToolPolicy,
+        sandboxed,
       });
     }
     return context;

@@ -1,13 +1,51 @@
 import { registerStructuredOutput, STRUCTURED_OUTPUT_TOOL } from "./structured-output-plugin.mjs";
 
+// Git remotes inside a sandbox are rewritten to nono's credential proxy routes.
+// nono validates the phantom token as the Basic password and injects the real
+// credential upstream; its 401 carries no challenge, so git must send it first.
+// The sandbox's private global git config carries this for every process the
+// server spawns; the phantom token is only valid through nono's proxy.
+function configureSandboxGit() {
+  const description = process.env.PASEO_SANDBOX_GIT_ROUTES;
+  const configHome = process.env.XDG_CONFIG_HOME;
+  if (!description || !configHome) return;
+  const lines = [];
+  for (const route of JSON.parse(description)) {
+    const base = process.env[route.baseUrlEnv];
+    const phantom = process.env[route.tokenEnv];
+    if (!base || !phantom) continue;
+    const root = gitConfigString(`${base.replace(/\/+$/, "")}/`);
+    const basic = Buffer.from(`x-access-token:${phantom}`).toString("base64");
+    lines.push(`[url "${root}"]`, `\tinsteadOf = ${route.rewrite}`);
+    lines.push(`[http "${root}"]`, `\textraHeader = Authorization: Basic ${basic}`);
+  }
+  if (lines.length === 0) return;
+  const fs = process.getBuiltinModule("node:fs");
+  const path = process.getBuiltinModule("node:path");
+  const directory = path.join(configHome, "git");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, "config"), `${lines.join("\n")}\n`, { mode: 0o600 });
+}
+
+function gitConfigString(value) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 export default {
   id: "paseo",
   async setup(context) {
     const disposeStructuredOutput = await registerStructuredOutput(context);
-    const { baseUrl, token } = context.options;
+    configureSandboxGit();
+    // A sandboxed server reaches the bridge through nono's reverse proxy: the
+    // options name env vars holding the route URL and a phantom token.
+    const options = context.options;
+    const baseUrl =
+      options.baseUrl ?? (options.baseUrlEnv ? process.env[options.baseUrlEnv] : undefined);
+    const token = options.token ?? (options.tokenEnv ? process.env[options.tokenEnv] : undefined);
     if (!baseUrl || !token) return disposeStructuredOutput;
+    const bridgeRoot = baseUrl.replace(/\/+$/, "");
     async function request(pathname, body, allowMissing = false) {
-      const response = await fetch(new URL(`/_internal/opencode${pathname}`, baseUrl), {
+      const response = await fetch(`${bridgeRoot}/_internal/opencode${pathname}`, {
         method: body === undefined ? "GET" : "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),

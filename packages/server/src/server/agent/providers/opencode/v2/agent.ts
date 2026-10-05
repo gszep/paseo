@@ -33,6 +33,7 @@ import type { ProviderRuntimeSettings } from "../../../provider-launch-config.js
 import type { ManagedProcessRegistry } from "../../../../managed-processes/managed-processes.js";
 
 import { importSessionFromPersistence } from "../../../provider-session-import.js";
+import { resolveNono } from "../../../sandbox/nono.js";
 
 import type { OpenCodeBridge } from "../bridge.js";
 import { resolveOpenCodeHomeDir } from "../paths.js";
@@ -48,6 +49,11 @@ interface V2AgentOptions {
   runtime?: Pick<V2Runtime, "acquire" | "shutdown">;
 }
 
+function acquisitionFor(config: AgentSessionConfig, launch: AgentLaunchContext | undefined) {
+  if (launch?.sandbox) return { env: launch.env, sandbox: launch.sandbox };
+  return requiresDedicatedV2Server(config, launch) ? { env: launch?.env, dedicated: true } : {};
+}
+
 export class OpenCodeV2AgentClient implements AgentClient {
   readonly provider = "opencode";
   readonly capabilities: AgentCapabilityFlags;
@@ -60,10 +66,14 @@ export class OpenCodeV2AgentClient implements AgentClient {
       new V2Runtime({
         ...options,
         decorateEnv: options.bridge ? (env) => options.bridge!.decorateV2ServerEnv(env) : undefined,
+        sandboxBridge: options.bridge,
       });
   }
   async isAvailable() {
     return true;
+  }
+  async assertSandboxAvailable() {
+    await resolveNono();
   }
   async withNativeRuntime<T>(
     sessionId: string | null,
@@ -115,9 +125,7 @@ export class OpenCodeV2AgentClient implements AgentClient {
     launch?: AgentLaunchContext,
     options?: AgentCreateSessionOptions,
   ): Promise<AgentSession> {
-    const connection = await this.runtime.acquire(
-      requiresDedicatedV2Server(config, launch) ? { env: launch?.env, dedicated: true } : {},
-    );
+    const connection = await this.runtime.acquire(acquisitionFor(config, launch));
     try {
       const info = await connection.client.session.create({
         location: { directory: config.cwd },
@@ -146,11 +154,12 @@ export class OpenCodeV2AgentClient implements AgentClient {
       provider: "opencode",
       cwd,
     };
+    // A live connection is reused only when it has the confinement this launch requires.
+    const attached = this.connections.get(handle.nativeHandle ?? handle.sessionId);
     const connection =
-      this.connections.get(handle.nativeHandle ?? handle.sessionId)?.retain() ??
-      (await this.runtime.acquire(
-        requiresDedicatedV2Server(config, launch) ? { env: launch?.env, dedicated: true } : {},
-      ));
+      attached && attached.sandboxAgentId === (launch?.sandbox?.agentId ?? null)
+        ? attached.retain()
+        : await this.runtime.acquire(acquisitionFor(config, launch));
     try {
       const info = await connection.client.session.get({
         sessionID: handle.nativeHandle ?? handle.sessionId,
@@ -173,6 +182,7 @@ export class OpenCodeV2AgentClient implements AgentClient {
       sessionId: info.id,
       env: launch?.env ?? {},
       tools: launch?.paseoTools,
+      agentId: launch?.agentId,
     });
     const bound = new Map<string, () => void>();
     const bindChild = (childId: string) => {
@@ -182,6 +192,7 @@ export class OpenCodeV2AgentClient implements AgentClient {
         sessionId: childId,
         env: launch?.env ?? {},
         tools: launch?.paseoTools,
+        agentId: launch?.agentId,
       });
       if (childUnbind) bound.set(childId, childUnbind);
     };
