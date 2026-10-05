@@ -47,7 +47,7 @@ import {
   type ResolvedChiDestination,
 } from "./destinations.js";
 import { removeProvenance, type ProvenanceRemover, type ProvenanceWriter } from "./provenance.js";
-import { captureAppend, type AppendCaptureInput } from "./append-capture.js";
+import { captureAppend, supportsAppendCapture, type AppendCaptureInput } from "./append-capture.js";
 import { parsePin, type Pin } from "@henkaku-center/chi-native/append-codec";
 import { AppendHttpError } from "@henkaku-center/chi-native/append-client";
 
@@ -151,6 +151,7 @@ const TERMINAL_SYNC_ERRORS = new Set<string>([
   "chi-native-runtime-unsupported",
   "chi-native-fork-unsupported",
   "chi-native-workspace-mismatch",
+  "chi-native-platform-unsupported",
   "append-http-404",
 ]);
 function isTerminalSyncError(error: string | null | undefined): boolean {
@@ -968,6 +969,7 @@ export class ChiConnection {
   }
 
   private async verifiedSession(authority: ChiAuthority) {
+    if (!supportsAppendCapture()) throw new Error("chi-native-platform-unsupported");
     const session = await authority.login();
     const response = await authority.request(
       append(endpointUrl(authority.endpoint), "auth/session"),

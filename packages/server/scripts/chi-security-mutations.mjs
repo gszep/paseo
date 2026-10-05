@@ -7,7 +7,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const connection = "src/server/chi/connection.ts";
 const capture = "src/server/chi/append-capture.ts";
 const mentions = "src/server/chi/mentions.ts";
-const cases = [
+const posixCases = [
   [
     "native workspace binding",
     capture,
@@ -97,6 +97,15 @@ const cases = [
     "cross-deployment pin",
   ],
 ];
+const platformCase = [
+  "platform capability",
+  capture,
+  'return platform !== "win32";',
+  "return true;",
+  "connection",
+  "platform",
+];
+const cases = process.platform === "win32" ? [platformCase] : [platformCase, ...posixCases];
 function run(file, pattern) {
   return spawnSync(
     process.execPath,

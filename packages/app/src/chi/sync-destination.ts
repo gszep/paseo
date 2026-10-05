@@ -80,6 +80,7 @@ export function isTerminalSyncError(code: string | null | undefined): boolean {
     code === "chi-native-reset-required" ||
     code === "chi-native-fork-unsupported" ||
     code === "chi-native-workspace-mismatch" ||
+    code === "chi-native-platform-unsupported" ||
     code === "chi-native-runtime-unsupported" ||
     code === "append-http-404" ||
     code === "evidence-http-422-server-secret-scan-rejected"

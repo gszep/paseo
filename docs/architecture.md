@@ -44,6 +44,9 @@ The app gates once on `server_info.features.chiAppendV3`. Older capability field
 remain parseable but are false. The daemon requires both authenticated backend
 capabilities: `appendLog:{v:3,deployment}` and `handoffs:{v:3,references:"pin-seq"}`.
 Missing or unknown capabilities stop before native export or evidence writes.
+This MVP requires private POSIX ownership/modes and directory fsync. Windows
+advertises no v3 writer and refuses it before acquiring credentials; receipt
+durability is never downgraded to enable the feature.
 Requests stay on the configured endpoint and repository. Credentials remain in
 memory and redirects are errors. No snapshot-format writer or recovery fallback.
 

@@ -58,6 +58,12 @@ export interface AppendCaptureResult {
   warning: string | null;
 }
 
+/** The durable helper requires private POSIX ownership/mode and directory
+ * fsync. Windows must not advertise a writer with weaker receipt guarantees. */
+export function supportsAppendCapture(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -91,6 +97,7 @@ async function captureExport(
  * projected/scanned; the immutable ledger compares the older native prefix.
  * A saved request always finishes before another batch is constructed. */
 export async function captureAppend(input: AppendCaptureInput): Promise<AppendCaptureResult> {
+  if (!supportsAppendCapture()) throw new Error("chi-native-platform-unsupported");
   input = { ...input };
   const native = await captureExport(input);
   const scope: AppendScope = {

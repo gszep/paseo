@@ -55,7 +55,7 @@ vi.mock("@/stores/session-store", () => ({
 }));
 function sessionState() {
   const session = {
-    serverInfo: { features: { chiMentions: true, chiNative: true } },
+    serverInfo: { features: { chiAppendV3: true } },
     agents: new Map([
       [
         "agent",

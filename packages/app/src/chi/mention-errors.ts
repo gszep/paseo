@@ -16,7 +16,10 @@ export function mentionError(error: unknown): string {
     "append-local-state-invalid": CAPTURE_RECOVERY_INVALID_MESSAGE,
     "capture-native-projection-invalid":
       "Chi rejected this batch's projection. Sync stopped. Update this host or keep the session local.",
-    "chi-native-v3-required": "Update this host and its Chi backend to use v3 sync and mentions.",
+    "chi-native-v3-required":
+      "V3 sync and mentions require a compatible host and backend. This release supports POSIX hosts.",
+    "chi-native-platform-unsupported":
+      "V3 sync requires private, durable POSIX receipts. It is not available on Windows in this release.",
     "chi-native-reset-required":
       "This session still has snapshot-format sync state. Keep it paused until the operator completes the v3 cutover.",
     "chi-native-fork-unsupported":

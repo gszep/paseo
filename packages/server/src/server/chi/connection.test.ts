@@ -11,6 +11,7 @@ import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, safeChiError, type ChiAuthority } from "./connection.js";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
+import { supportsAppendCapture } from "./append-capture.js";
 import type { MentionIdentity } from "./mentions.js";
 
 const homes: string[] = [];
@@ -374,324 +375,355 @@ describe("host Chi session cache", () => {
   });
 });
 
-describe("v3 sync and mention admission", () => {
-  async function mapped() {
+it("v3 platform capability requires POSIX receipt guarantees", () => {
+  expect(supportsAppendCapture("win32")).toBe(false);
+  expect(supportsAppendCapture("darwin")).toBe(true);
+  expect(supportsAppendCapture("linux")).toBe(true);
+});
+
+it.runIf(process.platform === "win32")(
+  "unsupported platform stops before credential or native access",
+  async () => {
     const f = await fixture();
     const agent = await f.registration.register("ses_fork", {});
-    return { ...f, agent, connection: f.restart() };
-  }
-  it.each([
-    undefined,
-    {},
-    { appendLog: { v: 3, deployment: "fixture" } },
-    { appendLog: { v: 2, deployment: "fixture" }, handoffs: { v: 3, references: "pin-seq" } },
-    { appendLog: { v: 3, deployment: "fixture" }, handoffs: { v: 3, references: "snapshot" } },
-  ])("refuses absent/unknown v3 capabilities before export or upload: %j", async (capabilities) => {
-    const f = await mapped();
-    f.backend.capabilities = capabilities;
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-native-v3-required");
-    expect(f.runtime.export).not.toHaveBeenCalled();
-    expect(f.backend.entries).toEqual([]);
-  });
-  it("maps one source, confirms a v3 pin, then appends only new settled entries", async () => {
-    const f = await mapped();
-    const first = await f.connection.capture(f.agent.id);
-    expect(first.pin?.count).toBe(1);
-    expect(first.capturePending).toBe(false);
-    expect(first.actor).toBe("github:owner");
-    f.transfer.messages.push({ ...f.transfer.messages[0]!, id: "msg_next", text: "next" });
-    const second = await f.connection.capture(f.agent.id);
-    expect(second.pin?.count).toBe(2);
-    expect(second.sourceId).toBe(first.sourceId);
-    expect(f.backend.entries).toHaveLength(2);
-    expect(f.runtime.import).not.toHaveBeenCalled();
-    expect(f.runtime.fork).not.toHaveBeenCalled();
-  });
-  it("keeps an unmapped workspace local before credentials or native export", async () => {
-    const f = await mapped();
     const login = vi.spyOn(f.authority, "login");
-    const connection = new ChiConnection(f.manager, {
-      home: f.home,
-      serverId: "server",
-      authority: f.authority,
-      getChiConfig: () => ({ ...fixtureConfig(), mappings: [] }),
-    });
-    await expect(connection.capture(f.agent.id)).rejects.toThrow("chi-share-required");
+    await expect(f.restart().capture(agent.id)).rejects.toThrow("chi-native-platform-unsupported");
     expect(login).not.toHaveBeenCalled();
-    expect(f.runtime.export).not.toHaveBeenCalled();
-  });
-  it("a misbound native checkout cannot upload through another repository's mapping", async () => {
-    const f = await mapped();
-    const other = await mkdtemp(join(tmpdir(), "chi-other-checkout-"));
-    homes.push(other);
-    f.transfer.info.location.directory = other;
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-native-workspace-mismatch");
-    expect(f.backend.entries).toEqual([]);
-    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
-  });
-  it("refuses old snapshot associations without manufacturing a pin or recreating their source", async () => {
-    const f = await mapped();
-    await f.manager.updateAgentLabel(f.agent.id, "chi.native", () =>
-      JSON.stringify({
-        repo: f.input.repo,
-        actor: "github:owner",
-        sourceId: "a".repeat(64),
-        head: "b".repeat(64),
-        error: null,
-        destination: "fixture",
-        endpoint: LEGACY_ENDPOINT,
-        audience: "shared",
-      }),
-    );
-    const login = vi.spyOn(f.authority, "login");
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-native-reset-required");
-    expect(login).not.toHaveBeenCalled();
-    expect(f.runtime.export).not.toHaveBeenCalled();
-    expect(f.backend.entries).toEqual([]);
-  });
-  it("refuses deferred transfer operations before authorization or runtime mutation", async () => {
-    const f = await fixture();
-    await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
-      "chi-operation-unsupported",
-    );
-    await expect(
-      f.restart().prepare("agent", "transfer", {
-        instanceId: "other",
-        workspace: { hostId: "other", path: "/fixture" },
-      }),
-    ).rejects.toThrow("chi-operation-unsupported");
-    await expect(f.restart().reconcile("agent", true)).rejects.toThrow("chi-operation-unsupported");
     expect(f.request).not.toHaveBeenCalled();
-    expect(f.runtime.import).not.toHaveBeenCalled();
-    expect(f.runtime.fork).not.toHaveBeenCalled();
-  });
-  it("retains old receipt quarantine even though Continue is unavailable", async () => {
-    const f = await fixture();
-    const canonical = { conversationId: "conversation", transferId: "transfer" };
-    const destination = {
-      instanceId: "server:opencode",
-      workspace: { hostId: "server", path: f.home },
-    };
-    const key = createHash("sha256")
-      .update(JSON.stringify([f.input.repo, canonical.conversationId, canonical.transferId]))
-      .digest("hex");
-    await writeFile(
-      join(f.home, "chi", "receipts", `${key}.claim.json`),
-      JSON.stringify({
-        identity: {
-          ...f.input,
-          endpoint: LEGACY_ENDPOINT,
-          actor: "github:owner",
-          destination,
-          canonical,
-        },
-        claim: { id: canonical.conversationId, transferId: canonical.transferId, destination },
-      }),
-      { mode: 0o600 },
-    );
-    await writeFile(join(f.home, "chi", "receipts", `${key}.json`), JSON.stringify(f.receipt), {
-      mode: 0o600,
-    });
-    await expect(
-      f.restart().assertImportAllowed({
-        provider: "opencode",
-        providerHandleId: "ses_fork",
-        cwd: f.home,
-        workspaceId: f.input.workspaceId,
-      }),
-    ).rejects.toThrow("chi-conversation-recovery-required");
-  });
-  it("rechecks settlement when a same-sized completed-turn set changes during export", async () => {
-    const f = await mapped();
-    f.agents[0]!.finalizedForegroundTurnIds.add("old");
-    vi.mocked(f.runtime.export).mockImplementation(async () => {
-      f.agents[0]!.finalizedForegroundTurnIds = new Set(["new"]);
-      return f.transfer;
-    });
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-session-busy");
-    expect(f.backend.entries).toEqual([]);
-  });
-  it("stops divergent native history without losing the confirmed pin", async () => {
-    const f = await mapped(),
-      first = await f.connection.capture(f.agent.id);
-    f.transfer.messages[0]!.text = "edited";
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("append-recovery-required");
-    const association = JSON.parse(f.agents[0]!.labels["chi.native"]!);
-    expect(association.pin).toEqual(first.pin);
-    expect(association.capturePending).toBe(false);
-    expect(f.backend.entries).toHaveLength(1);
-  });
-  it("replays a saved operation after a lost response and restarts with no duplicate", async () => {
-    const f = await mapped();
-    let lost = true;
-    f.request.mockImplementation(async (url, init) => {
-      const response = await f.serve(url, init);
-      if (String(url).endsWith("/evidence") && lost) {
-        lost = false;
-        throw new Error("private diagnostics");
-      }
-      return response;
-    });
-    const first = await f.connection.capture(f.agent.id);
-    expect(first.pin?.count).toBe(1);
-    const second = await f.restart().capture(f.agent.id);
-    expect(second.pin).toEqual(first.pin);
-    expect(f.backend.entries).toHaveLength(1);
-  });
-  it("a local scan failure commits no batch and surfaces its fixed code", async () => {
-    const f = await mapped();
-    f.scan.mockRejectedValue(new Error("capture-local-secret-rejected"));
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("capture-local-secret-rejected");
-    expect(f.backend.entries).toEqual([]);
-    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
-  });
-  it("unsupported native numeric values stop sync rather than entering divergence recovery or retry", async () => {
-    const f = await mapped();
-    f.transfer.info.cost = Infinity;
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
-      "capture-native-projection-invalid",
-    );
-    expect(f.backend.entries).toEqual([]);
-    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
-  });
-  it("denied unchanged-source verification clears success and stops automatic capture", async () => {
-    const f = await mapped();
-    await f.connection.capture(f.agent.id);
-    f.backend.allowed = false;
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("append-http-404");
-    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
-    expect(f.backend.entries).toHaveLength(1);
-  });
-  it("refuses a delayed confirmation after the host identity changed", async () => {
-    const f = await mapped();
-    let switched = false;
-    f.request.mockImplementation(async (url, init) => {
-      if (String(url).endsWith("/auth/session") && switched)
-        return Response.json({
-          ok: true,
-          chiUserId: "github:other",
-          capabilities: f.backend.capabilities,
-        });
-      const response = await f.serve(url, init);
-      if (String(url).endsWith("/evidence")) switched = true;
-      return response;
-    });
-    vi.spyOn(f.authority, "login").mockImplementation(async () => ({
-      chiUserId: switched ? "github:other" : "github:owner",
-      sessionToken: "fixture",
-    }));
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-mention-context-changed");
-    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).pin).toBeUndefined();
-  });
-  it("a delayed confirmation cannot overwrite a newly scoped association", async () => {
-    const f = await mapped();
-    function retarget(encoded: string | undefined) {
-      return JSON.stringify({
-        ...JSON.parse(z.string().parse(encoded)),
-        repo: "github:other/repo",
-      });
+    expect(f.runtime.export).not.toHaveBeenCalled();
+  },
+);
+
+describe.skipIf(process.platform === "win32")(
+  "v3 sync and mention admission (POSIX receipts)",
+  () => {
+    async function mapped() {
+      const f = await fixture();
+      const agent = await f.registration.register("ses_fork", {});
+      return { ...f, agent, connection: f.restart() };
     }
-    f.request.mockImplementation(async (url, init) => {
-      const response = await f.serve(url, init);
-      if (String(url).endsWith("/evidence")) {
-        await f.manager.updateAgentLabel(f.agent.id, "chi.native", retarget);
-      }
-      return response;
+    it.each([
+      undefined,
+      {},
+      { appendLog: { v: 3, deployment: "fixture" } },
+      { appendLog: { v: 2, deployment: "fixture" }, handoffs: { v: 3, references: "pin-seq" } },
+      { appendLog: { v: 3, deployment: "fixture" }, handoffs: { v: 3, references: "snapshot" } },
+    ])(
+      "refuses absent/unknown v3 capabilities before export or upload: %j",
+      async (capabilities) => {
+        const f = await mapped();
+        f.backend.capabilities = capabilities;
+        await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-native-v3-required");
+        expect(f.runtime.export).not.toHaveBeenCalled();
+        expect(f.backend.entries).toEqual([]);
+      },
+    );
+    it("maps one source, confirms a v3 pin, then appends only new settled entries", async () => {
+      const f = await mapped();
+      const first = await f.connection.capture(f.agent.id);
+      expect(first.pin?.count).toBe(1);
+      expect(first.capturePending).toBe(false);
+      expect(first.actor).toBe("github:owner");
+      f.transfer.messages.push({ ...f.transfer.messages[0]!, id: "msg_next", text: "next" });
+      const second = await f.connection.capture(f.agent.id);
+      expect(second.pin?.count).toBe(2);
+      expect(second.sourceId).toBe(first.sourceId);
+      expect(f.backend.entries).toHaveLength(2);
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.runtime.fork).not.toHaveBeenCalled();
     });
-    await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-mention-context-changed");
-    const current = JSON.parse(f.agents[0]!.labels["chi.native"]!);
-    expect(current.repo).toBe("github:other/repo");
-    expect(current.pin).toBeUndefined();
-  });
-  it("never retargets a delayed capture after a destination change", async () => {
-    const f = await mapped();
-    const config = fixtureConfig();
-    const connection = new ChiConnection(f.manager, {
-      home: f.home,
-      serverId: "server",
-      authority: f.authority,
-      getChiConfig: () => config,
-      scanCapture: f.scan,
-      appendScanner: { command: f.scanner },
+    it("keeps an unmapped workspace local before credentials or native export", async () => {
+      const f = await mapped();
+      const login = vi.spyOn(f.authority, "login");
+      const connection = new ChiConnection(f.manager, {
+        home: f.home,
+        serverId: "server",
+        authority: f.authority,
+        getChiConfig: () => ({ ...fixtureConfig(), mappings: [] }),
+      });
+      await expect(connection.capture(f.agent.id)).rejects.toThrow("chi-share-required");
+      expect(login).not.toHaveBeenCalled();
+      expect(f.runtime.export).not.toHaveBeenCalled();
     });
-    vi.mocked(f.runtime.export).mockImplementation(async () => {
-      config.destinations.fixture.endpoint = "https://other.invalid";
-      return f.transfer;
+    it("a misbound native checkout cannot upload through another repository's mapping", async () => {
+      const f = await mapped();
+      const other = await mkdtemp(join(tmpdir(), "chi-other-checkout-"));
+      homes.push(other);
+      f.transfer.info.location.directory = other;
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
+        "chi-native-workspace-mismatch",
+      );
+      expect(f.backend.entries).toEqual([]);
+      expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
     });
-    await expect(connection.capture(f.agent.id)).rejects.toThrow("chi-destination-changed");
-    expect(f.backend.entries).toEqual([]);
-    expect(
-      f.request.mock.calls.some(([url]) => String(url).startsWith("https://other.invalid")),
-    ).toBe(false);
-  });
-  it("participant scope binds deployment and rejects a stale or unversioned context", async () => {
-    const f = await mapped();
-    const scope = await f.connection.mentionOperation(f.home, f.input.workspaceId, {
-      action: "scope",
+    it("refuses old snapshot associations without manufacturing a pin or recreating their source", async () => {
+      const f = await mapped();
+      await f.manager.updateAgentLabel(f.agent.id, "chi.native", () =>
+        JSON.stringify({
+          repo: f.input.repo,
+          actor: "github:owner",
+          sourceId: "a".repeat(64),
+          head: "b".repeat(64),
+          error: null,
+          destination: "fixture",
+          endpoint: LEGACY_ENDPOINT,
+          audience: "shared",
+        }),
+      );
+      const login = vi.spyOn(f.authority, "login");
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-native-reset-required");
+      expect(login).not.toHaveBeenCalled();
+      expect(f.runtime.export).not.toHaveBeenCalled();
+      expect(f.backend.entries).toEqual([]);
     });
-    expect(scope.context.evidenceVersion).toBe(3);
-    await expect(
-      f.connection.mentionOperation(
-        f.home,
-        f.input.workspaceId,
-        { action: "participants" },
-        { ...scope.context, evidenceVersion: undefined },
-      ),
-    ).rejects.toThrow("chi-mention-context-changed");
-    f.backend.capabilities = {
-      appendLog: { v: 3, deployment: "other" },
-      handoffs: { v: 3, references: "pin-seq" },
-    };
-    await expect(
-      f.connection.mentionOperation(
-        f.home,
-        f.input.workspaceId,
-        { action: "participants" },
-        scope.context,
-      ),
-    ).rejects.toThrow("chi-mention-context-changed");
-  });
-  it("deployment inbox requires an explicit repository from its authorized catalog", async () => {
-    const f = await mapped();
-    const scope = await f.connection.inboxOperation({ action: "scope" });
-    expect(scope.context.repositories).toEqual([f.input.repo]);
-    await expect(
-      f.connection.inboxOperation({ action: "inbox", inbox: true }, scope.context),
-    ).rejects.toThrow("chi-mention-repository-required");
-    await expect(
-      f.connection.inboxOperation(
-        { action: "inbox", inbox: true, repo: "github:foreign/repo" },
-        scope.context,
-      ),
-    ).rejects.toThrow("chi-repository-denied");
-  });
-  it("a delayed repository catalog cannot escape an account switch during scope acquisition", async () => {
-    const f = await mapped();
-    let switched = false;
-    vi.spyOn(f.authority, "login").mockImplementation(async () => ({
-      chiUserId: switched ? "github:other" : "github:owner",
-      sessionToken: "fixture",
-    }));
-    f.request.mockImplementation(async (url, init) => {
-      if (String(url).endsWith("/auth/session") && switched)
-        return Response.json({
-          ok: true,
-          chiUserId: "github:other",
-          capabilities: f.backend.capabilities,
+    it("refuses deferred transfer operations before authorization or runtime mutation", async () => {
+      const f = await fixture();
+      await expect(f.restart().continue(f.input, f.registration)).rejects.toThrow(
+        "chi-operation-unsupported",
+      );
+      await expect(
+        f.restart().prepare("agent", "transfer", {
+          instanceId: "other",
+          workspace: { hostId: "other", path: "/fixture" },
+        }),
+      ).rejects.toThrow("chi-operation-unsupported");
+      await expect(f.restart().reconcile("agent", true)).rejects.toThrow(
+        "chi-operation-unsupported",
+      );
+      expect(f.request).not.toHaveBeenCalled();
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.runtime.fork).not.toHaveBeenCalled();
+    });
+    it("retains old receipt quarantine even though Continue is unavailable", async () => {
+      const f = await fixture();
+      const canonical = { conversationId: "conversation", transferId: "transfer" };
+      const destination = {
+        instanceId: "server:opencode",
+        workspace: { hostId: "server", path: f.home },
+      };
+      const key = createHash("sha256")
+        .update(JSON.stringify([f.input.repo, canonical.conversationId, canonical.transferId]))
+        .digest("hex");
+      await writeFile(
+        join(f.home, "chi", "receipts", `${key}.claim.json`),
+        JSON.stringify({
+          identity: {
+            ...f.input,
+            endpoint: LEGACY_ENDPOINT,
+            actor: "github:owner",
+            destination,
+            canonical,
+          },
+          claim: { id: canonical.conversationId, transferId: canonical.transferId, destination },
+        }),
+        { mode: 0o600 },
+      );
+      await writeFile(join(f.home, "chi", "receipts", `${key}.json`), JSON.stringify(f.receipt), {
+        mode: 0o600,
+      });
+      await expect(
+        f.restart().assertImportAllowed({
+          provider: "opencode",
+          providerHandleId: "ses_fork",
+          cwd: f.home,
+          workspaceId: f.input.workspaceId,
+        }),
+      ).rejects.toThrow("chi-conversation-recovery-required");
+    });
+    it("rechecks settlement when a same-sized completed-turn set changes during export", async () => {
+      const f = await mapped();
+      f.agents[0]!.finalizedForegroundTurnIds.add("old");
+      vi.mocked(f.runtime.export).mockImplementation(async () => {
+        f.agents[0]!.finalizedForegroundTurnIds = new Set(["new"]);
+        return f.transfer;
+      });
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-session-busy");
+      expect(f.backend.entries).toEqual([]);
+    });
+    it("stops divergent native history without losing the confirmed pin", async () => {
+      const f = await mapped(),
+        first = await f.connection.capture(f.agent.id);
+      f.transfer.messages[0]!.text = "edited";
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("append-recovery-required");
+      const association = JSON.parse(f.agents[0]!.labels["chi.native"]!);
+      expect(association.pin).toEqual(first.pin);
+      expect(association.capturePending).toBe(false);
+      expect(f.backend.entries).toHaveLength(1);
+    });
+    it("replays a saved operation after a lost response and restarts with no duplicate", async () => {
+      const f = await mapped();
+      let lost = true;
+      f.request.mockImplementation(async (url, init) => {
+        const response = await f.serve(url, init);
+        if (String(url).endsWith("/evidence") && lost) {
+          lost = false;
+          throw new Error("private diagnostics");
+        }
+        return response;
+      });
+      const first = await f.connection.capture(f.agent.id);
+      expect(first.pin?.count).toBe(1);
+      const second = await f.restart().capture(f.agent.id);
+      expect(second.pin).toEqual(first.pin);
+      expect(f.backend.entries).toHaveLength(1);
+    });
+    it("a local scan failure commits no batch and surfaces its fixed code", async () => {
+      const f = await mapped();
+      f.scan.mockRejectedValue(new Error("capture-local-secret-rejected"));
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
+        "capture-local-secret-rejected",
+      );
+      expect(f.backend.entries).toEqual([]);
+      expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
+    });
+    it("unsupported native numeric values stop sync rather than entering divergence recovery or retry", async () => {
+      const f = await mapped();
+      f.transfer.info.cost = Infinity;
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
+        "capture-native-projection-invalid",
+      );
+      expect(f.backend.entries).toEqual([]);
+      expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
+    });
+    it("denied unchanged-source verification clears success and stops automatic capture", async () => {
+      const f = await mapped();
+      await f.connection.capture(f.agent.id);
+      f.backend.allowed = false;
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("append-http-404");
+      expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
+      expect(f.backend.entries).toHaveLength(1);
+    });
+    it("refuses a delayed confirmation after the host identity changed", async () => {
+      const f = await mapped();
+      let switched = false;
+      f.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith("/auth/session") && switched)
+          return Response.json({
+            ok: true,
+            chiUserId: "github:other",
+            capabilities: f.backend.capabilities,
+          });
+        const response = await f.serve(url, init);
+        if (String(url).endsWith("/evidence")) switched = true;
+        return response;
+      });
+      vi.spyOn(f.authority, "login").mockImplementation(async () => ({
+        chiUserId: switched ? "github:other" : "github:owner",
+        sessionToken: "fixture",
+      }));
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-mention-context-changed");
+      expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).pin).toBeUndefined();
+    });
+    it("a delayed confirmation cannot overwrite a newly scoped association", async () => {
+      const f = await mapped();
+      function retarget(encoded: string | undefined) {
+        return JSON.stringify({
+          ...JSON.parse(z.string().parse(encoded)),
+          repo: "github:other/repo",
         });
-      const response = await f.serve(url, init);
-      if (String(url).endsWith("/repos")) switched = true;
-      return response;
+      }
+      f.request.mockImplementation(async (url, init) => {
+        const response = await f.serve(url, init);
+        if (String(url).endsWith("/evidence")) {
+          await f.manager.updateAgentLabel(f.agent.id, "chi.native", retarget);
+        }
+        return response;
+      });
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("chi-mention-context-changed");
+      const current = JSON.parse(f.agents[0]!.labels["chi.native"]!);
+      expect(current.repo).toBe("github:other/repo");
+      expect(current.pin).toBeUndefined();
     });
-    await expect(f.connection.inboxOperation({ action: "scope" })).rejects.toThrow(
-      "chi-mention-context-changed",
-    );
-    expect(f.request.mock.calls.some(([url]) => String(url).includes("/handoffs"))).toBe(false);
-  });
-  it("keeps public errors fixed and scan timeout distinct", () => {
-    expect(safeChiError(new Error("capture-local-scan-timeout"))).toBe(
-      "capture-local-scan-timeout",
-    );
-    expect(safeChiError(new Error("private payload diagnostic"))).toBe("chi-operation-failed");
-  });
-});
+    it("never retargets a delayed capture after a destination change", async () => {
+      const f = await mapped();
+      const config = fixtureConfig();
+      const connection = new ChiConnection(f.manager, {
+        home: f.home,
+        serverId: "server",
+        authority: f.authority,
+        getChiConfig: () => config,
+        scanCapture: f.scan,
+        appendScanner: { command: f.scanner },
+      });
+      vi.mocked(f.runtime.export).mockImplementation(async () => {
+        config.destinations.fixture.endpoint = "https://other.invalid";
+        return f.transfer;
+      });
+      await expect(connection.capture(f.agent.id)).rejects.toThrow("chi-destination-changed");
+      expect(f.backend.entries).toEqual([]);
+      expect(
+        f.request.mock.calls.some(([url]) => String(url).startsWith("https://other.invalid")),
+      ).toBe(false);
+    });
+    it("participant scope binds deployment and rejects a stale or unversioned context", async () => {
+      const f = await mapped();
+      const scope = await f.connection.mentionOperation(f.home, f.input.workspaceId, {
+        action: "scope",
+      });
+      expect(scope.context.evidenceVersion).toBe(3);
+      await expect(
+        f.connection.mentionOperation(
+          f.home,
+          f.input.workspaceId,
+          { action: "participants" },
+          { ...scope.context, evidenceVersion: undefined },
+        ),
+      ).rejects.toThrow("chi-mention-context-changed");
+      f.backend.capabilities = {
+        appendLog: { v: 3, deployment: "other" },
+        handoffs: { v: 3, references: "pin-seq" },
+      };
+      await expect(
+        f.connection.mentionOperation(
+          f.home,
+          f.input.workspaceId,
+          { action: "participants" },
+          scope.context,
+        ),
+      ).rejects.toThrow("chi-mention-context-changed");
+    });
+    it("deployment inbox requires an explicit repository from its authorized catalog", async () => {
+      const f = await mapped();
+      const scope = await f.connection.inboxOperation({ action: "scope" });
+      expect(scope.context.repositories).toEqual([f.input.repo]);
+      await expect(
+        f.connection.inboxOperation({ action: "inbox", inbox: true }, scope.context),
+      ).rejects.toThrow("chi-mention-repository-required");
+      await expect(
+        f.connection.inboxOperation(
+          { action: "inbox", inbox: true, repo: "github:foreign/repo" },
+          scope.context,
+        ),
+      ).rejects.toThrow("chi-repository-denied");
+    });
+    it("a delayed repository catalog cannot escape an account switch during scope acquisition", async () => {
+      const f = await mapped();
+      let switched = false;
+      vi.spyOn(f.authority, "login").mockImplementation(async () => ({
+        chiUserId: switched ? "github:other" : "github:owner",
+        sessionToken: "fixture",
+      }));
+      f.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith("/auth/session") && switched)
+          return Response.json({
+            ok: true,
+            chiUserId: "github:other",
+            capabilities: f.backend.capabilities,
+          });
+        const response = await f.serve(url, init);
+        if (String(url).endsWith("/repos")) switched = true;
+        return response;
+      });
+      await expect(f.connection.inboxOperation({ action: "scope" })).rejects.toThrow(
+        "chi-mention-context-changed",
+      );
+      expect(f.request.mock.calls.some(([url]) => String(url).includes("/handoffs"))).toBe(false);
+    });
+    it("keeps public errors fixed and scan timeout distinct", () => {
+      expect(safeChiError(new Error("capture-local-scan-timeout"))).toBe(
+        "capture-local-scan-timeout",
+      );
+      expect(safeChiError(new Error("private payload diagnostic"))).toBe("chi-operation-failed");
+    });
+  },
+);

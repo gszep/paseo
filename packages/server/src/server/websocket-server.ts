@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { supportsAppendCapture } from "./chi/append-capture.js";
 import type { CreationSnapshot } from "@getpaseo/protocol/messages";
 import { CreationService } from "./creation/index.js";
 import { MessageReceipts } from "./message-receipts/index.js";
@@ -1691,7 +1692,7 @@ export class VoiceAssistantWebSocketServer {
       ...(this.serverCapabilities ? { capabilities: this.serverCapabilities } : {}),
       features: {
         chiNative: false,
-        chiAppendV3: this.agentManager.chi !== null,
+        chiAppendV3: this.agentManager.chi !== null && supportsAppendCapture(),
         chiMentions: false,
         chiInbox: false,
         chiCanonical: false,

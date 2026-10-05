@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, expect, test as platformTest, vi } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,10 @@ import {
   type Pin,
 } from "@henkaku-center/chi-native/append-codec";
 import { captureAppend, type AppendCaptureInput } from "./append-capture.js";
+
+// This writer is explicitly unavailable on Windows; its refusal is exercised
+// through the real connection before credentials/native access in connection.test.
+const test = platformTest.skipIf(process.platform === "win32");
 
 const roots: string[] = [];
 afterEach(async () => {
