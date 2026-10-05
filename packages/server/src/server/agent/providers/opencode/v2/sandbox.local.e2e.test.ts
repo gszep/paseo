@@ -28,16 +28,20 @@ import { V2Runtime, type V2Connection } from "./runtime.js";
 
 const nono = await resolveNono().catch(() => null);
 const opencode = await findExecutable("opencode");
+// Linux nono 0.79.0 refuses some back-to-back proxy connections
+// (nolabs-ai/nono#2055). A refused connection (000) never reaches the bridge, so
+// retrying it cannot change what the bridge authorizes.
+const HTTP_CODE = `code() { for n in 1 2 3 4 5 6 7 8 9 10; do c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$@"); [ "$c" != 000 ] && break; sleep 1; done; echo "$c"; }; `;
 const SYNTHETIC_GIT_CREDENTIAL = `paseo:synthetic-${Math.random().toString(36).slice(2)}`;
 
 const gitEnv = {
   ...process.env,
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
-  GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "fixture",
-  GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "fixture@example.invalid",
-  GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "fixture",
-  GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "fixture@example.invalid",
+  GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME || "fixture",
+  GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL || "fixture@example.invalid",
+  GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME || "fixture",
+  GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL || "fixture@example.invalid",
 };
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, env: gitEnv }).toString().trim();
@@ -123,6 +127,16 @@ describe.skipIf(!nono || !opencode)("nono-sandboxed OpenCode server (real)", () 
   const remote = path.join(root, "remote");
   const upstreamSeen: string[] = [];
   const previousPaseoHome = process.env.PASEO_HOME;
+  // The daemon's launcher sets the agent's commit identity in its environment.
+  const identity = {
+    GIT_AUTHOR_NAME: "sandbox-fixture",
+    GIT_AUTHOR_EMAIL: "sandbox@example.invalid",
+    GIT_COMMITTER_NAME: "sandbox-fixture",
+    GIT_COMMITTER_EMAIL: "sandbox@example.invalid",
+  };
+  const previousIdentity = Object.fromEntries(
+    Object.keys(identity).map((key) => [key, process.env[key]]),
+  );
   let upstream: Server;
   let daemonStandIn: Server;
   let daemonPort = 0;
@@ -133,6 +147,7 @@ describe.skipIf(!nono || !opencode)("nono-sandboxed OpenCode server (real)", () 
 
   beforeAll(async () => {
     process.env.PASEO_HOME = paseoHome;
+    Object.assign(process.env, identity);
     mkdirSync(outside, { recursive: true });
     writeFileSync(path.join(outside, "sentinel"), "original\n");
     mkdirSync(repo);
@@ -177,6 +192,10 @@ describe.skipIf(!nono || !opencode)("nono-sandboxed OpenCode server (real)", () 
     daemonStandIn?.close();
     if (previousPaseoHome === undefined) delete process.env.PASEO_HOME;
     else process.env.PASEO_HOME = previousPaseoHome;
+    for (const [key, value] of Object.entries(previousIdentity)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     if (!process.env.PASEO_SANDBOX_E2E_KEEP) rmSync(root, { recursive: true, force: true });
   });
 
@@ -192,7 +211,9 @@ describe.skipIf(!nono || !opencode)("nono-sandboxed OpenCode server (real)", () 
       `echo change > change.txt && git add change.txt && git commit -q -m "test: sandboxed commit" && echo commit_exit=$?`,
     );
     expect(output).toContain("commit_exit=0");
-    expect(git(worktree, "log", "-1", "--format=%s")).toBe("test: sandboxed commit");
+    expect(git(worktree, "log", "-1", "--format=%s %ae")).toBe(
+      "test: sandboxed commit sandbox@example.invalid",
+    );
   });
 
   test("writes outside the worktree are refused", async () => {
@@ -237,8 +258,9 @@ describe.skipIf(!nono || !opencode)("nono-sandboxed OpenCode server (real)", () 
       sandboxed,
       worktree,
       `curl --noproxy '*' -s -m 3 -o /dev/null http://127.0.0.1:${daemonPort}/ && echo daemon=reached || echo daemon=refused; ` +
-        `echo manifest=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PASEO_BRIDGE_TOKEN" "$PASEO_BRIDGE_BASE_URL/_internal/opencode/tools"); ` +
-        `echo other_session=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $PASEO_BRIDGE_TOKEN" "$PASEO_BRIDGE_BASE_URL/_internal/opencode/sessions/other-agent-session/context")`,
+        HTTP_CODE +
+        `echo manifest=$(code -H "Authorization: Bearer $PASEO_BRIDGE_TOKEN" "$PASEO_BRIDGE_BASE_URL/_internal/opencode/tools"); ` +
+        `echo other_session=$(code -H "Authorization: Bearer $PASEO_BRIDGE_TOKEN" "$PASEO_BRIDGE_BASE_URL/_internal/opencode/sessions/other-agent-session/context")`,
     );
     expect(output).toContain("daemon=refused");
     expect(output).toContain("manifest=200");

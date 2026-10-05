@@ -274,7 +274,21 @@ export interface SandboxLaunch {
   paths: SandboxPaths;
 }
 
-const PASSTHROUGH_ENV = ["PATH", "USER", "LOGNAME", "LANG", "TERM", "TZ", "SHELL"];
+// Commit identity is how agents author work (for example a bot identity set by the
+// launcher); it is not a credential.
+const PASSTHROUGH_ENV = [
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "TERM",
+  "TZ",
+  "SHELL",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+];
 
 export async function prepareSandboxLaunch(input: {
   nono: string;

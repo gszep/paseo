@@ -113,8 +113,9 @@ reuses a server with different confinement. The generated profile
 - Network: proxy-only, allowlisted model, catalogue and npm hosts plus credential routes. Loopback is
   reachable only through nono's proxy, so the daemon, its MCP endpoint and other agents' servers are out
   of reach.
-- Environment: only `PATH`, locale, terminal, user and the agent's own variables cross into nono;
-  daemon secrets, `SSH_AUTH_SOCK` and session-bus addresses do not. `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+- Environment: only `PATH`, locale, terminal, user, git commit identity (`GIT_AUTHOR_*`,
+  `GIT_COMMITTER_*`) and the agent's own variables cross into nono; daemon secrets, `SSH_AUTH_SOCK`
+  and session-bus addresses do not. `OPENCODE_DISABLE_PROJECT_CONFIG=1`
   is required, so project `opencode.json` files do not load in sandboxed agents.
 
 ### Paseo tools and terminals
@@ -177,6 +178,10 @@ daemon's git; the orchestrator's server stays unconfined.
 
 ## Known gaps
 
+- **Linux proxy refusals.** On Linux, nono 0.79.0 refuses many back-to-back connections from the
+  sandbox to its own proxy ([nolabs-ai/nono#2055](https://github.com/nolabs-ai/nono/issues/2055)).
+  Every network request of a sandboxed agent goes through that proxy (model APIs, the Paseo bridge,
+  git), so sandboxed agents on Linux fail intermittently until it is fixed. macOS is unaffected.
 - **Model credentials.** A sandboxed server has private OpenCode data, so credentials kept in the
   user's OpenCode data directory, plugin stores or the keychain are unavailable to it. On the current
   hosts a sandboxed subagent therefore has no model provider. Granting those stores would expose raw
