@@ -305,6 +305,68 @@ describe("OpenCode v2 resume configuration", () => {
     }
   });
 
+  test("applies provider environment to session shells on create and fresh-client resume", async () => {
+    const harness = new V2Harness();
+    const environment = vi.spyOn(harness.api.session, "environment");
+    const settings = {
+      env: {
+        GIT_AUTHOR_NAME: "Builder",
+        GIT_COMMITTER_NAME: "Builder",
+        PATH: "/fixture/node24/bin:/usr/bin:/bin",
+        PASEO_AGENT_ID: "stale-parent",
+        PASEO_AGENT_CWD: "/stale-parent",
+      },
+    };
+    const launch = {
+      env: {
+        PASEO_AGENT_ID: "child",
+        PASEO_AGENT_CWD: "/fixture/child",
+        GIT_COMMITTER_NAME: "Explicit override",
+      },
+    };
+    const originalPath = process.env.PATH;
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+      settings,
+    });
+    const session = await client.createSession(
+      { provider: "opencode", cwd: "/fixture/child" },
+      launch,
+    );
+    const expected = {
+      sessionID: harness.info.id,
+      variables: expect.objectContaining({ ...settings.env, ...launch.env }),
+    };
+    expect(environment).toHaveBeenLastCalledWith(expected);
+    const handle = session.describePersistence();
+    await session.close();
+    const resumedClient = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+      settings,
+    });
+    // Resume gets newly resolved provider settings, not creation-only env from storage.
+    const resumed = await resumedClient.resumeSession(handle, undefined, {
+      env: { PASEO_AGENT_ID: "child", PASEO_AGENT_CWD: "/fixture/child" },
+    });
+    try {
+      expect(environment).toHaveBeenLastCalledWith({
+        sessionID: harness.info.id,
+        variables: expect.objectContaining({
+          ...settings.env,
+          PASEO_AGENT_ID: "child",
+          PASEO_AGENT_CWD: "/fixture/child",
+        }),
+      });
+      expect(process.env.PATH).toBe(originalPath);
+      expect(settings.env.PASEO_AGENT_ID).toBe("stale-parent");
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await resumed.close();
+    }
+  });
+
   test("importing a verified fork does not append a same-agent or same-model switch", async () => {
     const harness = new V2Harness();
     harness.info.model = { providerID: "fixture", id: "local", variant: "default" };
