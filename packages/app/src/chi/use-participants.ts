@@ -16,7 +16,7 @@ export function useMentionParticipants(serverId: string, agentId: string, active
   const { destination, mentionsAvailable } = useSyncDestination(serverId, workspaceId ?? "");
   const supported = useSessionStore(
     (state) =>
-      state.sessions[serverId]?.serverInfo?.features?.chiMentions === true &&
+      state.sessions[serverId]?.serverInfo?.features?.chiAppendV3 === true &&
       state.sessions[serverId]?.agents.get(agentId)?.provider === "opencode",
   );
   const enabled =

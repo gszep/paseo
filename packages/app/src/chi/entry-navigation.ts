@@ -55,7 +55,7 @@ export async function locateMention(
   const snapshot = runtime.getSnapshot(host);
   if (snapshot?.connectionStatus !== "online" || !snapshot.client) return null;
   const client = snapshot.client;
-  if (!client.getLastServerInfoMessage()?.features?.chiInbox) return null;
+  if (!client.getLastServerInfoMessage()?.features?.chiAppendV3) return null;
   const scope = await client.chiMentions({ operation: { action: "scope" } });
   if (scope.context.actor !== identity.actor || scope.context.deployment !== identity.deployment)
     return null;

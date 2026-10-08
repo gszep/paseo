@@ -22,7 +22,7 @@ export function useInboxTransport() {
   const statuses = useHostRuntimeConnectionStatuses(ids);
   const capable = useSessionStore(
     useShallow((state) =>
-      ids.filter((id) => state.sessions[id]?.serverInfo?.features?.chiInbox === true),
+      ids.filter((id) => state.sessions[id]?.serverInfo?.features?.chiAppendV3 === true),
     ),
   );
   const candidates = ids.filter((id) => statuses.get(id) === "online" && capable.includes(id));
@@ -65,14 +65,14 @@ export function useInboxTransport() {
 
 export function useInbox(
   transport: ReturnType<typeof useInboxTransport>,
-  options: { paused?: boolean; autoContinue?: boolean } = {},
+  options: { paused?: boolean; autoContinue?: boolean; repo?: string } = {},
 ) {
   const { scope, state, host, queryKey } = transport;
   return useInboxQuery({
     queryKey,
     inbox: true,
     ...options,
-    enabled: Boolean(host && state.context),
+    enabled: Boolean(host && state.context && options.repo),
     context: state.context ?? undefined,
     run: scope.run,
   });

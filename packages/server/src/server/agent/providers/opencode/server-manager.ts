@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import type { Logger } from "pino";
@@ -622,25 +623,8 @@ async function resolveOpenCodeBinary(): Promise<string> {
   }
 
   if (process.platform === "win32" && path.extname(found).toLowerCase() === ".cmd") {
-    // Global npm: <prefix>/opencode.cmd → <prefix>/node_modules/opencode-ai/bin/opencode.exe
-    const globalCandidate = path.join(
-      path.dirname(found),
-      "node_modules",
-      "opencode-ai",
-      "bin",
-      "opencode.exe",
-    );
-    if (await pathExists(globalCandidate)) return globalCandidate;
-
-    // Local/pnpm: <project>/node_modules/.bin/opencode.cmd → <project>/node_modules/opencode-ai/bin/opencode.exe
-    const localCandidate = path.join(
-      path.dirname(found),
-      "..",
-      "opencode-ai",
-      "bin",
-      "opencode.exe",
-    );
-    if (await pathExists(localCandidate)) return localCandidate;
+    const native = await resolveOpenCodeWindowsBinary({ shim: found });
+    if (native) return native;
 
     console.warn(
       "[opencode-server] Found opencode.cmd but could not resolve the real opencode.exe. " +
@@ -650,6 +634,56 @@ async function resolveOpenCodeBinary(): Promise<string> {
   }
 
   return found;
+}
+
+interface OpenCodeWindowsBinaryInput {
+  shim: string;
+  arch?: string;
+}
+
+/** Resolve the package targeted by npm's shim, never another globally installed
+ * OpenCode version. V1 moved its executable into a platform dependency; V2's
+ * shim points at a bundled executable. Prefer the x64 baseline without assuming AVX2. */
+export async function resolveOpenCodeWindowsBinary({
+  shim,
+  arch = process.arch,
+}: OpenCodeWindowsBinaryInput): Promise<string | null> {
+  let wrapper: string;
+  try {
+    wrapper = (await readFile(shim, "utf8")).replaceAll("\\", "/");
+  } catch {
+    return null;
+  }
+  const packages = ["opencode-ai", "@opencode/cli"].filter((name) =>
+    wrapper.includes(`${name}/bin/opencode`),
+  );
+  if (packages.length !== 1) return null;
+  const name = packages[0]!;
+  const roots = [
+    path.join(path.dirname(shim), "node_modules", name),
+    path.resolve(path.dirname(shim), "..", name),
+  ];
+  for (const root of roots) {
+    if (!(await pathExists(path.join(root, "package.json")))) continue;
+    const bundled = path.join(root, "bin", "opencode.exe");
+    if (await pathExists(bundled)) return bundled;
+    if (name !== "opencode-ai") continue;
+    const resolve = createRequire(path.join(root, "package.json"));
+    const variants =
+      arch === "x64"
+        ? ["opencode-windows-x64-baseline", "opencode-windows-x64"]
+        : [`opencode-windows-${arch}`];
+    for (const variant of variants) {
+      try {
+        const manifest = resolve.resolve(`${variant}/package.json`);
+        const executable = path.join(path.dirname(manifest), "bin", "opencode.exe");
+        if (await pathExists(executable)) return executable;
+      } catch {
+        /* This variant is not installed in this package's dependency tree. */
+      }
+    }
+  }
+  return null;
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

@@ -18,8 +18,22 @@ async function expectScreenContentInsidePhone(page: Page, name: string, time: st
   const clock = phone.getByText(time, { exact: true });
   await expect(clock).toBeVisible();
   await expect(async () => {
-    const frame = await phone.boundingBox();
-    const content = await clock.boundingBox();
+    // The tilted phones animate. Read both rectangles in one browser frame;
+    // two locator round trips can compare different animation positions.
+    const { frame, content } = await phone.evaluate(
+      (element, label) => {
+        const clocks = [...element.querySelectorAll("span")].filter(
+          (node) => node.textContent?.trim() === label,
+        );
+        if (clocks.length !== 1) throw new Error("Expected one rendered status clock");
+        return {
+          frame: element.getBoundingClientRect().toJSON(),
+          content: clocks[0]!.getBoundingClientRect().toJSON(),
+        };
+      },
+      time,
+      { timeout: 1000 },
+    );
     expect(frame).not.toBeNull();
     expect(content).not.toBeNull();
     if (!frame || !content) throw new Error("Phone screen is not rendered");

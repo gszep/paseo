@@ -143,8 +143,11 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
   - **Every shim is tagged.** `// COMPAT(name): added in vX, remove after <date>` at the site that has to be deleted. `rg "COMPAT\("` is the cleanup backlog; untagged back-compat is permanent by accident.
 - **New RPCs use dotted namespaces with direction suffixes.** Follow [docs/rpc-namespacing.md](docs/rpc-namespacing.md): `domain.provider.operation.request` pairs with `domain.provider.operation.response`. Existing flat RPC names will migrate over time; don't add new ones.
 
-Chi human mentions and inbox reuse source-linked handoffs and the existing explicit
-Share flow. Admission, queued-send recovery and protected inbox state are specified
+Chi v3 sync and mentions are capability-gated on `chiAppendV3` and the backend's
+appendLog/handoffs v3 capabilities. Mapped consent, durable append receipts and
+confirmed pin/ordinal references replace snapshot writes. Continue/fork publication
+and reply mutations are deferred; no v2 fallback. This candidate stays off production
+until the coordinated cutover. Admission, queued-send recovery and protected inbox state are specified
 in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
 regressions and isolated two-account rendered acceptance in
 [testing](docs/testing.md#test-organization); the latter is a separate release gate

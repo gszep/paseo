@@ -141,6 +141,10 @@ test("CLI source lifecycle E2E remains in test:unit inventory and related execut
 });
 
 test("selector unit inventories equal the real suite collections; configuration drift cannot hide tests", () => {
+  assert.equal(
+    graph.packages.get("server").scripts["posttest:unit"],
+    "node scripts/chi-security-mutations.mjs",
+  );
   // These flags mirror the existing npm suite boundaries, NOT production paths.
   // Compare against the actual runner so changing a package's include/exclude
   // cannot leave a test silently outside the graph's selectable inventory.

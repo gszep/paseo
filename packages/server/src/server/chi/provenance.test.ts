@@ -28,9 +28,13 @@ function initRepo() {
   git("commit", "-m", "init");
   // Native Windows cannot execute the POSIX scanner fixture. CI installs the
   // checksum-pinned production scanner there; Git/ref assertions stay identical.
-  const scanner = process.platform === "win32" ? "gitleaks.exe" : join(root, "fake-gitleaks.sh");
+  const scanner = process.platform === "win32" ? "gitleaks.exe" : join(root, "fake-gitleaks.cjs");
   if (process.platform !== "win32") {
-    writeFileSync(scanner, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    writeFileSync(
+      scanner,
+      `#!${process.execPath}\nconst fs=require('node:fs'),args=process.argv.slice(2); if(args[0]==='version'){console.log('8.30.1');process.exit(0);} const input=args.at(-1); const bytes=fs.readdirSync(input).reduce((sum,name)=>sum+fs.statSync(input+'/'+name).size,0); console.error('INF scanned ~'+bytes+' bytes ('+bytes+' bytes) in 1ms');\n`,
+      { mode: 0o755 },
+    );
     chmodSync(scanner, 0o755);
   }
   return { root, git, scanner };

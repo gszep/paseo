@@ -226,7 +226,7 @@ test("mention transport preserves structured logout and proven non-admission wit
   });
   clients.push(client);
   const connected = client.connect();
-  wire.triggerOpen({ features: { chiMentions: true } });
+  wire.triggerOpen({ features: { chiAppendV3: true } });
   await connected;
   wire.sent.length = 0;
   const mutation = client.chiMentions({
@@ -7611,7 +7611,7 @@ test("sync status sends the workspace request and resolves the ready payload", a
   });
   clients.push(client);
   const connected = client.connect();
-  wire.triggerOpen({ features: { chiNative: true } });
+  wire.triggerOpen({ features: { chiAppendV3: true } });
   await connected;
   wire.sent.length = 0;
   const pending = client.chiSyncStatus({ workspaceId: "workspace", action: "retry" });
