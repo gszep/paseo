@@ -1,5 +1,6 @@
 import { createInstance } from "i18next";
 import { initReactI18next } from "react-i18next";
+import { BRAND } from "@/branding/brand";
 import { observeI18nInit } from "./init";
 import { ar } from "./resources/ar";
 import { en } from "./resources/en";
@@ -31,6 +32,7 @@ observeI18nInit(
     },
     interpolation: {
       escapeValue: false,
+      defaultVariables: { appName: BRAND.name },
     },
     react: {
       useSuspense: false,

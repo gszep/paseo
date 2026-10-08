@@ -1523,7 +1523,7 @@ export const zhCN: TranslationResources = {
     },
   },
   onboarding: {
-    title: "欢迎使用 Paseo",
+    title: "欢迎使用 {{appName}}",
     subtitle: "连接你的电脑即可开始",
     actions: {
       settings: "设置",
