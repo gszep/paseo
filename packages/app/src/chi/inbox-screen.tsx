@@ -129,7 +129,7 @@ export function ChiInboxScreen() {
         </Text>
       ) : null}
       {host && (!state.context || state.loading) && !state.error ? (
-        <Text style={styles.empty}>Loading mentions…</Text>
+        <Text style={styles.empty}>Loading repositories…</Text>
       ) : null}
       {host && state.error && !state.loading ? (
         <Alert

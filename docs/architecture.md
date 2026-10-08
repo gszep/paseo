@@ -158,7 +158,13 @@ cannot unlock correction after a newer attempt of the same operation may have co
 
 The **Mentions** route binds its actor and endpoint independently of the connected
 host transport. It uses a v3-capable authenticated host and requires an explicit
-repository selection from that principal's catalog. Backend keysets, unread counts
+repository selection from that principal's catalog. Transport discovery verifies
+the account without enumerating repositories; the picker loads its catalog when
+acquiring a scope. Inbox and detail reads do not enumerate every repository again.
+The catalog limits picker choices, never grants access: each selected-repository
+request still passes fresh backend authorization and source ACL checks. Account
+verification, catalog loading and inbox-read failures have distinct UI states.
+Backend keysets, unread counts
 and cache keys are repository-scoped; there is no synthetic global unread badge or
 cross-repository fan-out. Search covers loaded pages. Refresh reacquires access on
 focus/reconnect and discards older pages from the preceding acquisition.

@@ -754,6 +754,127 @@ describe.skipIf(process.platform === "win32")(
         ),
       ).rejects.toThrow("chi-mention-context-changed");
     });
+    it("verifies the inbox account without loading a repository catalog", async () => {
+      const f = await mapped();
+      f.request.mockImplementation(async (url, init) => {
+        if (String(url).endsWith("/repos")) throw new Error("catalog must not be requested");
+        return f.serve(url, init);
+      });
+      const scope = await f.connection.inboxOperation({
+        action: "scope",
+        includeRepositories: false,
+      });
+      expect(scope.result).toEqual({ kind: "scope", actor: "github:owner" });
+      expect(scope.context).toMatchObject({ repo: "*", evidenceVersion: 3 });
+      expect(scope.context.repositories).toBeUndefined();
+      expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/auth/session",
+        "/auth/session",
+      ]);
+      f.request.mockClear();
+      await expect(
+        f.connection.inboxOperation(
+          { action: "inbox", inbox: true, repo: f.input.repo },
+          scope.context,
+        ),
+      ).rejects.toThrow("chi-repository-denied");
+      expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/auth/session",
+      ]);
+    });
+
+    it.each([undefined, true])(
+      "loads the picker catalog once (%s) while each inbox read authorizes",
+      async (includeRepositories) => {
+        const f = await mapped();
+        const scope = await f.connection.inboxOperation({ action: "scope", includeRepositories });
+        f.request.mockClear();
+        f.request.mockImplementation(async (url, init) => {
+          const path = new URL(String(url)).pathname;
+          if (path === "/repos") throw new Error("do not enumerate every repository per read");
+          if (path === "/handoffs/inbox") {
+            expect(new Headers(init?.headers).get("x-chi-repo")).toBe(f.input.repo);
+            return Response.json({
+              handoffs: [],
+              nextCursor: null,
+              unreadCount: 0,
+              unreadCountLowerBound: false,
+            });
+          }
+          return f.serve(url, init);
+        });
+        const result = await f.connection.inboxOperation(
+          { action: "inbox", inbox: true, repo: f.input.repo },
+          scope.context,
+        );
+        expect(result.context).toEqual(scope.context);
+        expect(result.result).toMatchObject({ kind: "inbox", handoffs: [] });
+        expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+          "/auth/session",
+          "/handoffs/inbox",
+          "/auth/session",
+        ]);
+      },
+    );
+
+    it.each(["inbox", "read"] as const)(
+      "a catalog entry never bypasses a fresh backend denial on %s",
+      async (action) => {
+        const f = await mapped();
+        const scope = await f.connection.inboxOperation({ action: "scope" });
+        f.request.mockClear();
+        f.request.mockImplementation(async (url, init) => {
+          if (new URL(String(url)).pathname.startsWith("/handoffs"))
+            return Response.json({ ok: false }, { status: 403 });
+          if (String(url).endsWith("/repos")) throw new Error("unexpected catalog read");
+          return f.serve(url, init);
+        });
+        const operation =
+          action === "inbox"
+            ? { action, inbox: true, repo: f.input.repo }
+            : { action, id: "00000000-0000-4000-8000-000000000001", repo: f.input.repo };
+        await expect(f.connection.inboxOperation(operation, scope.context)).rejects.toThrow(
+          "chi-mentions-http-403",
+        );
+        expect(f.request).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it("rejects a delayed inbox response after credential generation changes", async () => {
+      const f = await mapped();
+      let credentialGeneration = "first";
+      vi.spyOn(f.authority, "login").mockImplementation(async () => ({
+        chiUserId: "github:owner",
+        sessionToken: "fixture",
+        credentialGeneration,
+      }));
+      const scope = await f.connection.inboxOperation({ action: "scope" });
+      const entered = barrier();
+      const release = barrier();
+      f.request.mockImplementation(async (url, init) => {
+        if (new URL(String(url)).pathname === "/handoffs/inbox") {
+          entered.resolve();
+          await release.promise;
+          return Response.json({
+            handoffs: [],
+            nextCursor: null,
+            unreadCount: 0,
+            unreadCountLowerBound: false,
+          });
+        }
+        return f.serve(url, init);
+      });
+      const pending = f.connection.inboxOperation(
+        { action: "inbox", inbox: true, repo: f.input.repo },
+        scope.context,
+      );
+      const rejection = expect(pending).rejects.toThrow("chi-mention-context-changed");
+      await entered.promise;
+      credentialGeneration = "second";
+      release.resolve();
+      await rejection;
+    });
+
     it("deployment inbox requires an explicit repository from its authorized catalog", async () => {
       const f = await mapped();
       const scope = await f.connection.inboxOperation({ action: "scope" });

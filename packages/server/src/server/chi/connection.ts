@@ -815,24 +815,29 @@ export class ChiConnection {
     };
     try {
       const current = await identity();
-      const response = await this.authority.request(
-        append(endpointUrl(this.authority.endpoint), "repos"),
-        {
-          redirect: "error",
-          signal: AbortSignal.timeout(30000),
-          headers: { authorization: `Bearer ${current.token}` },
-        },
-      );
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new Error(`chi-http-${response.status}`);
-      }
-      const catalog = reposSchema.parse(JSON.parse(await boundedText(response, 1024 * 1024)));
-      const repositories = catalog.repos.map((item) => item.repo);
-      const context = { ...this.mentionContext(current), repositories };
-      this.requireMentionContext(await identity(), context);
-      if (operation.action === "scope")
+      const context = this.mentionContext(current);
+      if (operation.action === "scope") {
+        // Account discovery needs identity only. The picker acquires its catalog
+        // separately; each repository read still authorizes at the backend.
+        if (operation.includeRepositories !== false) {
+          const response = await this.authority.request(
+            append(endpointUrl(this.authority.endpoint), "repos"),
+            {
+              redirect: "error",
+              signal: AbortSignal.timeout(30000),
+              headers: { authorization: `Bearer ${current.token}` },
+            },
+          );
+          if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error(`chi-http-${response.status}`);
+          }
+          const catalog = reposSchema.parse(JSON.parse(await boundedText(response, 1024 * 1024)));
+          context.repositories = catalog.repos.map((item) => item.repo);
+        }
+        this.requireMentionContext(await identity(), context);
         return { context, result: { kind: "scope" as const, actor: current.actor } };
+      }
       this.requireMentionContext(current, expected);
       if (
         operation.action === "participants" ||
@@ -843,11 +848,12 @@ export class ChiConnection {
         throw new Error("chi-mention-workspace-required");
       const repo = operation.repo;
       if (!repo) throw new Error("chi-mention-repository-required");
-      if (!repositories.includes(repo)) throw new Error("chi-repository-denied");
+      if (!expected?.repositories?.includes(repo)) throw new Error("chi-repository-denied");
       // Backend authorizes the supplied repository; inbox transport needs no local checkout.
+      // The previous catalog is a picker bound, never an authorization verdict.
       const result = await this.mentions.execute({ ...current, repo }, operation);
       this.requireMentionContext(await identity(), context);
-      return { context, result };
+      return { context: { ...context, repositories: expected.repositories }, result };
     } catch (error) {
       if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
       throw error;

@@ -38,7 +38,9 @@ export function useInboxTransport() {
           const runtime = getHostRuntimeStore().getSnapshot(id);
           if (!runtime?.client || runtime.connectionStatus !== "online")
             throw new Error("chi-host-disconnected");
-          const result = await runtime.client.chiMentions({ operation: { action: "scope" } });
+          const result = await runtime.client.chiMentions({
+            operation: { action: "scope", includeRepositories: false },
+          });
           observe(result.context);
           return result.context;
         } catch (error) {

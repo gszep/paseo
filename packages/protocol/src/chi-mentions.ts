@@ -165,7 +165,7 @@ export const ChiDeliverySchema = z.object({
 });
 export type ChiDelivery = z.infer<typeof ChiDeliverySchema>;
 export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("scope") }),
+  z.object({ action: z.literal("scope"), includeRepositories: z.boolean().optional() }),
   z.object({ action: z.literal("participants") }),
   z.object({
     action: z.literal("inbox"),
