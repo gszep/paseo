@@ -169,6 +169,11 @@ export class OpenCodeV2AgentClient implements AgentClient {
     launch: AgentLaunchContext | undefined,
     persist: boolean,
   ) {
+    // Session shells receive a complete environment, so provider defaults must
+    // accompany launch overrides on both create and resume. Launch identity wins.
+    if (this.options.settings?.env) {
+      launch = { ...launch, env: { ...this.options.settings.env, ...launch?.env } };
+    }
     const unbind = this.options.bridge?.bindSession({
       sessionId: info.id,
       env: launch?.env ?? {},
