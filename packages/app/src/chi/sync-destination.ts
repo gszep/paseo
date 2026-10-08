@@ -61,7 +61,9 @@ export const CAPTURE_HEAD_DIVERGED_MESSAGE =
 export const CAPTURE_RECOVERY_INVALID_MESSAGE =
   "Chi could not verify the archived history for safe recovery. Automatic sync stopped. Update this host if needed, then compare the archive and local session before explicitly retrying.";
 export const CHI_OPERATION_TIMEOUT_MESSAGE =
-  "Chi timed out before confirming the operation. A capture may already have committed. Retry to check the archived head safely; keep the same request when retrying Continue.";
+  "Chi timed out before confirming the operation. A batch may already have committed. Retry the same request to confirm its saved result.";
+export const CAPTURE_SCAN_TIMEOUT_MESSAGE =
+  "The secret scan exceeded its deadline. This batch was not sent by the current attempt. Retry sync; earlier attempts or batches may already have committed.";
 
 /** Rejections that require human recovery rather than an automatic retry. */
 export function isTerminalSyncError(code: string | null | undefined): boolean {
@@ -70,6 +72,17 @@ export function isTerminalSyncError(code: string | null | undefined): boolean {
     code === "capture-recovery-invalid" ||
     code === "capture-local-secret-rejected" ||
     code === "capture-local-cut-scan-limit" ||
+    code === "capture-local-secret-scan-limit" ||
+    code === "append-recovery-required" ||
+    code === "append-local-conflict" ||
+    code === "append-local-state-invalid" ||
+    code === "capture-native-projection-invalid" ||
+    code === "chi-native-reset-required" ||
+    code === "chi-native-fork-unsupported" ||
+    code === "chi-native-workspace-mismatch" ||
+    code === "chi-native-platform-unsupported" ||
+    code === "chi-native-runtime-unsupported" ||
+    code === "append-http-404" ||
     code === "evidence-http-422-server-secret-scan-rejected"
   );
 }

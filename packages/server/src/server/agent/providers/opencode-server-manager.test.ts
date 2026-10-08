@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +19,7 @@ import type {
 import type { ProcessTerminator, TreeKillTarget } from "../../../utils/tree-kill.js";
 import {
   OpenCodeServerManager,
+  resolveOpenCodeWindowsBinary,
   type OpenCodeCommandPrefixResolver,
   type OpenCodePortAllocator,
   type OpenCodeServerProcessSpawner,
@@ -363,6 +364,55 @@ describe("OpenCodeServerManager managed process ledger", () => {
   });
 });
 
+describe("OpenCode npm native executable layouts", () => {
+  test.each(["global", "local"])(
+    "resolves %s v1 optional binaries and keeps the shim's package identity",
+    async (layout) => {
+      const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "opencode-native-layout-")));
+      const modules = path.join(root, "node_modules");
+      const shimDir = layout === "global" ? root : path.join(modules, ".bin");
+      const v1 = path.join(modules, "opencode-ai");
+      const v2 = path.join(modules, "@opencode", "cli");
+      function file(name: string, contents = "fixture") {
+        mkdirSync(path.dirname(name), { recursive: true });
+        writeFileSync(name, contents);
+      }
+      const shim = path.join(shimDir, "opencode.cmd");
+      const relative = layout === "global" ? "node_modules\\" : "..\\";
+      try {
+        file(shim, `@echo off\n"%dp0%\\${relative}opencode-ai\\bin\\opencode" %*`);
+        file(
+          path.join(v1, "package.json"),
+          JSON.stringify({ name: "opencode-ai", version: "1.14.46" }),
+        );
+        const platformPackage = path.join(v1, "node_modules", "opencode-windows-x64-baseline");
+        file(
+          path.join(platformPackage, "package.json"),
+          JSON.stringify({ name: "opencode-windows-x64-baseline", version: "1.14.46" }),
+        );
+        const executable = path.join(platformPackage, "bin", "opencode.exe");
+        file(executable);
+        file(
+          path.join(v2, "package.json"),
+          JSON.stringify({ name: "@opencode/cli", version: "2.0.10" }),
+        );
+        const other = path.join(v2, "bin", "opencode.exe");
+        file(other);
+        expect(await resolveOpenCodeWindowsBinary({ shim, arch: "x64" })).toBe(executable);
+        const bundledV1 = path.join(v1, "bin", "opencode.exe");
+        file(bundledV1);
+        expect(await resolveOpenCodeWindowsBinary({ shim, arch: "x64" })).toBe(bundledV1);
+        file(shim, `@echo off\n"%dp0%\\${relative}@opencode\\cli\\bin\\opencode.exe" %*`);
+        expect(await resolveOpenCodeWindowsBinary({ shim, arch: "x64" })).toBe(other);
+        file(shim, '@echo off\n"other-opencode.cmd" %*');
+        expect(await resolveOpenCodeWindowsBinary({ shim, arch: "x64" })).toBeNull();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe.runIf(process.platform === "win32")(
   "OpenCodeServerManager Windows OpenCode npm install",
   () => {
@@ -393,8 +443,8 @@ describe.runIf(process.platform === "win32")(
         expect(records).toHaveLength(1);
         const record = records[0]!;
         expect(path.extname(record.command).toLowerCase()).toBe(".exe");
-        expect(path.normalize(record.command).toLowerCase()).toContain(
-          path.normalize("node_modules/opencode-ai/bin/opencode.exe").toLowerCase(),
+        expect(path.normalize(record.command).toLowerCase()).toMatch(
+          /node_modules[\\/](?:@opencode[\\/]cli|opencode-ai|opencode-windows-(?:x64|arm64)(?:-baseline)?)[\\/]bin[\\/]opencode\.exe$/,
         );
         expect(record.command.toLowerCase()).not.toBe(detectedOpenCode!.toLowerCase());
         expect(record.args).toEqual(["serve", "--port", String(acquisition.server.port)]);

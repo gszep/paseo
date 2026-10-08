@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Text,
   View,
@@ -12,10 +12,9 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
 import type { Theme } from "@/styles/theme";
-import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { router, useFocusEffect } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect } from "expo-router";
 import type {
   ChiHandoff,
   ChiMentionOperation,
@@ -25,17 +24,13 @@ import type {
 import { useFetchQuery } from "@/data/query";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
-import { FormTextInput } from "@/components/ui/form-field";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { SearchField } from "@/components/ui/search-field";
 import { HighlightedText } from "@/components/ui/highlighted-text";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
 import { formatDateSectionLabel } from "@/components/date-sections";
 import { formatTimeAgo } from "@/utils/time";
-import { confirmDialog } from "@/utils/confirm-dialog";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { openReplyForm } from "./reply-model";
-import { readHumanPrompts } from "@getpaseo/protocol/chi-mentions";
 import { mentionError } from "./mention-errors";
 import { useInbox, useInboxTransport } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
@@ -46,7 +41,6 @@ import {
   ALL_REPOSITORIES_OPTION_ID,
   buildInboxRows,
   filterInboxHandoffs,
-  inboxRepositories,
   repositoryLabel,
   type InboxListRow,
 } from "./inbox-model";
@@ -65,6 +59,30 @@ function EmptyInbox({ filtered }: { filtered: boolean }) {
 }
 function LoadingMore() {
   return <Text style={styles.hint}>Loading more mentions…</Text>;
+}
+function InboxReadStatus({
+  query,
+  repo,
+  refresh,
+}: {
+  query: ReturnType<typeof useInbox>;
+  repo: string | undefined;
+  refresh(): void;
+}) {
+  if (!repo) return <Text style={styles.empty}>Choose a repository to read its mentions.</Text>;
+  if (query.isError)
+    return (
+      <Alert
+        variant="error"
+        title="Unable to load mentions"
+        description={mentionError(query.error)}
+      >
+        <Button onPress={refresh}>Retry</Button>
+      </Alert>
+    );
+  if (query.isFetching && !query.data)
+    return <Text style={styles.empty}>Refreshing mentions…</Text>;
+  return <InboxCoverageNotice unavailableRepos={query.unavailableRepos} />;
 }
 
 const ThemedMessageSquare = withUnistyles(MessageSquare);
@@ -140,8 +158,12 @@ function Inbox({
   const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
   const [searchInput, setSearchInput] = useState("");
-  const [repository, setRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
+  const [repository, selectRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
+  const setRepository = useCallback((repo: string) => {
+    selectRepository(repo);
+    setSelected(null);
+  }, []);
   const [openSession, setOpenSession] = useState(true);
   const [scrolledDown, setScrolledDown] = useState(false);
   useEffect(() => {
@@ -153,12 +175,17 @@ function Inbox({
     [],
   );
   // The recipient inbox shares its first page with the sidebar badge.
-  const query = useInbox(transport, { paused: scrolledDown, autoContinue: true });
+  const selectedRepo = repository === ALL_REPOSITORIES_OPTION_ID ? undefined : repository;
+  const query = useInbox(transport, {
+    paused: scrolledDown,
+    autoContinue: true,
+    repo: selectedRepo,
+  });
   const loaded = useMemo(
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
     [query.data],
   );
-  const repositories = useMemo(() => inboxRepositories(loaded), [loaded]);
+  const repositories = context.identity.repositories ?? [];
   const filtered = useMemo(
     () => filterInboxHandoffs(loaded, { search: searchInput, repository }),
     [loaded, searchInput, repository],
@@ -202,7 +229,6 @@ function Inbox({
   const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
   const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
   const emptyComponent = useMemo(() => <EmptyInbox filtered={isFiltered} />, [isFiltered]);
-  const refreshing = query.isFetching && !query.isFetchingNextPage;
   return (
     <View style={styles.screen}>
       <View style={styles.filterRail}>
@@ -227,17 +253,7 @@ function Inbox({
           Signed in as @{context.identity.actor.slice(7)}
         </Text>
       </View>
-      {query.isError ? (
-        <Alert
-          variant="error"
-          title="Unable to load mentions"
-          description={mentionError(query.error)}
-        >
-          <Button onPress={refresh}>Retry</Button>
-        </Alert>
-      ) : null}
-      {refreshing && !query.data ? <Text style={styles.empty}>Refreshing mentions…</Text> : null}
-      {!query.isError ? <InboxCoverageNotice unavailableRepos={query.unavailableRepos} /> : null}
+      <InboxReadStatus query={query} repo={selectedRepo} refresh={refresh} />
       {query.data && !query.isError ? (
         <View style={compact ? styles.screen : styles.split}>
           {!compact || !selected ? (
@@ -417,8 +433,6 @@ function HandoffDetail({
   selected: ChiHandoff;
   openSession: boolean;
 }) {
-  const cache = useQueryClient();
-  const [autoOpen, setAutoOpen] = useState(openSession);
   const query = useFetchQuery(
     inboxDetailQueryOptions({
       queryKey: context.queryKey,
@@ -427,10 +441,6 @@ function HandoffDetail({
       run: context.execute,
     }),
   );
-  const updated = useCallback(() => {
-    setAutoOpen(false);
-    void cache.invalidateQueries({ queryKey: context.queryKey });
-  }, [cache, context.queryKey]);
   const { refetch } = query;
   const refresh = useCallback(() => void refetch(), [refetch]);
   if (query.isFetching && !query.data) return <Text style={styles.empty}>Loading discussion…</Text>;
@@ -441,21 +451,17 @@ function HandoffDetail({
       </Alert>
     );
   if (!query.data) return null;
-  return (
-    <Discussion context={context} handoff={query.data} autoOpen={autoOpen} onUpdated={updated} />
-  );
+  return <Discussion context={context} handoff={query.data} autoOpen={openSession} />;
 }
 
 function Discussion({
   context,
   handoff: h,
   autoOpen,
-  onUpdated,
 }: {
   context: InboxContext;
   handoff: ChiHandoff;
   autoOpen: boolean;
-  onUpdated(): void;
 }) {
   const cache = useQueryClient();
   const [index, setIndex] = useState(0);
@@ -466,22 +472,7 @@ function Discussion({
     onSuccess: (result) => {
       if (result.kind !== "handoff") return;
       cache.setQueryData([...context.queryKey, "handoff", h.repo, h.id], result.handoff);
-      cache.setQueriesData<InfiniteData<Extract<ChiMentionResult, { kind: "inbox" }>>>(
-        { queryKey: [...context.queryKey, "inbox"] },
-        (previous) =>
-          previous
-            ? {
-                ...previous,
-                pages: previous.pages.map((page) => ({
-                  ...page,
-                  unreadCount: Math.max(0, page.unreadCount - 1),
-                  handoffs: page.handoffs.map((record) =>
-                    record.repo === h.repo && record.id === h.id ? result.handoff : record,
-                  ),
-                })),
-              }
-            : previous,
-      );
+      void cache.invalidateQueries({ queryKey: [...context.queryKey, "inbox", true, h.repo] });
     },
   });
   const { mutate: markViewed, isIdle } = viewed;
@@ -490,17 +481,13 @@ function Discussion({
   useEffect(() => {
     if (!h.readAt && h.recipient === context.identity.actor && isIdle) markViewed();
   }, [h.readAt, h.recipient, context.identity.actor, isIdle, markViewed]);
-  const canReply = h.author === context.identity.actor || h.recipient === context.identity.actor;
-  const prompts = readHumanPrompts(h.text);
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.hint}>
         @{h.author.slice(7)} → @{h.recipient.slice(7)}
       </Text>
       <Text selectable style={styles.text}>
-        {prompts
-          ? `Agent-initiated · ${prompts.sessionId} · ${prompts.turnId}\n${prompts.items.map((item) => `${item.kind}: ${item.text}`).join("\n\n")}`
-          : h.text}
+        {h.text}
       </Text>
       <Text style={styles.hint}>
         {h.state} · revision {h.revision}
@@ -517,7 +504,7 @@ function Discussion({
       {h.sources.length > 1
         ? h.sources.map((source, n) => (
             <ChoiceButton
-              key={`${source.id}/${source.entryId}`}
+              key={`${source.id}/${source.kind === "neutral" ? source.snapshot : ""}/${source.entryId}`}
               variant="ghost"
               value={String(n)}
               onSelect={chooseIndex}
@@ -547,9 +534,6 @@ function Discussion({
           </Text>
         </View>
       ))}
-      {canReply ? (
-        <ReplyForm key={h.revision} handoff={h} context={context} onSuccess={onUpdated} />
-      ) : null}
     </ScrollView>
   );
 }
@@ -574,12 +558,12 @@ function ExactSource({
       };
     }, []),
   );
-  const [entryId, setEntryId] = useState<string | undefined>();
+  const [selectedSeq, setSelectedSeq] = useState<string | undefined>();
   const [browse, setBrowse] = useState(false);
   const [navigated, setNavigated] = useState(!autoOpen);
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: [...context.queryKey, "source", handoff.repo, handoff.id, index, entryId],
+    queryKey: [...context.queryKey, "source", handoff.repo, handoff.id, index, selectedSeq],
     gcTime: 0,
     staleTimeMs: 0,
     retry: false,
@@ -590,7 +574,7 @@ function ExactSource({
         repo: handoff.repo,
         id: handoff.id,
         index,
-        entryId,
+        seq: selectedSeq === undefined ? undefined : Number(selectedSeq),
       });
       if (result.kind !== "source") throw new Error("chi-invalid-response");
       return result;
@@ -621,20 +605,6 @@ function ExactSource({
   }, [navigated, query.data, query.isFetching, mutate]);
   const next = useCallback(() => setBrowse(true), []);
   const retry = useCallback(() => void query.refetch(), [query]);
-  const continueHere = useCallback(() => {
-    const source = handoff.sources[index];
-    if (source?.kind === "neutral")
-      router.push({
-        pathname: "/chi",
-        params: {
-          repo: handoff.repo,
-          source: source.id,
-          snapshot: source.snapshot,
-          sourceHost: query.data?.origin?.hostId,
-          sourceSession: query.data?.origin?.sessionId,
-        },
-      });
-  }, [handoff, index, query.data]);
   if (query.isFetching && !query.data)
     return <Text style={styles.hint}>Reading exact source…</Text>;
   if (query.isError)
@@ -659,18 +629,16 @@ function ExactSource({
           Could not open the connected session. The exact read-only source is shown above.
         </Text>
       ) : null}
-      <Button size="sm" variant="ghost" onPress={continueHere}>
-        Continue here
-      </Button>
-      <Text style={styles.hint}>
-        Managed Continue requires the source host online to prepare a transfer, or an already
-        prepared transfer. It never resumes a bare evidence pin.
-      </Text>
       <Button size="sm" variant="ghost" onPress={next}>
         Browse pinned context
       </Button>
       {browse ? (
-        <PinnedContext context={context} handoff={handoff} index={index} onSelect={setEntryId} />
+        <PinnedContext
+          context={context}
+          handoff={handoff}
+          index={index}
+          onSelect={setSelectedSeq}
+        />
       ) : null}
     </View>
   );
@@ -722,7 +690,7 @@ function PinnedContext({
         <ChoiceButton
           key={entry.nativeId}
           variant="ghost"
-          value={entry.nativeId}
+          value={String(entry.seq)}
           onSelect={onSelect}
         >
           {entry.type}: {entry.nativeId}
@@ -732,226 +700,6 @@ function PinnedContext({
         <Button variant="ghost" onPress={next}>
           Next context page
         </Button>
-      ) : null}
-    </View>
-  );
-}
-
-function HumanPromptControl({
-  handoff,
-  context,
-  onSuccess,
-  control,
-}: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-  control: "mute" | "snooze";
-}) {
-  const [form] = useState(() =>
-    openReplyForm({
-      handoff,
-      context: { ...context.identity, repo: handoff.repo },
-      key: `chi-reply:${JSON.stringify([context.identity.deployment, handoff.repo, context.identity.actor, handoff.id])}`,
-      storage: AsyncStorage,
-      control,
-      confirmMute: () =>
-        confirmDialog({
-          title: "Mute prompts from this session?",
-          message:
-            "This permanently stops new human prompts from this session. You cannot undo this mute.",
-          confirmLabel: "Mute prompts",
-          destructive: true,
-        }),
-      execute: (operation) => {
-        if (operation.action !== "reply") throw new Error("chi-invalid-operation");
-        return context.execute({ ...operation, repo: handoff.repo });
-      },
-      uuid: () => crypto.randomUUID(),
-      onSuccess,
-    }),
-  );
-  useEffect(() => () => form.close(), [form]);
-  const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
-  const send = useCallback(() => void form.send("reply"), [form]);
-  const reauthorize = useCallback(() => void form.reauthorize(), [form]);
-  const discard = useCallback(
-    () =>
-      void form.discardConflict().then((changed) => {
-        return changed ? onSuccess() : undefined;
-      }),
-    [form, onSuccess],
-  );
-  const label = control === "mute" ? "Mute prompts from this session" : "Snooze prompts for 1 hour";
-  return (
-    <>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={
-          state.status === "loading" ||
-          state.status === "blocked" ||
-          state.status === "pending" ||
-          state.status === "sent"
-        }
-        onPress={send}
-      >
-        {state.operation ? `Retry ${control}` : label}
-      </Button>
-      {state.status === "pending" ? (
-        <Text style={styles.hint}>
-          {control === "mute" ? "Muting prompts…" : "Snoozing prompts…"}
-        </Text>
-      ) : null}
-      {state.status === "sent" ? (
-        <Alert
-          variant="success"
-          title={
-            control === "mute" ? "Prompts muted for this session" : "Prompts snoozed for 1 hour"
-          }
-        />
-      ) : null}
-      {state.status === "failed" || state.status === "blocked" ? (
-        <Alert
-          variant="error"
-          title={`${control === "mute" ? "Mute" : "Snooze"} not confirmed`}
-          description={mentionError(state.error)}
-        >
-          {state.canDiscard ? (
-            <Button size="sm" variant="outline" onPress={discard}>
-              Refresh rejected {control}
-            </Button>
-          ) : null}
-          {state.canReauthorize ? (
-            <Button size="sm" variant="outline" onPress={reauthorize}>
-              Authorize saved {control} with current credentials
-            </Button>
-          ) : null}
-        </Alert>
-      ) : null}
-    </>
-  );
-}
-
-function HumanPromptControls(props: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-}) {
-  if (
-    !readHumanPrompts(props.handoff.text) ||
-    props.handoff.humanPromptControls !== true ||
-    props.handoff.recipient !== props.context.identity.actor
-  )
-    return null;
-  return (
-    <>
-      <HumanPromptControl {...props} control="mute" />
-      <HumanPromptControl {...props} control="snooze" />
-    </>
-  );
-}
-
-function ReplyForm({
-  handoff,
-  context,
-  onSuccess,
-}: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-}) {
-  const compact = useIsCompactFormFactor();
-  const [form] = useState(() =>
-    openReplyForm({
-      handoff,
-      context: { ...context.identity, repo: handoff.repo },
-      key: `chi-reply:${JSON.stringify([context.identity.deployment, handoff.repo, context.identity.actor, handoff.id])}`,
-      storage: AsyncStorage,
-      execute: (operation) => {
-        if (operation.action !== "reply" && operation.action !== "acknowledge")
-          throw new Error("chi-invalid-operation");
-        return context.execute({ ...operation, repo: handoff.repo });
-      },
-      uuid: () => crypto.randomUUID(),
-      onSuccess,
-    }),
-  );
-  useEffect(() => () => form.close(), [form]);
-  const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
-  const locked =
-    state.status === "loading" ||
-    state.status === "blocked" ||
-    state.status === "pending" ||
-    state.operation !== null;
-  const acknowledge = useCallback(() => void form.send("acknowledge"), [form]);
-  const reply = useCallback(() => void form.send("reply"), [form]);
-  const prompts = readHumanPrompts(handoff.text);
-  const answer = useCallback((id: string) => void form.send("reply", id), [form]);
-  const reauthorize = useCallback(() => void form.reauthorize().catch(() => undefined), [form]);
-  const refresh = useCallback(
-    () => void form.discardConflict().then((discarded) => (discarded ? onSuccess() : undefined)),
-    [form, onSuccess],
-  );
-  return (
-    <View style={styles.row}>
-      {handoff.state === "open" && handoff.recipient === context.identity.actor ? (
-        <Button size="sm" variant="outline" disabled={locked} onPress={acknowledge}>
-          Acknowledge
-        </Button>
-      ) : null}
-      {state.status !== "loading" ? (
-        <FormTextInput
-          key={state.status === "sent" ? "sent" : "draft"}
-          initialValue={state.text}
-          accessibilityLabel="Reply to mention"
-          placeholder="Reply"
-          multiline
-          size={compact ? "md" : "sm"}
-          editable={!locked}
-          onChangeText={form.setText}
-        />
-      ) : null}
-      <Button size="sm" disabled={locked || !state.text.trim()} onPress={reply}>
-        Send reply
-      </Button>
-      {handoff.recipient === context.identity.actor
-        ? prompts?.items.map((item, index) => (
-            <ChoiceButton
-              key={item.id}
-              value={item.id}
-              disabled={locked || !state.text.trim()}
-              onSelect={answer}
-            >
-              Answer prompt {index + 1}
-            </ChoiceButton>
-          ))
-        : null}
-      {state.status === "pending" ? <Text style={styles.hint}>Sending…</Text> : null}
-      <HumanPromptControls handoff={handoff} context={context} onSuccess={onSuccess} />
-      {state.status === "sent" ? <Alert variant="success" title="Reply delivered" /> : null}
-      {state.status === "failed" || state.status === "blocked" ? (
-        <Alert
-          variant="error"
-          title="Operation not confirmed"
-          description={mentionError(state.error)}
-        >
-          {state.operation && state.status !== "blocked" ? (
-            <Button variant="outline" size="sm" onPress={reply}>
-              Retry saved operation
-            </Button>
-          ) : null}
-          {state.canDiscard ? (
-            <Button variant="outline" size="sm" onPress={refresh}>
-              Correct rejected reply
-            </Button>
-          ) : null}
-          {state.canReauthorize ? (
-            <Button variant="outline" size="sm" onPress={reauthorize}>
-              Authorize saved reply with current credentials
-            </Button>
-          ) : null}
-        </Alert>
       ) : null}
     </View>
   );

@@ -14,6 +14,7 @@ test("inbox refresh is automatic and never manual", async () => {
   const options = inboxQueryOptions({
     queryKey: ["chi", "host", ""],
     inbox: false,
+    repo: "github:acme/one",
     enabled: true,
     context,
     run: async (operation, expected) => {
@@ -29,7 +30,7 @@ test("inbox refresh is automatic and never manual", async () => {
     },
   });
 
-  expect(options.queryKey).toEqual(["chi", "host", "", "inbox", false]);
+  expect(options.queryKey).toEqual(["chi", "host", "", "inbox", false, "github:acme/one"]);
   expect(options.enabled).toBe(true);
   expect(options.refetchOnWindowFocus).toBe("always");
   expect(options.refetchOnReconnect).toBe(true);
@@ -37,7 +38,10 @@ test("inbox refresh is automatic and never manual", async () => {
 
   const page = await options.queryFn({ pageParam: undefined });
   expect(calls).toEqual([
-    { operation: { action: "inbox", inbox: false, cursor: undefined }, expected: context },
+    {
+      operation: { action: "inbox", inbox: false, cursor: undefined, repo: "github:acme/one" },
+      expected: context,
+    },
   ]);
   expect(options.getNextPageParam(page)).toBe("next");
 });

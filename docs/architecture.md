@@ -33,184 +33,46 @@ Your code never leaves your machine. Paseo is local-first.
 
 ## Components at a glance
 
-Chi native continuation uses the existing OpenCode V2 runtime owner. The app's
-`/chi` intake accepts a source agent for preparation or an already prepared
-transfer with exact repository/source/snapshot coordinates. It selects a paired
-host and workspace and invokes a workspace-write operation. Bare evidence pins
-fail closed; the Chi browser has no runtime pairing authority or continuation
-action. Independent branching uses OpenCode's native Fork. Share to Chi
-associates one agent explicitly; configured repository mappings associate agents
-automatically under the mapping's pinned audience. Unmapped agents stay local.
-Chi network operations require an explicitly configured destination; new Share,
-Continue intake and workspace mentions also require a repository mapping. Legacy
-destination-less labels require a repository mapping to the exact former endpoint,
-or stay paused with `chi-destination-unmapped` before auth/export. Explicit legacy
-Share/Continue labels may bind by exact endpoint with private audience; provenance
-still requires a current repository mapping to that endpoint. Status reads resolve
-these states without writing labels. Removing a pinned destination pauses capture
-and blocks canonical continuation prompts; ordinary noncanonical prompts remain
-usable. Receipt quarantine covers every deployment on the
-owning host, even after its destination is removed. The initial inbox/mention
-transport binds to the sole configured endpoint at startup; restart after changing
-it. Multiple capture destinations do not implicitly choose an inbox deployment.
+Chi sync and human mentions use the append-only v3 client. This is an integration
+candidate: production merge and rollout remain held for the coordinated Chi cutover.
+The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
+Chi `2d9260746d3c555720646c6653f998eb20a6c889`; its integrity is pinned in the lockfile.
+Repack after shared-helper changes. The server package bundles this dependency so
+installed CLI/Docker builds do not depend on a checkout-relative vendor path.
 
-Chi credentials come from an in-memory GitHub CLI exchange, independent of native
-runtime credentials. `chiCanonical` gates the single Continue/Resume transfer
-flow; `chiNative` remains the sharing capability. Older wire requests still parse
-but missing transfer coordinates return `chi-transfer-preparation-required`,
-never an independent fork. The packed
-`vendor/henkaku-center-chi-native-0.0.0.tgz` dependency is built from the Chi
-repository's `packages/chi-native`; rebuild and repack it after shared operation
-changes. npm bundles this private dependency inside the server tarball so packed
-CLI/Docker installations do not need the checkout's vendor path. Prepack stages
-the locked installed package beneath `packages/server/node_modules`: npm omits a
-hoisted workspace dependency even when named in `bundleDependencies`. It is a
-source-integration artifact, not a published package release.
+The app gates once on `server_info.features.chiAppendV3`. Older capability fields
+remain parseable but are false. The daemon requires both authenticated backend
+capabilities: `appendLog:{v:3,deployment}` and `handoffs:{v:3,references:"pin-seq"}`.
+Missing or unknown capabilities stop before native export or evidence writes.
+This MVP requires private POSIX ownership/modes and directory fsync. Windows
+advertises no v3 writer and refuses it before acquiring credentials; receipt
+durability is never downgraded to enable the feature.
+Requests stay on the configured endpoint and repository. Credentials remain in
+memory and redirects are errors. No snapshot-format writer or recovery fallback.
 
-Managed capture bounds-validates and scans the complete production min-v1 projection
-locally with host `gitleaks`, checks bounded windows around prose cuts, then scans
-the full export for attribution. All scans use extended default rules and
-`--ignore-gitleaks-allow` before any evidence POST. Cut-window and attribution
-reports retain raw secrets only in private temporary files removed after scanning;
-only the minimiser result's `capture` is uploadable. The daemon finds `gitleaks` on `PATH` or,
-when it is absent there, under `/opt/homebrew/bin`, `/usr/local/bin` or
-`~/.local/bin`; without it capture fails closed
-(`capture-local-scanner-unavailable`) rather than uploading unscanned. A local
-finding (`capture-local-secret-rejected`) or a server rejection
-(`server-secret-scan-rejected`) is terminal: nothing is uploaded and automatic
-retries stop until the user retries explicitly. A missing scanner stays
-retryable once installed. Findings only in omitted content warn without blocking
-the minimised upload. Full-export attribution over budget surfaces a warning;
-the projection's byte/node limits, exact-upload scan and cut-window scan still
-fail closed. Complete cut windows are scanned in at most 1 MiB batches with an
-8 MiB total cap. A surviving secret prefix or private-key BEGIN (PEM or PGP PRIVATE
-KEY BLOCK) starting before the cut without a matching END in the same window
-rejects even when full-export attribution is over budget. Headers wholly in the
-removed tail are attribution-only and do not stop syncing.
-Exhaustion is terminal `capture-local-cut-scan-limit`; sync status and capture
-errors explain the capacity limit without claiming a secret was found.
-The server scan remains the authority.
+Repository mappings provide capture consent and pin the destination and audience.
+Unmapped work stays local; changing a mapping never retargets an existing source.
+Snapshot-format associations require operator cutover rather than guessed pins.
+Continue/fork publication, replies, acknowledgement/resolution and agent-initiated
+human-prompt dispatch are deferred. Their old mutation paths are refused. Existing
+receipt-owned native imports remain quarantined; disabling Continue does not grant
+ordinary import or execution permission.
 
-Provenance orphan cleanup checks source existence under the stored repository
-and owner authorization without invalidating the primary login. Only a 404 with
-an explicit `reason: 'not-found'` body permits deletion. Bounded sweeps of archived
-or unloaded records run serially, persist their rotation cursor and per-record
-backoff atomically, and retry unavailable repositories and failed deletions.
-Loaded retry times are clamped to at most 24 hours from startup.
+`packages/server/src/server/chi/append-capture.ts` compares the confirmed full-native
+prefix against the binding ledger before projecting new records. New message and
+metadata batches pass projection/cut scans and the helper's three-tail append scan.
+Historical native records are compared, not reprojected or secret-scanned each turn.
+Full-native digests stay private on the host. Each saved request is immutable and
+fsynced before transmission; lost replies reuse it. Batch confirmations survive
+restart, and unchanged captures still reacquire server ACL/binding authority.
+Late responses cannot update a different actor, deployment or association.
 
-Capture association errors retain the HTTP status and an allowlisted public Chi
-reason (for example `evidence-http-413-native-store-limit`). The native client
-reads at most 1 KiB of a failed response; unknown, malformed and oversized bodies
-remain status-only. Protected response text never becomes an association label.
-HTTP deadlines surface as `chi-operation-timeout`: completion is uncertain, since
-the backend may have committed before its response was lost. Share and Continue
-include authorization, export, scanning and network work, each with its own
-deadline; 30 seconds is not an end-to-end request budget. Provenance also runs
-before a managed capture returns. A long request alone does not identify its slow stage.
-
-Managed head conflicts use the same recovery proof for settled turns, workspace
-Retry and background reconciliation. Reacquire the source under its pinned owner,
-namespace and workspace. An exact capture replay is verified against the immutable
-snapshot hash; otherwise the remote head must descend from the cached head and
-its ordered message IDs and revisions must be a prefix of the upload, with
-unchanged native parent/fork identity. The final write still passes the server
-scanner and CAS. A second racing conflict waits for the next attempt. History
-reset and edited/reordered/deleted messages require human recovery
-(`capture-head-diverged`), never a head overwrite. Equal-message metadata-only
-changes are accepted after the same lineage proof. A cached head whose source is
-explicitly not found also stops with `capture-head-diverged`; reset sources are
-never automatically recreated. Invalid, incompatible or over-limit proofs stop
-automatic retries with `capture-recovery-invalid`. Compare
-the archive and the other writer, then Continue from the canonical session or use
-native Fork to preserve local work as a new source. Do not edit association heads.
-Terminal recovery failures also skip provenance writes, so a stopped capture
-cannot restore a removed ref or label new work with an unproved archived head.
-The exported source ID must also match the existing association before upload;
-changing runtime namespaces never retargets a label, even to identical content.
-
-Startup immediately re-drives durable `capturePending` records, including loaded
-and unloaded agents; the periodic sweep continues draining the backlog. Capture
-retries are independent of orphan-cleanup backoff. A provenance-removal marker
-does not authorize recreating a missing source: recovery must stop for human review.
-The October 1 operator reset accounts for three of the four reported stuck agents;
-only the orchestrator is a lost-response replay candidate. Each sweep
-attempts at most four serial captures per rotating pass and
-coalesces overlapping reconnect sweeps. Failed automatic captures back off from
-one minute to at most fifteen minutes; busy sessions never increase backoff.
-Explicit Retry and settled turns bypass that delay. The
-pending label survives restart; transient backoff restarts with the daemon.
-Paused destinations and terminal rejections never auto-upload. Exact replay
-proof avoids downloading the native export, and known head conflicts avoid a
-redundant failing upload before reconciliation.
-
-Continuation request identity survives client reloads. The owner reacquires source
-access and matches the receipt's actor, deployment, runtime origin, pin and workspace
-before recovering a ready fork. Paseo's runtime identity is the existing stable
-`serverId:opencode` owner namespace, not its restart-dependent loopback port.
-Unregistered forks must match the reminted payload
-mapping; registered results return their existing agent even after later turns.
-Attaching/importing a verified fork must not reissue unchanged agent or model
-settings: OpenCode records a same-agent switch as another native message, which
-would invalidate exact transfer publication before any prompt runs.
-Claimed transfers retain their original receipt even after a pre-mutation failure;
-they cannot be restarted by changing a client request ID. Ambiguous mutations
-require manual recovery and never replay. Workspace
-choices require the selected host's completed catalog, and capture rejects a new
-settled turn during acquisition even when the bounded turn-history set stays full.
-
-For a managed move, choose **Continue on another host** on the source agent,
-then select the destination host and existing workspace. Same-host moves use the
-same flow. Source preparation shares the manager's foreground admission queue,
-rejects busy agents, and persists a prompt block before capturing and reserving.
-Every subsequent managed prompt reacquires Chi authorization; pending, stale and
-offline canonical associations cannot start a turn. Steering and out-of-band
-commands use the same admission boundary. Native CLI execution outside Paseo is
-outside this gate; its late captures can invalidate publication rather than being
-silently discarded.
-
-Destination receipts are keyed by repository, conversation and transfer, never
-by a new UI request ID. Reserve the private claim receipt before claiming. A
-replayed claim cannot grant execution; only an existing verified ready native
-receipt can recover that path. Registration stays blocked until the exact,
-durably saved publication request commits. Publication uses a separate immutable,
-no-replace receipt: concurrent processes must submit the winning request even if
-their export observes later work. Every publisher syncs the receipt's parent
-directory before sending it, including readers of an already-visible winner;
-a competing writer may still be between linking the file and syncing that name.
-Claim journals are never rewritten for publication.
-Every publication attempt bounds-validates and scans the exact saved capture;
-legacy, unsupported, misbound or unknown-field receipts require recovery and are
-never rewritten or transmitted.
-Retry returns the registered agent
-even after later turns, and never activates an incarnation that has since become
-stale. Lost or ambiguous native receipts require inspection, not another fork.
-The source's explicit reconciliation archives the predecessor using managed
-archive; OpenCode V2 native archive remains unsupported. Native discovery hides
-canonical archived predecessors and their import replicas. Private receipt-owned
-native IDs are quarantined from discovery and direct import even before agent
-registration, including known IDs from interrupted mutations. Reused same-host
-sources retain their existing ownership. Recovery registration gets an ephemeral
-capability bound to the verified fork, workspace and labels; ordinary imports
-cannot supply it. A fork-stage receipt without its resulting native ID blocks
-ordinary native discovery and direct import across that owner namespace until
-manual receipt recovery resolves the ambiguity. This also applies to a failed
-fork with a lost reply; native IDs are never guessed and the mutation never replays.
-Association updates merge in the manager's lifecycle lane, so late capture cannot
-erase admission policy or the original reservation/cancellation request. Unarchive checks
-canonical authorization before restoring a runtime.
-
-The SDK exposes `api.chi.share`, `api.chi.manage` and `api.chi.continue`:
-`manage({agentId, operation: {action: "prepare", transferId, destination}})`
-returns the reserved source/snapshot and conversation coordinates. Destination
-is `{instanceId: "<serverId>:opencode", workspace: {hostId: serverId, path}}`.
-Call `continue` on that destination with its local `workspaceId`, returned
-repository/source/snapshot, and `canonical: {conversationId, transferId}`.
-`manage` with `reconcile` performs source cleanup; `cancel` releases only an
-unclaimed reservation. All three operations require `workspace.write`.
-No model turn starts and neither workspaces nor runtime credentials are copied.
-The `/chi` route also accepts a prepared `conversationId` and `transferId`
-alongside the exact evidence coordinates. App/daemon drift is gated once by
-`chiCanonical`; there is no fallback to an independent fork.
+Secret findings and unsupported projections stop automatic sync. A scanner deadline
+is `capture-local-scan-timeout`, distinct from a missing/unrunnable binary; the UI
+retries the saved batch without claiming previous batches were never published.
+The scanner remains pinned Gitleaks 8.30.1 with unchanged scan semantics. Missing
+or corrupt ledger state, native edits/reorder/truncation and reset sources require
+recovery; the client never overwrites history or automatically recreates a source.
 
 Human mentions use Chi's existing source-linked handoffs. The composer prefetches the
 authorized participant directory on mount, before the first `@`. Matching is local
@@ -252,7 +114,7 @@ an explicit recipient. Sending requires the existing **Share to Chi** consent fi
 mention selection does not change visibility or implicitly share a session.
 
 The optional `chiMentions` send field is gated on the actual client send path by
-`server_info.features.chiMentions`. Human mentions currently accept plain-text
+`server_info.features.chiAppendV3`. Human mentions currently accept plain-text
 prompts only: attachments (including images and expanded skill context) and leading
 slash/skill commands are rejected before queue or daemon message-receipt admission.
 Remove the transformation or clear recipients to send an ordinary agent prompt.
@@ -265,7 +127,8 @@ Legacy intent without an admission fingerprint fails closed.
 Settled capture resolves the persisted user message by the
 provider's `paseoClientMessageId` metadata and verifies its text. The native entry ID
 is never inferred from the composer ID, a timestamp, an assistant echo or matching
-text alone. The receipt pins the exact captured snapshot before handoff creation;
+text alone. An authorized exact read confirms the message ordinal under the full
+v3 pin before the receipt saves `{pin,seq}` for handoff creation;
 retries after reconnect or daemon restart keep the same recipient, handoff UUID and
 pin. A locally accepted prompt is pending, not delivered. Delivery is shown only
 after Chi acknowledges its durable handoff. Per-agent receipts are bounded to 100
@@ -286,136 +149,29 @@ removing it, so a late response cannot erase a newer request.
 Definitive rejection is also fenced to its persisted attempt UUID: an older refusal
 cannot unlock correction after a newer attempt of the same operation may have committed.
 
-The **Mentions** route reuses `/chi` without a workspace or host picker. The inbox
-persists its actor and deployment independently of transport. It prefers the selected
-connected host advertising `chiInbox`, then another connected capable host, only
-after verifying that host authenticates as the bound principal. A different account
-or deployment requires reconnecting the original account; transport fallback cannot
-switch recipients. The deployment inbox uses backend keyset pagination across
-repositories, presented as one History-style list: History's date sections, a
-client-side search and repository filter, lazy paging and agent-row columns. It
-shows handoffs addressed to the authenticated recipient; the verified
-identity is shown unobtrusively rather than as a header control row. Refresh is
-automatic on open, window focus/visibility, reconnect and the shared mention
-interval, and after the user's own actions; there is no manual refresh or
-Inbox/Project mode control. Search covers loaded pages only; a server-side query
-is a later step, not this one. The sidebar and list share one first-page query.
-Same-context cached items render immediately while page one revalidates. The
-cache is in memory for five minutes; scope loss synchronously evicts it. Older
-pages are loaded on scroll and are discarded on head refresh. Empty cursor pages
-automatically continue for at most ten pages per head acquisition; an empty list
-then offers Load more mentions. Repeated cursors stop automatic continuation.
-While the list is scrolled down, interval and focus refresh pause for both the
-list and sidebar, so their shared head cannot discard rows under the scroll
-position. Returning to the top or unmounting the list releases the pause;
-transport verification and explicit action/reconnect refresh remain active.
-Failed head/older reads clear their protected data
-before delivering the error. Repository,
-handoff and source reads reacquire authorization. The inbox never opens supplied
-URLs or forwards tokens to the browser. Exact source reads and paginated context
-browsing stay on the handoff's immutable snapshot. Structured access loss removes
-protected query data across the shared parent/child scope, including exact payloads,
-participant suggestions and delivery state. Keys include host, workspace, verified
-actor, repository, deployment and auth generation; requests carry the expected context and the
-daemon rechecks it before mutation and after reads. The generation binds the host
-credential, not the Chi session token reminted during exchange. A delayed response
-from a lost scope cannot restore it. Structured access-loss responses (including
-host GitHub logout) clear the scope on mutations as well as reads. Loading and
-transient read failures do not become access-loss warnings. Read-only HTTP 409
-requests reacquire the backend fence with bounded retries; mutations retain their
-explicit recovery flow. This is pull-based access reacquisition, not recall of data
-already downloaded. A partially acquired inbox retains the backend's
-`unavailableRepos`, shows an incomplete-inbox notice, and marks the unread badge
-with `+` (including `0+`) and an accessible incomplete-count label. Bounded unread
-counts also carry this marker. Legacy deployment cursors bind the unavailable
-set; `invalid-cursor` clears the whole cached walk
-and restarts at page one rather than mixing coverage from different pages.
+The **Mentions** route binds its actor and endpoint independently of the connected
+host transport. It uses a v3-capable authenticated host and requires an explicit
+repository selection from that principal's catalog. Backend keysets, unread counts
+and cache keys are repository-scoped; there is no synthetic global unread badge or
+cross-repository fan-out. Search covers loaded pages. Refresh reacquires access on
+focus/reconnect and discards older pages from the preceding acquisition.
 
-First view saves the recipient's durable `readAt` marker without acknowledging the
-handoff. Native source navigation maps the provider entry ID to a canonical timeline
-cursor; client submission IDs and matching text are not source coordinates. When
-the source host is unavailable, exact pinned content remains read-only. **Continue
-here** uses managed transfer preparation, which needs the source host or existing
-prepared transfer coordinates.
+Every handoff and exact/context read reacquires source ACLs. Denial clears protected
+query data before delivering the error; a delayed response from a lost scope cannot
+restore it. Context binds actor, repository, endpoint, backend deployment and host
+credential generation. Handoff UUID, recipients, text and confirmed pin/ordinal
+remain fixed across retries. A local prompt admission is not a delivered mention.
+No per-entry hashes are sent. The WebSocket display envelope keeps its existing
+fields and adds an optional `appendRef`; those display strings never reconstruct
+backend authority. V3 requests send the actual `{pin,seq}` reference.
 
-Chi controls and errors live in Workspace actions, never in the chat feed. The
-temporary Share/Capture and cross-host Continue actions have no external evidence
-link. Local workspaces without a supported Git remote do not acquire a workspace
-mention scope or offer people completion; file completion remains available. Use
-checkout status for this decision: directory projections intentionally omit remotes.
-
-Credential rotation requires explicit **Authorize saved send/reply with current
-credentials** after verification under the same actor and repository. Send
-reauthorization travels separately from the immutable original request/fingerprint;
-reply reauthorization keeps the operation UUID, revision and text. Account or
-repository switches never adopt another principal's saved work: return to the
-original account/repository before reauthorizing. Pending payloads stay hidden
-while authority differs.
-Restore discovers legacy host/workspace reply keys before enabling the form.
-An envelope without deployment identity requires explicit reauthorization, and
-conflicting saved operations block replacement rather than minting another UUID.
-
-Acknowledgement remains a recipient-only lifecycle transition. Replies use
-`POST /handoffs/reply` on the same record and preserve its lifecycle state. A reply
-is not a checked result or incomplete closure. The form saves its operation UUID,
-expected revision, text and verified context before dispatch; an uncertain outcome
-offers the same operation again. Failed/corrupt restore or changed authority blocks
-replacement IDs. Proven revision/scanner rejection is persisted and permits
-**Correct rejected reply**, which refreshes the discussion before a new operation.
-Replies longer than 8,000 characters never enter durable storage. The SDK exposes
-`api.chi.mentions`; the daemon owns credentials, fixed
-backend routes and sanitized failures. No notification transport or account store
-is added. Pi/artifact handoffs remain visible, but in-app exact context browsing is
-currently limited to native evidence.
-
-Mapped OpenCode V2 agents use the caller-bound `human_prompts` tool for questions,
-approvals, decisions and local notes. The authenticated session owner authors the
-ordinary handoff; its scanned text identifies agent initiation and pins the native
-session/message. A waiting form uses the last settled source/snapshot/entry, because
-an active native export is not capturable. A first-turn question without settled
-evidence stays local. No surrounding conversation is attached or visibility widened.
-
-Private receipts enforce immutable dedupe keys, 100 items per session, 2,000
-characters per item, at most five items per batch, and eight batches per recipient
-per UTC day across one daemon home, spaced five minutes apart. This quota is not
-cross-host. FYI/notes, mute, snooze and recent focused viewing suppress dispatch.
-Blocked native forms retry the same immutable batch during the sweep; other lost
-deliveries use explicit retry. Later-day retries reserve that day's quota.
-Recipient inbox mute and one-hour snooze actions persist in backend policy storage,
-independent of agent receipts and source deletion. These session controls only tighten;
-mute lasts for that session. The agent tool can also tighten local suppression but
-cannot clear either policy. Checked-work resolution remains a separate human action.
-Mute requires confirmation. Mute, snooze and replies keep separate immutable pending
-operations; retrying a control cannot resend a pending answer or another control.
-
-**Answer prompt** sends an item-addressed ordinary reply. Only the bound recipient's
-answers resolve local receipts; a later answer can correct an invalid form answer.
-Every exposed answer reauthorizes the exact handoff. Only owner-session forms with
-`metadata.kind === "question"` and a native tool link may resume with inbox answers;
-child, web-search, consent and plugin forms cannot. Unregistered
-native children cannot inherit the parent's human-prompts tool or receipts.
-Queued native items stop dispatching or retrying once their form closes locally;
-retirement retains the immutable receipt and never invents a recipient answer.
-Answers are escaped, attributed untrusted human-written data in tool results or a
-separate user-role message, never a system instruction. Foreground reminders are
-change-only and limited to 600 characters, with answered items first; acknowledgement
-follows successful injection. Steering never injects them. Resumed/forked sessions
-remove the retired `chi-human-prompts` instruction entry. The minimiser omits private
-user reminders and legacy system deltas; the backend rejects un-omitted captures.
-The provider filters tagged reminders from the owner timeline. `/compact` and
-`/summarize` admit fresh reminders after compaction, retaining the untrusted label
-for compacted answers even when no new reminder is pending.
-Automatic reconciliation polls at most eight pending batches per boundary with a
-durable rotating cursor and one authority bracket. Each completed read saves its
-cursor and answers independently. Reads run outside the dispatch lock, and queued
-sends precede reads. A lost create response stays uncertain until an exact read
-proves delivery; recovery does not require a second send. Cached answers exposed by the
-bounded reminder get exact ACL verification without polling for corrections. The
-foreground step has a two-second deadline; expiration withholds the reminder and
-prevents subsequent dispatch while the bounded reader continues for the next turn.
-Explicit list/resolve may read the full bounded receipt.
-Dispatch requires the backend's scanner capability; recipient controls require its
-optional handoff capability. Old clients still parse ordinary discussion.
+Recipient first view saves `readAt` without acknowledging work. The affected
+repository inbox then refreshes from the server rather than changing counts in
+other cached repositories. Context browsing retains the full frozen pin. Exact
+content is read-only; Continue and reply controls are absent in this MVP.
+Account or repository changes never adopt another principal's saved intent.
+Existing local reply/human-prompt receipts are retained but not dispatched through
+retired backend mutations. Session policy consent remains backend-owned.
 
 - **Daemon:** Local server that spawns and manages agent processes and exposes the WebSocket API.
 - **App:** Cross-platform Expo client for iOS, Android, web, and the shared UI used by desktop.
