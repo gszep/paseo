@@ -33,12 +33,15 @@ Your code never leaves your machine. Paseo is local-first.
 
 ## Components at a glance
 
-Chi sync and human mentions use the append-only v3 client. This is an integration
-candidate: production merge and rollout remain held for the coordinated Chi cutover.
+Chi sync and human mentions use the append-only v3 client.
 The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
-Chi `2d9260746d3c555720646c6653f998eb20a6c889`; its integrity is pinned in the lockfile.
+Chi `a9e3cb68d18f5c8d74fbc1c106fc4735f9f3db8c`; its integrity is pinned in the lockfile.
 Repack after shared-helper changes. The server package bundles this dependency so
 installed CLI/Docker builds do not depend on a checkout-relative vendor path.
+The BEGIN-token scanner correction preserves saved receipts and source lineage
+through its exact predecessor-policy transition. Deploy its matching backend
+before this helper; downgrading after transition stops affected appends rather
+than rewriting policy labels or history.
 
 The app gates once on `server_info.features.chiAppendV3`. Older capability fields
 remain parseable but are false. The daemon requires both authenticated backend

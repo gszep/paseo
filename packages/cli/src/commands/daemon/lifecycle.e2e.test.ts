@@ -295,13 +295,19 @@ test.skipIf(process.platform === "win32")(
     const f = await fixture();
     const [a, b] = f.homes as [string, string];
     try {
-      await f.configure(a, `127.0.0.1:${await port()}`);
-      await f.configure(b, `127.0.0.1:${await port()}`);
+      // Bind atomically instead of releasing a probed port before either daemon
+      // starts. Both published endpoints must still be distinct real TCP ports.
+      await f.configure(a, "127.0.0.1:0");
+      await f.configure(b, "127.0.0.1:0");
       await writeFile(path.join(b, "server-id"), "saved-b");
       await f.ok(["start", "--home", a, "--timeout", "30"]);
       await f.ok(["start", "--home", b, "--timeout", "30"], { PASEO_SERVER_ID: "live-b" });
       const beforeA = await f.liveStatus(a);
-      expect((await f.liveStatus(b)).serverId).toBe("live-b");
+      const beforeB = await f.liveStatus(b);
+      expect(beforeA.listen).toMatch(/^127\.0\.0\.1:[1-9]\d*$/);
+      expect(beforeB.listen).toMatch(/^127\.0\.0\.1:[1-9]\d*$/);
+      expect(beforeB.listen).not.toBe(beforeA.listen);
+      expect(beforeB.serverId).toBe("live-b");
       await f.ok(["restart", "--home", b, "--timeout", "30"]);
       const bLock = JSON.parse(await readFile(path.join(b, "paseo.pid"), "utf8"));
       await writeFile(
