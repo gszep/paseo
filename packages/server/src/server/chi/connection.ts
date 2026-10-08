@@ -1669,7 +1669,9 @@ export class ChiConnection {
       pending,
       error,
       warning,
-      mentionsAvailable: Boolean(resolved && !error && resolved.endpoint === this.primaryEndpoint),
+      // Capture failures belong to individual sessions, not the people directory.
+      // Directory reads still acquire their own authenticated repository scope.
+      mentionsAvailable: Boolean(resolved && resolved.endpoint === this.primaryEndpoint),
     };
   }
   async continue(

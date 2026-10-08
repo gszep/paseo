@@ -76,7 +76,11 @@ recovery; the client never overwrites history or automatically recreates a sourc
 
 Human mentions use Chi's existing source-linked handoffs. The composer prefetches the
 authorized participant directory on mount, before the first `@`. Matching is local
-and synchronous. Keep the directory in memory across popup close/reopen; revalidate
+and synchronous. A workspace's capture-error summary does not disable its people
+directory: another session's failed upload must not hide authorized recipients.
+Directory reads retain their own session/repository checks, and selecting a person
+does not clear capture errors or bypass scanning on delivery.
+Keep the directory in memory across popup close/reopen; revalidate
 in the background on popup open, focus/reconnect and a 30-second foreground interval.
 Same-scope revalidation keeps people visible while pending. A pending file search
 never delays people, and an empty-state row waits for all initial sources to settle.

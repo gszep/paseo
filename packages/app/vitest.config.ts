@@ -85,7 +85,10 @@ export default defineConfig({
     // Bundle the CJS dependencies of the excluded gesture-handler package for the browser.
     include: [
       "react",
+      "react-dom",
       "react-dom/client",
+      "react-i18next",
+      "react-native",
       "@tanstack/react-query",
       "zustand",
       "zod",
