@@ -1,7 +1,7 @@
-import React, { useCallback } from "react";
+import React, { useCallback, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { userEvent } from "@vitest/browser/context";
 import { Autocomplete, type AutocompleteOption } from "./autocomplete";
 import { useAutocomplete } from "@/hooks/use-autocomplete";
@@ -9,7 +9,74 @@ import {
   buildMentionAutocompleteOptions,
   type DirectorySuggestionEntry,
 } from "@/composer/autocomplete";
-import type { SelectedMention } from "@/chi/mention-selection";
+import { selectedRecipients, type SelectedMention } from "@/chi/mention-selection";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { queryClient } from "@/data/query-client";
+import { useAgentAutocomplete } from "@/hooks/use-agent-autocomplete";
+import { loseHostMentionScopes } from "@/chi/use-mention-scope";
+
+const host = vi.hoisted(() => ({
+  client: { chiSyncStatus: vi.fn(), chiMentions: vi.fn(), getDirectorySuggestions: vi.fn() },
+}));
+vi.mock("@/runtime/host-runtime", () => ({
+  useHostRuntimeClient: () => host.client,
+  useHostRuntimeIsConnected: () => true,
+}));
+const session = {
+  sessions: {
+    host: {
+      serverInfo: { features: { chiAppendV3: true } },
+      agents: new Map([
+        ["healthy", { provider: "opencode", cwd: "/repo", workspaceId: "workspace", labels: {} }],
+      ]),
+    },
+  },
+};
+vi.mock("@/stores/session-store", () => ({
+  useSessionStore: <T,>(select: (state: typeof session) => T) => select(session),
+}));
+vi.mock("@/hooks/use-agent-commands-query", () => ({
+  useAgentCommandsQuery: () => ({ commands: [], isLoading: false, isError: false, error: null }),
+}));
+
+function DirectoryComposer() {
+  const [text, setText] = useState("");
+  const completion = useAgentAutocomplete({
+    userInput: text,
+    cursorIndex: text.length,
+    setUserInput: setText,
+    serverId: "host",
+    agentId: "healthy",
+  });
+  const change = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    setText(event.target.value);
+  }, []);
+  const { onKeyPress } = completion;
+  const keyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      onKeyPress({
+        key: event.key,
+        preventDefault: () => event.preventDefault(),
+        input: {
+          text: event.currentTarget.value,
+          selection: {
+            start: event.currentTarget.selectionStart ?? 0,
+            end: event.currentTarget.selectionEnd ?? 0,
+          },
+        },
+      });
+    },
+    [onKeyPress],
+  );
+  return (
+    <div style={harnessStyle}>
+      {completion.isVisible ? (
+        <Autocomplete {...completion} onSelect={completion.onSelectOption} />
+      ) : null}
+      <input aria-label="Draft only" value={text} onChange={change} onKeyDown={keyDown} />
+    </div>
+  );
+}
 
 const files: DirectorySuggestionEntry[] = Array.from({ length: 20 }, (_, index) => ({
   path: `file-${index}.ts`,
@@ -69,7 +136,71 @@ let container: HTMLDivElement;
 afterEach(() => {
   flushSync(() => root.unmount());
   container.remove();
+  loseHostMentionScopes("host");
+  queryClient.clear();
+  vi.clearAllMocks();
 });
+
+it.each(["@Ste", "@SteffenPL"])(
+  "Tab selects Steffen from %s despite a sibling session's capture error",
+  async (text) => {
+    const context = {
+      actor: "github:actor",
+      repo: "github:fixture/repo",
+      generation: "a".repeat(64),
+      evidenceVersion: 3 as const,
+    };
+    host.client.chiSyncStatus.mockResolvedValue({
+      outcome: "ready",
+      destination: {
+        id: "primary",
+        name: "Primary",
+        endpoint: "https://chi.invalid",
+        audience: "shared",
+      },
+      pending: false,
+      error: "capture-local-secret-rejected",
+      mentionsAvailable: true,
+    });
+    host.client.chiMentions.mockImplementation(async ({ operation }) =>
+      operation.action === "scope"
+        ? { kind: "scope", actor: context.actor, context }
+        : {
+            kind: "participants",
+            actor: context.actor,
+            context,
+            participants: [{ ownerId: "github:steffenpl", handle: "SteffenPL" }],
+          },
+    );
+    host.client.getDirectorySuggestions.mockResolvedValue({ entries: [], error: null });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    flushSync(() =>
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <DirectoryComposer />
+        </QueryClientProvider>,
+      ),
+    );
+    const input = container.querySelector("input")!;
+    await userEvent.fill(input, text);
+    await expect
+      .poll(
+        () =>
+          container.querySelector('[data-testid="autocomplete-option-human:github:steffenpl"]')
+            ?.textContent,
+      )
+      .toContain("@SteffenPL");
+    expect(container.textContent).not.toContain("No files or directories found");
+    await userEvent.keyboard("{Tab}");
+    expect(input.value).toBe("@SteffenPL ");
+    expect(selectedRecipients("host", "healthy", input.value)).toEqual(["github:steffenpl"]);
+    expect(
+      new Set(host.client.chiMentions.mock.calls.map(([request]) => request.operation.action)),
+    ).toEqual(new Set(["scope", "participants"]));
+  },
+);
 
 async function settleLayout() {
   // RN web measures on animation frames; include the subsequent scroll event.

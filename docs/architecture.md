@@ -35,7 +35,7 @@ Your code never leaves your machine. Paseo is local-first.
 
 Chi sync and human mentions use the append-only v3 client.
 The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
-Chi `6b2ca89843bccde792ca96b133786b03c106c9f4`; its integrity is pinned in the lockfile.
+Chi `a9e3cb68d18f5c8d74fbc1c106fc4735f9f3db8c`; its integrity is pinned in the lockfile.
 Repack after shared-helper changes. The server package bundles this dependency so
 installed CLI/Docker builds do not depend on a checkout-relative vendor path.
 The BEGIN-token scanner correction preserves saved receipts and source lineage
@@ -79,7 +79,11 @@ recovery; the client never overwrites history or automatically recreates a sourc
 
 Human mentions use Chi's existing source-linked handoffs. The composer prefetches the
 authorized participant directory on mount, before the first `@`. Matching is local
-and synchronous. Keep the directory in memory across popup close/reopen; revalidate
+and synchronous. A workspace's capture-error summary does not disable its people
+directory: another session's failed upload must not hide authorized recipients.
+Directory reads retain their own session/repository checks, and selecting a person
+does not clear capture errors or bypass scanning on delivery.
+Keep the directory in memory across popup close/reopen; revalidate
 in the background on popup open, focus/reconnect and a 30-second foreground interval.
 Same-scope revalidation keeps people visible while pending. A pending file search
 never delays people, and an empty-state row waits for all initial sources to settle.

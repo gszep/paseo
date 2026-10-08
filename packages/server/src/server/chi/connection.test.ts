@@ -402,6 +402,78 @@ describe.skipIf(process.platform === "win32")(
       const agent = await f.registration.register("ses_fork", {});
       return { ...f, agent, connection: f.restart() };
     }
+    it.each(["capture-local-secret-rejected", "capture-head-diverged", "append-http-503"])(
+      "keeps the people directory available when another session has %s",
+      async (error) => {
+        const f = await mapped();
+        f.agents.push({
+          ...f.agent,
+          id: "other-agent",
+          labels: {
+            "chi.native": JSON.stringify({
+              repo: f.input.repo,
+              actor: "github:owner",
+              sourceId: null,
+              head: null,
+              destination: "fixture",
+              endpoint: f.authority.endpoint,
+              audience: "shared",
+              error,
+            }),
+          },
+        });
+        expect(await f.connection.syncStatus(f.input)).toMatchObject({
+          error,
+          pending: false,
+          mentionsAvailable: true,
+        });
+        const scope = await f.connection.mentionOperation(f.home, "workspace", { action: "scope" });
+        expect(
+          await f.connection.mentionOperation(
+            f.home,
+            "workspace",
+            { action: "participants" },
+            scope.context,
+          ),
+        ).toMatchObject({ result: { kind: "participants", participants: [] } });
+        expect(f.runtime.export).not.toHaveBeenCalled();
+        expect(f.backend.entries).toEqual([]);
+      },
+    );
+
+    it("directory availability does not grant repository access", async () => {
+      const f = await mapped();
+      f.request.mockImplementation(async (url, init) =>
+        new URL(String(url)).pathname === "/participants"
+          ? Response.json({ ok: false }, { status: 403 })
+          : f.serve(url, init),
+      );
+      expect(await f.connection.syncStatus(f.input)).toMatchObject({ mentionsAvailable: true });
+      await expect(
+        f.connection.mentionOperation(f.home, "workspace", { action: "scope" }),
+      ).rejects.toThrow("chi-mentions-http-403");
+      expect(f.runtime.export).not.toHaveBeenCalled();
+    });
+
+    it("keeps local and multiple destinations out of the primary people directory", async () => {
+      const f = await mapped();
+      const multiple = fixtureConfig();
+      const destinations = {
+        ...multiple.destinations,
+        peer: { name: "Peer", endpoint: "https://peer.invalid" },
+      };
+      for (const config of [null, { ...multiple, destinations }]) {
+        const connection = new ChiConnection(f.manager, {
+          home: f.home,
+          serverId: "server",
+          authority: f.authority,
+          getChiConfig: () => config,
+        });
+        expect(await connection.syncStatus(f.input)).toMatchObject({ mentionsAvailable: false });
+      }
+      expect(f.request).not.toHaveBeenCalled();
+    });
+
     it.each([
       undefined,
       {},
