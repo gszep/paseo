@@ -6,6 +6,7 @@ import {
   filterInboxHandoffs,
   inboxRepositories,
   repositoryLabel,
+  inboxWorkspaceName,
 } from "./inbox-model";
 
 const NOW = new Date();
@@ -73,13 +74,23 @@ test("derives sorted repository options from loaded pages", () => {
   expect(inboxRepositories([])).toEqual([]);
 });
 
-test("groups rows into date sections and drops page overlaps", () => {
+test("keeps one flat chronological list and drops page overlaps", () => {
   const rows = buildInboxRows([newer, newer, older]);
   expect(rows.map((row) => row.key)).toEqual([
-    "today",
     `${newer.repo}/${newer.id}`,
-    "older",
     `${older.repo}/${older.id}`,
   ]);
-  expect(rows[0]).toMatchObject({ section: "today" });
+  expect(rows[0]).toMatchObject({ handoff: newer });
+});
+
+test("uses the workspace name and keeps historical rows identifiable", () => {
+  const named = { ...newer, workspaceName: "Release planning" };
+  expect(inboxWorkspaceName(named)).toBe("Release planning");
+  expect(inboxWorkspaceName(older)).toBe("one");
+  expect(
+    filterInboxHandoffs([named, older], {
+      search: "release planning",
+      repository: ALL_REPOSITORIES_OPTION_ID,
+    }),
+  ).toEqual([named]);
 });

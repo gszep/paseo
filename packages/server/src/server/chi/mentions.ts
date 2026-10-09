@@ -52,6 +52,7 @@ const receiptSchema = z.object({
   endpoint: z.string(),
   deployment: z.string(),
   text: z.string(),
+  workspaceName: z.string().min(1).max(256).optional(),
   admission: z.string().optional(),
   source: ChiSourceSchema.nullable(),
   deliveries: z.array(ChiDeliverySchema),
@@ -80,6 +81,7 @@ const handoffWireSchema = ChiHandoffSchema.pick({
   author: true,
   recipient: true,
   text: true,
+  workspaceName: true,
   state: true,
   revision: true,
   createdAt: true,
@@ -269,6 +271,7 @@ export class ChiMentions {
     agentId: string;
     messageId: string;
     text: string;
+    workspaceName?: string;
     recipients: string[];
     identity: MentionIdentity;
     admission: string;
@@ -313,6 +316,7 @@ export class ChiMentions {
         endpoint: this.authority.endpoint,
         deployment: input.identity.deployment,
         text: input.text,
+        ...(input.workspaceName ? { workspaceName: input.workspaceName } : {}),
         admission: input.admission,
         source: null,
         deliveries: selected.map((recipient) => ({
@@ -439,6 +443,7 @@ export class ChiMentions {
           id: delivery.handoffId,
           recipient: delivery.recipient.ownerId,
           text: receipt.text,
+          ...(receipt.workspaceName ? { workspaceName: receipt.workspaceName } : {}),
           sources: [receipt.source],
         });
         delivery.status = "delivered";
@@ -456,6 +461,7 @@ export class ChiMentions {
       id: string;
       recipient: string;
       text: string;
+      workspaceName?: string;
       sources: z.infer<typeof ChiSourceSchema>[];
     },
   ) {
@@ -481,6 +487,7 @@ export class ChiMentions {
       handoff.recipient !== input.recipient ||
       handoff.repo !== identity.repo ||
       handoff.text !== input.text ||
+      handoff.workspaceName !== input.workspaceName ||
       canonicalJson(response.handoff.sources) !== canonicalJson(sources)
     )
       throw new Error("chi-mention-invalid-response");

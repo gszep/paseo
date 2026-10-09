@@ -11,6 +11,7 @@ export const ChiMentionContextSchema = z.object({
   deployment: z.string().optional(),
   evidenceVersion: z.literal(3).optional(),
   repositories: z.array(id).optional(),
+  defaultRepository: id.optional(),
 });
 export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
 export const ChiFailureSchema = z.object({
@@ -65,6 +66,7 @@ export const ChiHandoffSchema = z.object({
   author: principal,
   recipient: principal,
   text,
+  workspaceName: z.string().min(1).max(256).optional(),
   sources: z.array(ChiSourceSchema).min(1).max(32),
   state,
   revision: z.number().int().positive(),

@@ -765,21 +765,31 @@ describe.skipIf(process.platform === "win32")(
         includeRepositories: false,
       });
       expect(scope.result).toEqual({ kind: "scope", actor: "github:owner" });
-      expect(scope.context).toMatchObject({ repo: "*", evidenceVersion: 3 });
+      expect(scope.context).toMatchObject({
+        repo: "*",
+        evidenceVersion: 3,
+        defaultRepository: f.input.repo,
+      });
       expect(scope.context.repositories).toBeUndefined();
       expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
         "/auth/session",
         "/auth/session",
       ]);
       f.request.mockClear();
+      f.request.mockImplementation(async (url, init) => {
+        if (new URL(String(url)).pathname === "/handoffs/inbox")
+          return new Response(null, { status: 403 });
+        return f.serve(url, init);
+      });
       await expect(
         f.connection.inboxOperation(
           { action: "inbox", inbox: true, repo: f.input.repo },
           scope.context,
         ),
-      ).rejects.toThrow("chi-repository-denied");
+      ).rejects.toThrow("chi-mentions-http-403");
       expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
         "/auth/session",
+        "/handoffs/inbox",
       ]);
     });
 
@@ -875,19 +885,26 @@ describe.skipIf(process.platform === "win32")(
       await rejection;
     });
 
-    it("deployment inbox requires an explicit repository from its authorized catalog", async () => {
+    it("deployment inbox requires a repository and authorizes even candidates absent from the catalog", async () => {
       const f = await mapped();
       const scope = await f.connection.inboxOperation({ action: "scope" });
       expect(scope.context.repositories).toEqual([f.input.repo]);
       await expect(
         f.connection.inboxOperation({ action: "inbox", inbox: true }, scope.context),
       ).rejects.toThrow("chi-mention-repository-required");
+      f.request.mockImplementation(async (url, init) => {
+        if (new URL(String(url)).pathname === "/handoffs/inbox") {
+          expect(new Headers(init?.headers).get("x-chi-repo")).toBe("github:foreign/repo");
+          return new Response(null, { status: 403 });
+        }
+        return f.serve(url, init);
+      });
       await expect(
         f.connection.inboxOperation(
           { action: "inbox", inbox: true, repo: "github:foreign/repo" },
           scope.context,
         ),
-      ).rejects.toThrow("chi-repository-denied");
+      ).rejects.toThrow("chi-mentions-http-403");
     });
     it("a delayed repository catalog cannot escape an account switch during scope acquisition", async () => {
       const f = await mapped();
