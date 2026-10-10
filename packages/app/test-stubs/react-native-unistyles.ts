@@ -1,6 +1,10 @@
+import { lightTheme } from "../src/styles/theme";
+
 const testTheme = {
+  ...lightTheme,
   colorScheme: "light",
   colors: {
+    ...lightTheme.colors,
     foreground: "#111111",
     foregroundMuted: "#666666",
     statusSuccess: "#15803d",
@@ -33,15 +37,18 @@ const testTheme = {
   borderWidth: { 1: 1 },
   spacing: [0, 4, 8, 12, 16, 20, 24, 28, 32],
   fontSize: {
+    ...lightTheme.fontSize,
     xs: 12,
     sm: 14,
     base: 16,
   },
   fontFamily: {
+    ...lightTheme.fontFamily,
     ui: "sans-serif",
     mono: "monospace",
   },
   fontWeight: {
+    ...lightTheme.fontWeight,
     normal: "400",
     medium: "500",
   },
