@@ -1571,7 +1571,7 @@ export const ptBR: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Bem-vindo ao Paseo",
+    title: "Bem-vindo ao {{appName}}",
     subtitle: "Conecte seu computador para começar",
     actions: {
       settings: "Configurações",

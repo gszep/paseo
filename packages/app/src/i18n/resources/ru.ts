@@ -1569,7 +1569,7 @@ export const ru: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Добро пожаловать в Paseo",
+    title: "Добро пожаловать в {{appName}}",
     subtitle: "Подключите компьютер, чтобы начать",
     actions: {
       settings: "Настройки",

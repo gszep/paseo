@@ -1586,7 +1586,7 @@ export const es: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Bienvenido aPaseo",
+    title: "Bienvenido a{{appName}}",
     subtitle: "Conecte su computadora para comenzar",
     actions: {
       settings: "Ajustes",

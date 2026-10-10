@@ -1569,7 +1569,7 @@ export const en = {
     },
   },
   onboarding: {
-    title: "Welcome to Paseo",
+    title: "Welcome to {{appName}}",
     subtitle: "Connect your computer to get started",
     actions: {
       settings: "Settings",

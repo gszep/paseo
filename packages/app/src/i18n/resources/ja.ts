@@ -1557,7 +1557,7 @@ export const ja: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Paseoへようこそ",
+    title: "{{appName}}へようこそ",
     subtitle: "始めるにはコンピューターに接続してください",
     actions: {
       settings: "設定",

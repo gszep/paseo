@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ar } from "./resources/ar";
 import { en } from "./resources/en";
 import { es } from "./resources/es";
@@ -104,6 +104,29 @@ function findUntranslatedConnectionErrors(): string[] {
 }
 
 describe("translation resources", () => {
+  it.each([
+    [undefined, "Paseo"],
+    ["Chi", "Chi"],
+  ])("uses the configured welcome brand %s", async (name, expected) => {
+    vi.stubGlobal(
+      "__PASEO_BRAND__",
+      name ? { name, mark: { viewBox: "0 0 100 100", paths: ["M0 0L100 100Z"] } } : undefined,
+    );
+    vi.resetModules();
+    try {
+      const { i18n } = await import("./i18next");
+      expect(i18n.t("onboarding.title")).toBe(`Welcome to ${expected}`);
+      for (const lng of ["ar", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN"]) {
+        const title = i18n.t("onboarding.title", { lng });
+        expect(title).toContain(expected);
+        expect(title).not.toContain("{{appName}}");
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
   it("keeps all supported language keys in sync with English", () => {
     const englishKeys = flattenKeys(en).sort();
     expect(flattenKeys(ar).sort()).toEqual(englishKeys);
@@ -353,7 +376,7 @@ describe("translation resources", () => {
   });
 
   it("includes onboarding and direct connection keys for the Batch 4E migration", () => {
-    expect(en.onboarding.title).toBe("Welcome to Paseo");
+    expect(en.onboarding.title).toBe("Welcome to {{appName}}");
     expect(en.onboarding.actions.settings).toBe("Settings");
     expect(en.pairing.direct.title).toBe("Direct connection");
     expect(en.pairing.direct.fields.host).toBe("Host");
