@@ -131,6 +131,11 @@ require the intent's fingerprint to match a pending/completed admission. A crash
 between intent publication and native admission cannot turn an ordinary same-ID
 prompt into a mention; preparing receipts can resume only their original request.
 Legacy intent without an admission fingerprint fails closed.
+An explicit retry may complete a pending local send receipt without resubmitting:
+the original fingerprint, saved mention intent, current authorized context and exact
+persisted native user metadata/text must agree. Missing or conflicting proof keeps
+the outcome unknown. This acknowledgement neither changes source lineage nor
+claims that sync or handoff delivery succeeded.
 Settled capture resolves the persisted user message by the
 provider's `paseoClientMessageId` metadata and verifies its text. The native entry ID
 is never inferred from the composer ID, a timestamp, an assistant echo or matching

@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import { createHash } from "node:crypto";
+import { confirmsNativeSubmission } from "../message-receipts/native.js";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -469,6 +470,60 @@ export class ChiConnection {
     }
     if (!admission) throw new Error("chi-mention-admission-required");
     await this.mentions.prepare({ agentId, messageId, text, recipients, identity, admission });
+  }
+
+  async recoverMentionSend(input: {
+    agentId: string;
+    messageId: string;
+    text: string;
+    recipients: string[];
+    expectedContext?: ChiMentionContext;
+    admission: string;
+  }): Promise<boolean> {
+    const target = await this.captureTarget(input.agentId);
+    if (!target || target.provider !== "opencode") return false;
+    const identity = await this.mentionIdentity(target.cwd);
+    this.requireMentionContext(identity, input.expectedContext);
+    // Recovery reads admission proof only. It must not resume a turn, capture a
+    // source, or repair sync state as a side effect of acknowledging a local send.
+    const association = this.requireAssociation(
+      associationSchema.parse(JSON.parse(target.labels[label] ?? "null")),
+    );
+    if (
+      association.endpoint !== this.authority.endpoint ||
+      association.repo !== identity.repo ||
+      association.actor?.toLowerCase() !== identity.actor
+    )
+      throw new Error("chi-mention-context-changed");
+    if (!(await this.mentions.confirmsPrepared({ ...input, identity }))) return false;
+    const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
+    if (!sessionId) return false;
+    const confirmed = await this.manager.withNativeRuntime(sessionId, async (runtime) => {
+      const info = z.object({ version: z.literal("2.0.15-chi.1") }).safeParse(await runtime.info());
+      if (!info.success) return false;
+      return confirmsNativeSubmission({
+        native: await runtime.export(sessionId),
+        sessionId,
+        cwd: target.cwd,
+        messageId: input.messageId,
+        text: input.text,
+      });
+    });
+    this.requireMentionContext(await this.mentionIdentity(target.cwd), input.expectedContext);
+    const current = await this.captureTarget(input.agentId);
+    const currentSession = current?.persistence.nativeHandle ?? current?.persistence.sessionId;
+    if (
+      currentSession !== sessionId ||
+      current?.cwd !== target.cwd ||
+      current.provider !== target.provider
+    )
+      return false;
+    const currentAssociation = this.requireAssociation(
+      associationSchema.parse(JSON.parse(current.labels[label] ?? "null")),
+    );
+    if (!sameCaptureScope(currentAssociation, association))
+      throw new Error("chi-mention-context-changed");
+    return confirmed;
   }
 
   private mentionContext(identity: MentionIdentity): ChiMentionContext {

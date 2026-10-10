@@ -62,6 +62,8 @@ export function mentionError(error: unknown): string {
       "The host account, repository or credentials changed. Return to the original account and repository, verify mention context, then explicitly authorize the saved operation with current credentials.",
     "chi-mention-submission-unresolved":
       "A saved send is unconfirmed. Use Retry saved send to confirm that exact request before starting another send.",
+    agent_request_outcome_unknown:
+      "The host could not verify whether this saved message was accepted. Its receipt is retained to prevent a duplicate. Reconnecting alone will not resolve it; recovery requires the original message in the provider's history.",
     "chi-host-disconnected": "Reconnect this host, then verify mention context.",
     host_restarting:
       "This host is restarting and could not accept the send automatically. Retry the same operation once it reconnects.",

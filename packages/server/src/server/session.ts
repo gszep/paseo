@@ -8632,6 +8632,17 @@ export class Session {
               );
             }
           },
+          recover: async (fingerprint) => {
+            if (!msg.chiMentions || !msg.messageId || !this.agentManager.chi) return false;
+            return this.agentManager.chi.recoverMentionSend({
+              agentId,
+              messageId: msg.messageId,
+              text: msg.text,
+              recipients: msg.chiMentions,
+              expectedContext: msg.chiMentionAuthorization ?? msg.chiMentionContext,
+              admission: fingerprint,
+            });
+          },
           send,
         });
       } else {

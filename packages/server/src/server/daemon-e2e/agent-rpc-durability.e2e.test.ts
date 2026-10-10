@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 
@@ -18,6 +19,7 @@ test.skipIf(process.platform === "win32")(
   "mention intent is created only inside admitted message receipts, and transformed sends reject before admission",
   async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "mention-admission-"));
+    const paseoHomeRoot = mkdtempSync(path.join(os.tmpdir(), "mention-admission-home-"));
     execFileSync("git", ["init", "-q", cwd]);
     execFileSync("git", [
       "-C",
@@ -30,53 +32,89 @@ test.skipIf(process.platform === "win32")(
     const repo = "github:fixture/repo",
       actor = "github:sender";
     const submitted: string[] = [];
+    const nativeMessages: Array<{
+      id: string;
+      type: string;
+      text: string;
+      metadata: { paseoClientMessageId: string };
+    }> = [];
     const backendWrites: string[] = [];
     let credentialGeneration = "original",
       loggedOut = false;
-    const host = await createTestPaseoDaemon({
-      mcpEnabled: false,
-      chi: {
-        destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
-        mappings: [{ repo, destination: "fixture", audience: "shared" }],
-      },
-      agentClients: {
-        opencode: createTestAgentClient("opencode", {
-          onStartTurn(_prompt, options) {
-            submitted.push(options!.clientMessageId!);
-          },
-        }),
-      },
-      chiAuthority: {
-        invalidate: () => undefined,
-        endpoint: "https://chi.invalid",
-        login: async () => {
-          if (loggedOut) throw new Error("chi-github-login-required");
-          return { sessionToken: "fixture", chiUserId: actor, credentialGeneration };
+    const startHost = () =>
+      createTestPaseoDaemon({
+        paseoHomeRoot,
+        cleanup: false,
+        mcpEnabled: false,
+        chi: {
+          destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
+          mappings: [{ repo, destination: "fixture", audience: "shared" }],
         },
-        request: async (url, init) => {
-          const target = new URL(String(url));
-          if (init?.method && init.method !== "GET") backendWrites.push(target.pathname);
-          if (target.pathname === "/auth/session")
-            return Response.json({
-              ok: true,
-              chiUserId: actor,
-              capabilities: {
-                appendLog: { v: 3, deployment: "fixture" },
-                handoffs: { v: 3, references: "pin-seq" },
+        agentClients: {
+          opencode: createTestAgentClient("opencode", {
+            onStartTurn(prompt, options) {
+              submitted.push(options!.clientMessageId!);
+              nativeMessages.push({
+                id: `native-${submitted.length}`,
+                type: "user",
+                text: typeof prompt === "string" ? prompt : "",
+                metadata: { paseoClientMessageId: options!.clientMessageId! },
+              });
+            },
+            nativeRuntime: {
+              identity: "http://fixture-runtime",
+              info: async () => ({ version: "2.0.15-chi.1" }),
+              export: async (sessionId) => ({
+                info: { id: sessionId, location: { directory: cwd } },
+                messages: nativeMessages,
+              }),
+              schema: async () => {
+                throw new Error("not used");
               },
-            });
-          if (target.pathname === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
-          if (target.pathname === "/participants")
-            return Response.json({
-              ok: true,
-              self: actor,
-              participants: [{ ownerId: "github:recipient", handle: "recipient" }],
-            });
-          return new Response(null, { status: 503 });
+              get: async () => {
+                throw new Error("not used");
+              },
+              import: async () => {
+                throw new Error("not used");
+              },
+              fork: async () => {
+                throw new Error("not used");
+              },
+            },
+          }),
         },
-      },
-    });
-    const client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
+        chiAuthority: {
+          invalidate: () => undefined,
+          endpoint: "https://chi.invalid",
+          login: async () => {
+            if (loggedOut) throw new Error("chi-github-login-required");
+            return { sessionToken: "fixture", chiUserId: actor, credentialGeneration };
+          },
+          request: async (url, init) => {
+            const target = new URL(String(url));
+            if (init?.method && init.method !== "GET") backendWrites.push(target.pathname);
+            if (target.pathname === "/auth/session")
+              return Response.json({
+                ok: true,
+                chiUserId: actor,
+                capabilities: {
+                  appendLog: { v: 3, deployment: "fixture" },
+                  handoffs: { v: 3, references: "pin-seq" },
+                },
+              });
+            if (target.pathname === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
+            if (target.pathname === "/participants")
+              return Response.json({
+                ok: true,
+                self: actor,
+                participants: [{ ownerId: "github:recipient", handle: "recipient" }],
+              });
+            return new Response(null, { status: 503 });
+          },
+        },
+      });
+    let host = await startHost();
+    let client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
     let projectId: string | undefined;
     try {
       await client.connect();
@@ -210,8 +248,47 @@ test.skipIf(process.platform === "win32")(
       const authorized = { ...saved, chiMentionAuthorization: fresh.context };
       await client.sendAgentMessage(agent.id, text, authorized);
       await client.waitForFinish(agent.id);
-      await client.sendAgentMessage(agent.id, text, authorized);
+      // Reproduce a provider-accepted send whose durable completion write was lost.
+      const receiptPath = path.join(
+        host.paseoHome,
+        "agent-requests",
+        `${createHash("sha256")
+          .update(JSON.stringify(["send", agent.id, saved.messageId]))
+          .digest("hex")}.json`,
+      );
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      writeFileSync(receiptPath, JSON.stringify({ ...receipt, state: "pending" }));
+      await client.close();
+      await host.close();
+      host = await startHost();
+      client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
+      await client.connect();
+      const original = nativeMessages.find(
+        (message) => message.metadata.paseoClientMessageId === saved.messageId,
+      )!;
+      original.text = "unrelated text";
+      await expect(client.sendAgentMessage(agent.id, text, authorized)).rejects.toThrow(
+        "agent_request_outcome_unknown",
+      );
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("pending");
+      original.text = text;
+      loggedOut = true;
+      await expect(client.sendAgentMessage(agent.id, text, authorized)).rejects.toMatchObject({
+        failure: { outcome: "unknown" },
+      });
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("pending");
+      loggedOut = false;
+      await Promise.all([
+        client.sendAgentMessage(agent.id, text, authorized),
+        client.sendAgentMessage(agent.id, text, authorized),
+      ]);
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("completed");
       expect(submitted.filter((id) => id === saved.messageId)).toHaveLength(1);
+      await client.sendAgentMessage(agent.id, "ordinary after recovery", {
+        messageId: "after-recovery",
+      });
+      await client.waitForFinish(agent.id);
+      expect(submitted.filter((id) => id === "after-recovery")).toHaveLength(1);
       await expect(
         client.sendAgentMessage(agent.id, text, {
           ...authorized,
@@ -234,6 +311,7 @@ test.skipIf(process.platform === "win32")(
       await client.close();
       await host.close();
       rmSync(cwd, { recursive: true, force: true });
+      rmSync(paseoHomeRoot, { recursive: true, force: true });
     }
   },
 );
