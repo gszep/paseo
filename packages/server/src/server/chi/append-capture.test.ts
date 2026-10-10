@@ -174,44 +174,49 @@ test("native divergence and cut-scan rejection stop before another upload", asyn
   expect(f.calls).toHaveLength(calls);
 });
 
-test("vendored policy transition preserves the old checkpoint and advances the same source on successive deltas", async () => {
-  const f = await fixture();
-  const first = await captureAppend(f.input);
-  const root = join(f.input.home, "chi", "append");
-  const files = await readdir(root, { recursive: true });
-  const checkpointName = `confirmed-${first.pin.count}-${first.pin.head}`;
-  const checkpoints = files.filter((file) => file.endsWith(checkpointName));
-  expect(checkpoints).toHaveLength(1);
-  const checkpointPath = join(root, checkpoints[0]!);
-  const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
-  // Only this synthetic fixture is assigned the exact deployed predecessor
-  // policy. Runtime upgrades must never rewrite an installed confirmation.
-  checkpoint.scan.policy =
-    "v3-raw-escaped-native-dfs-lf-r2-gitleaks-8.30.1-0ec357693c23c7a3ed01f9d5a2c2ab9d904da694d374cd2c07b776b9082c0cb3";
-  const saved = JSON.stringify(checkpoint);
-  await writeFile(checkpointPath, saved);
-  const second = await captureAppend({
-    ...f.input,
-    expected: first.pin,
-    native: { info, messages: [message(0), message(1)] },
-  });
-  expect(second.pin.sourceId).toBe(first.pin.sourceId);
-  expect(second.pin.count).toBe(2);
-  expect(await readFile(checkpointPath, "utf8")).toBe(saved);
-  const nextPath = checkpointPath.replace(checkpointName, `confirmed-2-${second.pin.head}`);
-  expect(JSON.parse(await readFile(nextPath, "utf8")).scan.policy).toBe(
-    "v3-raw-escaped-native-dfs-lf-r2-gitleaks-8.30.1-f2fe8357db1f6d7e89769feab7df62159c949d9452b976456741d4382ec8ecb7",
-  );
-  const third = await captureAppend({
-    ...f.input,
-    expected: second.pin,
-    native: { info, messages: [message(0), message(1), message(2)] },
-  });
-  expect(third.pin.sourceId).toBe(first.pin.sourceId);
-  expect(third.pin.count).toBe(3);
-  expect(f.confirmed.map((pin) => pin.count)).toEqual([1, 2, 3]);
-  expect(await readFile(checkpointPath, "utf8")).toBe(saved);
-});
+test.each([
+  "0ec357693c23c7a3ed01f9d5a2c2ab9d904da694d374cd2c07b776b9082c0cb3",
+  "f2fe8357db1f6d7e89769feab7df62159c949d9452b976456741d4382ec8ecb7",
+])(
+  "vendored policy transition from %s preserves the old checkpoint and advances the same source on successive deltas",
+  async (policy) => {
+    const f = await fixture();
+    const first = await captureAppend(f.input);
+    const root = join(f.input.home, "chi", "append");
+    const files = await readdir(root, { recursive: true });
+    const checkpointName = `confirmed-${first.pin.count}-${first.pin.head}`;
+    const checkpoints = files.filter((file) => file.endsWith(checkpointName));
+    expect(checkpoints).toHaveLength(1);
+    const checkpointPath = join(root, checkpoints[0]!);
+    const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8"));
+    // Only this synthetic fixture is assigned the exact deployed predecessor
+    // policy. Runtime upgrades must never rewrite an installed confirmation.
+    checkpoint.scan.policy = `v3-raw-escaped-native-dfs-lf-r2-gitleaks-8.30.1-${policy}`;
+    const saved = JSON.stringify(checkpoint);
+    await writeFile(checkpointPath, saved);
+    const second = await captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), message(1)] },
+    });
+    expect(second.pin.sourceId).toBe(first.pin.sourceId);
+    expect(second.pin.count).toBe(2);
+    expect(await readFile(checkpointPath, "utf8")).toBe(saved);
+    const nextPath = checkpointPath.replace(checkpointName, `confirmed-2-${second.pin.head}`);
+    expect(JSON.parse(await readFile(nextPath, "utf8")).scan.policy).toBe(
+      "v3-raw-escaped-native-dfs-lf-r2-gitleaks-8.30.1-78a4746d19d86f26f09da05ec51549fcc68eaef38287b7223a10c63b89506cf5",
+    );
+    const third = await captureAppend({
+      ...f.input,
+      expected: second.pin,
+      native: { info, messages: [message(0), message(1), message(2)] },
+    });
+    expect(third.pin.sourceId).toBe(first.pin.sourceId);
+    expect(third.pin.count).toBe(3);
+    expect(f.confirmed.map((pin) => pin.count)).toEqual([1, 2, 3]);
+    expect(await readFile(checkpointPath, "utf8")).toBe(saved);
+  },
+);
 
 test("a lost host checkpoint replays its durable request before constructing a new batch", async () => {
   const f = await fixture();
