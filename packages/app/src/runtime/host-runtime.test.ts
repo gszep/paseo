@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { AppStateStatus } from "react-native";
 import { bindHostRuntimeAppState } from "@/navigation/host-runtime-bootstrap";
 import type {
@@ -26,6 +27,27 @@ import {
 import type { ReplicaRow, ReplicaRowStore } from "./replica-cache/row-store";
 
 import { subscriptionFixture } from "./subscription-fixture";
+
+vi.mock("@react-native-async-storage/async-storage", () => {
+  const values = new Map<string, string>();
+  return {
+    default: {
+      getItem: async (key: string) => values.get(key) ?? null,
+      setItem: async (key: string, value: string) => {
+        values.set(key, value);
+      },
+      removeItem: async (key: string) => {
+        values.delete(key);
+      },
+      clear: async () => {
+        values.clear();
+      },
+    },
+  };
+});
+beforeEach(async () => {
+  await AsyncStorage.clear();
+});
 
 class FakeDaemonClient {
   private state: ConnectionState = { status: "idle" };
@@ -1780,6 +1802,67 @@ describe("HostRuntimeStore", () => {
     }
   });
 
+  it("keeps a transient registry read failure distinct from an unpaired app and retries", async () => {
+    const host = makeHost();
+    const raw = JSON.stringify([host]);
+    const storage = createMemoryHostRuntimeStorage({
+      "@paseo:daemon-registry": raw,
+      "@paseo:e2e": "1",
+    });
+    const read = storage.getItem;
+    let unavailable = true;
+    storage.getItem = async (key) => {
+      if (unavailable && key === "@paseo:daemon-registry") throw new Error("storage unavailable");
+      return read(key);
+    };
+    const store = createAppearanceStore(storage);
+    await store.boot();
+    expect(store.getHostRegistryStatus()).toBe("error");
+    expect(store.isHostRegistryLoaded()).toBe(false);
+    await expect(store.upsertConnectionFromOffer(makeOffer())).rejects.toThrow();
+    expect(await read("@paseo:daemon-registry")).toBe(raw);
+    unavailable = false;
+    await store.boot();
+    expect(store.getHostRegistryStatus()).toBe("ready");
+    expect(store.getHosts().map((entry) => entry.serverId)).toEqual([host.serverId]);
+    store.syncHosts([]);
+  });
+
+  it.each([
+    ["malformed JSON", "{"],
+    [
+      "unknown field beside a valid host",
+      JSON.stringify([makeHost(), { ...makeHost({ serverId: "srv_newer" }), futureField: true }]),
+    ],
+    [
+      "invalid connection beside a valid host",
+      JSON.stringify([
+        makeHost(),
+        {
+          ...makeHost({ serverId: "srv_bad" }),
+          connections: [
+            { type: "relay", relayEndpoint: "relay.invalid:443", daemonPublicKeyB64: "" },
+          ],
+        },
+      ]),
+    ],
+  ])("retains the exact registry and refuses overwrites after %s", async (_name, raw) => {
+    const storage = createMemoryHostRuntimeStorage({
+      "@paseo:daemon-registry": raw,
+      "@paseo:e2e": "1",
+      "paseo-drafts": "untouched draft",
+    });
+    const store = createAppearanceStore(storage);
+    await store.boot();
+    expect(await storage.getItem("@paseo:daemon-registry")).toBe(raw);
+    expect(store.getHostRegistryStatus()).toBe("error");
+    await expect(store.upsertConnectionFromOffer(makeOffer())).rejects.toThrow();
+    await expect(store.renameHost("srv_bad", "renamed")).rejects.toThrow();
+    expect(await storage.getItem("@paseo:daemon-registry")).toBe(raw);
+    expect(await storage.getItem("paseo-drafts")).toBe("untouched draft");
+    store.syncHosts([]);
+  });
+
   it("exposes the default appearance for a host stored before the field existed", async () => {
     const storage = createMemoryHostRuntimeStorage();
     await storage.setItem(
@@ -1913,8 +1996,7 @@ describe("HostRuntimeStore", () => {
 
     const color = store.setHostColor("srv_appearance", "teal");
     const display = store.setHostBadgeDisplay("srv_appearance", "icon");
-    await Promise.resolve();
-    expect(writeCount).toBe(1);
+    await vi.waitFor(() => expect(writeCount).toBe(1));
 
     firstWrite.resolve();
     await Promise.all([color, display]);
@@ -3500,6 +3582,96 @@ describe("HostRuntimeStore", () => {
     expect(pairedHost?.label).toBe("mbp");
 
     store.syncHosts([]);
+  });
+
+  it("does not report pairing success or replace saved hosts when the registry write fails", async () => {
+    const host = makeHost();
+    const raw = JSON.stringify([host]);
+    const storage = createMemoryHostRuntimeStorage({
+      "@paseo:daemon-registry": raw,
+      "@paseo:e2e": "1",
+    });
+    const store = createAppearanceStore(storage);
+    await store.boot();
+    storage.setItem = async () => {
+      throw new Error("storage full");
+    };
+
+    await expect(store.upsertConnectionFromOffer(makeOffer())).rejects.toThrow();
+    expect(store.getHosts().map((entry) => entry.serverId)).toEqual([host.serverId]);
+    expect(await storage.getItem("@paseo:daemon-registry")).toBe(raw);
+    store.syncHosts([]);
+  });
+
+  it("closes a successfully probed connection when saving the host fails", async () => {
+    const storage = createMemoryHostRuntimeStorage({ "@paseo:e2e": "1" });
+    storage.setItem = async () => {
+      throw new Error("storage full");
+    };
+    const client = makeConnectedProbeClient(5);
+    const close = vi.spyOn(client, "close");
+    const store = new HostRuntimeStore({
+      storage,
+      deps: {
+        ...makeDeps({}, []),
+        connectToDaemon: async () => ({
+          client: client as unknown as DaemonClient,
+          serverId: "srv_probed",
+          hostname: "Test",
+        }),
+      },
+    });
+    await expect(
+      store.probeAndUpsertConnection({
+        connection: {
+          type: "directTcp",
+          id: "direct:localhost:12345",
+          endpoint: "localhost:12345",
+        },
+      }),
+    ).rejects.toThrow();
+    expect(close).toHaveBeenCalledOnce();
+    expect(store.getHosts()).toEqual([]);
+  });
+
+  it("waits for a delayed save and serializes two pairings so both survive reopening", async () => {
+    const storage = createMemoryHostRuntimeStorage({ "@paseo:e2e": "1" });
+    const store = createAppearanceStore(storage);
+    await store.boot();
+    const write = storage.setItem;
+    const pending = createDeferred<void>();
+    const started = createDeferred<void>();
+    let writes = 0;
+    storage.setItem = async (key, value) => {
+      if (++writes === 1) {
+        started.resolve();
+        await pending.promise;
+      }
+      await write(key, value);
+    };
+    let paired = false;
+    const first = store.upsertConnectionFromOffer(makeOffer()).then(() => {
+      paired = true;
+      return undefined;
+    });
+    const second = store.upsertConnectionFromOffer(
+      makeOffer({ serverId: "srv_second", daemonPublicKeyB64: "pk_test_second" }),
+    );
+    await started.promise;
+    expect(paired).toBe(false);
+    expect(store.getHosts()).toEqual([]);
+    expect(writes).toBe(1);
+    pending.resolve();
+    await Promise.all([first, second]);
+    store.setAppVisible(false);
+    store.syncHosts([]);
+    const reopened = createAppearanceStore(storage);
+    await reopened.boot();
+    expect(reopened.getHosts().map((entry) => entry.serverId)).toEqual(["srv_offer", "srv_second"]);
+    expect(reopened.getHosts().map((entry) => entry.connections)).toEqual(
+      store.getHosts().map((entry) => entry.connections),
+    );
+    reopened.syncHosts([]);
   });
 
   it("stores relay TLS from a pairing offer", async () => {

@@ -44,6 +44,10 @@ status. Do not redirect to another online host just because the remembered host
 is still connecting or offline; the workspace screen owns that offline/loading
 state.
 
+Registry loading errors are not proof that a host is missing. The shared registry
+boundary keeps startup on recovery until a read succeeds, without redirecting to
+welcome or changing the selected route. See [saved hosts](data-model.md#saved-hosts).
+
 This split is deliberate. The host layout must mount first so native local
 dynamic params exist before any nested workspace leaf is selected.
 

@@ -1449,6 +1449,7 @@ export const ar: TranslationResources = {
     body: "جرّب مرة أخرى لإعادة تحميل التطبيق. إذا استمر حدوث ذلك، فأرفق التفاصيل أدناه عند الإبلاغ عنه.",
     details: "التفاصيل",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "حدث خطأ ما",
     errorDescription:

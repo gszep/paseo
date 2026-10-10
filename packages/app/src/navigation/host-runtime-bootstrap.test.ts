@@ -212,6 +212,22 @@ describe("resolveStartupRoute", () => {
     ).toEqual({ kind: "splash" });
   });
 
+  it("does not redirect to welcome when saved hosts cannot be read", () => {
+    expect(
+      resolveStartupRoute({
+        ...baseIndexInput,
+        hostRegistryStatus: "error",
+        hasGivenUpWaitingForHost: true,
+      }),
+    ).toEqual({ kind: "splash" });
+    expect(
+      resolveStartupRoute({
+        ...baseHostInput,
+        hostRegistryStatus: "error",
+      }),
+    ).toEqual({ kind: "render" });
+  });
+
   it("does not treat loading hosts as an empty registry when a workspace is already restored", () => {
     expect(
       resolveStartupRoute({

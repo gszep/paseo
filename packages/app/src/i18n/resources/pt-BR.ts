@@ -1479,6 +1479,7 @@ export const ptBR: TranslationResources = {
     body: "Tente novamente para recarregar o app. Se isso continuar acontecendo, inclua os detalhes abaixo ao relatar o problema.",
     details: "Detalhes",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "Algo deu errado",
     errorDescription:
