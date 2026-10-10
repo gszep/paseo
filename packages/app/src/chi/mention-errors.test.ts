@@ -7,6 +7,12 @@ const SECRET_COPY =
 const SCANNER_COPY =
   "The secret scanner is unavailable on this host. Check the pinned Gitleaks installation, then retry sync.";
 
+test("an uncertain saved send explains retained proof rather than suggesting reconnect", () => {
+  expect(mentionError(new Error("agent_request_outcome_unknown"))).toBe(
+    "The host could not verify whether this saved message was accepted. Its receipt is retained to prevent a duplicate. Reconnecting alone will not resolve it; recovery requires the original message in the provider's history.",
+  );
+});
+
 test.each(["capture-local-secret-rejected", "evidence-http-422-server-secret-scan-rejected"])(
   "maps %s to the honest secret copy",
   (code) => {

@@ -248,6 +248,184 @@ async function fixture() {
   };
 }
 
+describe.skipIf(process.platform === "win32")("saved mention admission recovery", () => {
+  async function recoveryFixture() {
+    const f = await fixture();
+    const auth = {
+      actor: "github:owner",
+      generation: "first",
+      deployment: "fixture",
+      allowed: true,
+    };
+    f.authority.login = async () => ({
+      sessionToken: "fixture",
+      chiUserId: auth.actor,
+      credentialGeneration: auth.generation,
+    });
+    f.request.mockImplementation(async (url, init) => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/auth/session")
+        return Response.json({
+          ok: true,
+          chiUserId: auth.actor,
+          capabilities: {
+            appendLog: { v: 3, deployment: auth.deployment },
+            handoffs: { v: 3, references: "pin-seq" },
+          },
+        });
+      if (pathname === "/repos")
+        return Response.json({ ok: true, repos: auth.allowed ? [{ repo: f.input.repo }] : [] });
+      if (pathname === "/participants")
+        return Response.json({
+          ok: true,
+          self: auth.actor,
+          participants: [{ handle: "reader", ownerId: "github:reader" }],
+        });
+      return f.serve(url, init);
+    });
+    const association = {
+      repo: f.input.repo,
+      actor: auth.actor,
+      endpoint: f.authority.endpoint,
+      destination: "fixture",
+      sourceId: f.input.sourceId,
+      head: "b".repeat(64),
+      error: "capture-local-secret-rejected",
+    };
+    const agent = await f.registration.register("ses_fork", {
+      "chi.native": JSON.stringify(association),
+    });
+    const owner = f.restart();
+    const scope = await owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    const input = {
+      agentId: agent.id,
+      messageId: "saved",
+      text: "@reader review",
+      recipients: ["github:reader"],
+      admission: "c".repeat(64),
+      expectedContext: scope.context,
+    };
+    await owner.prepareMentions(
+      input.agentId,
+      input.messageId,
+      input.text,
+      input.recipients,
+      input.expectedContext,
+      input.admission,
+    );
+    const native = {
+      ...f.transfer,
+      messages: [
+        {
+          id: "msg_accepted",
+          type: "user",
+          text: input.text,
+          metadata: { paseoClientMessageId: input.messageId },
+        },
+      ],
+    };
+    vi.mocked(f.runtime.export).mockImplementation(async () => structuredClone(native));
+    f.request.mockClear();
+    return { ...f, auth, owner, recoveryInput: input, native };
+  }
+
+  it("recovers after reconstruction without changing sync lineage or calling a native mutation", async () => {
+    const f = await recoveryFixture();
+    const before = structuredClone(f.agents);
+    await expect(f.restart().recoverMentionSend(f.recoveryInput)).resolves.toBe(true);
+    expect(f.agents).toEqual(before);
+    expect(f.runtime.import).not.toHaveBeenCalled();
+    expect(f.runtime.fork).not.toHaveBeenCalled();
+    expect(f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    { messageId: "missing" },
+    { text: "different" },
+    { recipients: ["github:other"] },
+    { admission: "d".repeat(64) },
+  ])("requires the exact prepared intent: %j", async (change) => {
+    const f = await recoveryFixture();
+    await expect(f.owner.recoverMentionSend({ ...f.recoveryInput, ...change })).resolves.toBe(
+      false,
+    );
+    expect(f.runtime.export).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit same-principal reauthorization after credential rotation", async () => {
+    const f = await recoveryFixture();
+    f.auth.generation = "rotated";
+    await expect(f.owner.recoverMentionSend(f.recoveryInput)).rejects.toThrow(
+      "chi-mention-context-changed",
+    );
+    const scope = await f.owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    await expect(
+      f.owner.recoverMentionSend({ ...f.recoveryInput, expectedContext: scope.context }),
+    ).resolves.toBe(true);
+    f.auth.actor = "github:other";
+    const other = await f.owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    await expect(
+      f.owner.recoverMentionSend({ ...f.recoveryInput, expectedContext: other.context }),
+    ).rejects.toThrow("chi-mention-context-changed");
+    f.auth.actor = "github:owner";
+    f.auth.deployment = "another-deployment";
+    const changed = await f.owner.mentionOperation(f.home, "workspace", { action: "scope" });
+    await expect(
+      f.owner.recoverMentionSend({ ...f.recoveryInput, expectedContext: changed.context }),
+    ).resolves.toBe(false);
+  });
+
+  it.each(["authority", "credentials", "association", "repository"])(
+    "rejects a %s change during native export",
+    async (change) => {
+      const f = await recoveryFixture();
+      vi.mocked(f.runtime.export).mockImplementation(async () => {
+        if (change === "authority") f.auth.allowed = false;
+        if (change === "credentials") f.auth.generation = "rotated";
+        if (change === "association")
+          f.agents[0]!.labels["chi.native"] = JSON.stringify({
+            ...JSON.parse(f.agents[0]!.labels["chi.native"]!),
+            actor: "github:other",
+          });
+        if (change === "repository")
+          execFileSync("git", [
+            "-C",
+            f.home,
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/fixture/other.git",
+          ]);
+        return structuredClone(f.native);
+      });
+      await expect(f.owner.recoverMentionSend(f.recoveryInput)).rejects.toThrow();
+    },
+  );
+
+  it("does not confirm a replaced native session", async () => {
+    const f = await recoveryFixture();
+    vi.mocked(f.runtime.export).mockImplementation(async () => {
+      f.agents[0]!.persistence = { provider: "opencode", sessionId: "ses_replaced" };
+      return structuredClone(f.native);
+    });
+    await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
+  });
+
+  it("does not infer acceptance from unavailable native proof or an unsupported runtime", async () => {
+    const f = await recoveryFixture();
+    vi.mocked(f.runtime.export).mockRejectedValueOnce(new Error("native export unavailable"));
+    await expect(f.owner.recoverMentionSend(f.recoveryInput)).rejects.toThrow(
+      "native export unavailable",
+    );
+    vi.mocked(f.runtime.info).mockResolvedValueOnce({ version: "unsupported" });
+    await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
+    f.native.messages = [];
+    await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
+  });
+});
+
 describe("mention directory cache", () => {
   const identity: MentionIdentity = {
     repo: "github:fixture/repo",

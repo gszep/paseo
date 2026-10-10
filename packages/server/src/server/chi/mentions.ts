@@ -43,6 +43,15 @@ export interface MentionAuthority {
   endpoint: string;
   request: typeof fetch;
 }
+interface MentionPreparation {
+  agentId: string;
+  messageId: string;
+  text: string;
+  workspaceName?: string;
+  recipients: string[];
+  identity: MentionIdentity;
+  admission: string;
+}
 const receiptSchema = z.object({
   version: z.literal(3),
   agentId: z.string(),
@@ -267,15 +276,23 @@ export class ChiMentions {
     return result.participants.map((p) => ({ handle: p.handle, ownerId: p.ownerId.toLowerCase() }));
   }
 
-  async prepare(input: {
-    agentId: string;
-    messageId: string;
-    text: string;
-    workspaceName?: string;
-    recipients: string[];
-    identity: MentionIdentity;
-    admission: string;
-  }) {
+  async confirmsPrepared(input: MentionPreparation): Promise<boolean> {
+    const stored = await readConversationReceipt(this.path(input.agentId, input.messageId));
+    if (stored === null) return false;
+    const receipt = receiptSchema.parse(stored);
+    const recipients = [...new Set(input.recipients.map((id) => id.toLowerCase()))].sort();
+    return (
+      receipt.agentId === input.agentId &&
+      receipt.messageId === input.messageId &&
+      this.matches(receipt, input.identity) &&
+      receipt.text === input.text &&
+      receipt.admission === input.admission &&
+      JSON.stringify(receipt.deliveries.map((d) => d.recipient.ownerId)) ===
+        JSON.stringify(recipients)
+    );
+  }
+
+  async prepare(input: MentionPreparation) {
     return this.exclusive(input.agentId, async () => {
       const recipients = [...new Set(input.recipients.map((id) => id.toLowerCase()))].sort();
       const path = this.path(input.agentId, input.messageId);
