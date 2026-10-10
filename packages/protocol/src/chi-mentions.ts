@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AgentTimelineItemPayloadSchema } from "./timeline-item.js";
 
 const id = z.string().min(1).max(256);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -256,7 +257,15 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
     actor: principal,
     source: ChiSourceSchema,
     entries: z
-      .array(z.object({ nativeId: id, type: id, seq: z.number().int().nonnegative().optional() }))
+      .array(
+        z.object({
+          nativeId: id,
+          type: id,
+          seq: z.number().int().nonnegative().optional(),
+          timestamp: z.string().optional(),
+          items: z.array(AgentTimelineItemPayloadSchema).max(256).optional(),
+        }),
+      )
       .max(30),
     nextCursor: z.string().nullable(),
   }),

@@ -151,7 +151,7 @@ function ReadOnlyHistory({
           style={styles.pagination}
         >
           <Text style={styles.label}>
-            {newerPagination.isLoadingNewer ? "Loading newer history…" : "Load newer history"}
+            {newerPagination.isLoadingNewer ? "Loading history…" : "Load newer history"}
           </Text>
         </Pressable>
       ) : null,

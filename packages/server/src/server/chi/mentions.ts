@@ -3,6 +3,11 @@ import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { MessageReceipts } from "../message-receipts/index.js";
+import {
+  boundedPinnedContext,
+  pinnedContextRange,
+  pinnedTimelineEntries,
+} from "./pinned-timeline.js";
 import type { SendAgentMessageRequest } from "@getpaseo/protocol/messages";
 import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/http";
 import {
@@ -581,18 +586,9 @@ export class ChiMentions {
     const ref = source.appendRef;
     if (!ref) throw new Error("chi-mention-native-source-required");
     if (operation.action === "context") {
-      const cursor = operation.cursor?.split(":");
-      if (
-        cursor &&
-        (cursor.length !== 2 || cursor[0] !== ref.pin.head || !/^(0|[1-9][0-9]*)$/.test(cursor[1]!))
-      )
-        throw new Error("chi-mention-invalid-cursor");
-      const start = cursor ? Number(cursor[1]) : 0;
-      if (!Number.isSafeInteger(start) || start > ref.pin.count)
-        throw new Error("chi-mention-invalid-cursor");
       // V3 complete-entry witnesses are below 100 KiB; eight entries leave
       // response framing room under the strict 1 MiB decoder boundary.
-      const end = Math.min(start + 8, ref.pin.count);
+      const { start, end } = pinnedContextRange(ref.pin, operation.cursor);
       const page = z.object({ entries: z.array(z.string()).max(30) }).parse(
         await this.call(identity, "evidence/entries", "GET", undefined, {
           pin: JSON.stringify(ref.pin),
@@ -601,26 +597,15 @@ export class ChiMentions {
         }),
       );
       if (page.entries.length !== end - start) throw new Error("chi-mention-invalid-response");
-      const entries = page.entries.map((bytes, index) => {
-        const entry = decodeEntry(bytes);
-        if (entry.seq !== start + index) throw new Error("chi-mention-invalid-response");
-        const payload = z.object({ native: z.string() }).parse(entry.payload);
-        const native = z
-          .object({ id: z.string(), type: z.string().optional() })
-          .parse(parseNativeJson(payload.native));
-        return {
-          nativeId: native.id,
-          type: entry.kind === "message" ? (native.type ?? "message") : entry.kind,
-          seq: entry.seq,
-        };
-      });
-      return {
+      const entries = pinnedTimelineEntries(page.entries, start);
+      const result = {
         kind: "context",
         actor,
         source,
         entries,
         nextCursor: end < ref.pin.count ? `${ref.pin.head}:${end}` : null,
-      };
+      } as const;
+      return boundedPinnedContext(result);
     }
     if (operation.entryId !== undefined) throw new Error("chi-mention-invalid-source");
     const seq = operation.seq ?? ref.seq;

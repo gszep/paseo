@@ -1,5 +1,4 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
-import { useEntryJump } from "@/chi/use-entry-jump";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -617,16 +616,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       visibleItemIds: visibleHistoryItemIds,
       revealLoadedItem: revealLoadedHistory,
     });
-    const referencedEntryId = useEntryJump({
-      host: resolvedServerId,
-      agentId,
-      active: isActive,
-      items: effectiveStreamItems,
-      head: effectiveStreamHead,
-      visible: visibleHistoryItemIds,
-      reveal: revealLoadedHistory,
-      viewport: viewportRef,
-    });
 
     useImperativeHandle(
       ref,
@@ -746,20 +735,9 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       (layoutItem: StreamLayoutItem) => {
         const item = layoutItem.item;
         if (item.kind !== "user_message") return null;
-        return referencedEntryId &&
-          item.timelineCursor?.epoch === referencedEntryId.epoch &&
-          item.timelineCursor.seq === referencedEntryId.seq ? (
-          <View
-            testID={`referenced-entry-${referencedEntryId.entryId}`}
-            style={stylesheet.referencedEntry}
-          >
-            {renderUserMessageItem(layoutItem, item)}
-          </View>
-        ) : (
-          renderUserMessageItem(layoutItem, item)
-        );
+        return renderUserMessageItem(layoutItem, item);
       },
-      [renderUserMessageItem, referencedEntryId],
+      [renderUserMessageItem],
     );
     const renderAssistantRow = useCallback(
       (layout: StreamLayoutItem) => {
@@ -1450,7 +1428,6 @@ function PermissionRequestCard({
 }
 
 const stylesheet = StyleSheet.create((theme) => ({
-  referencedEntry: { backgroundColor: theme.colors.surface2, borderRadius: theme.borderRadius.lg },
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface0,

@@ -147,6 +147,7 @@ async function fixture() {
         payload: {
           id: "msg_exact",
           type: "user",
+          time: { created: 1 },
           text: input.text,
           metadata: { paseoClientMessageId: input.messageId },
         },
@@ -155,7 +156,7 @@ async function fixture() {
   };
   const archive = [
     capture.messages[0]!.payload,
-    { id: "msg_neighbor", type: "user", text: "neighbor" },
+    { id: "msg_neighbor", type: "user", text: "neighbor", time: { created: 2 } },
   ];
   const restart = () => new ChiMentions(home, authority);
   return {
