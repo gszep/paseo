@@ -8,6 +8,8 @@ import { mentionError } from "./mention-errors";
 const NOTICE_TITLE =
   "For others to see this session and for its mentions to appear, sync needs to succeed.";
 
+export const WORKSPACE_NOTICE_TITLE = "Sync needs attention for another session in this workspace.";
+
 export const OMITTED_CONTENT_WARNING =
   "A secret was found in content that was left out of the upload. Rotate it or clean the session history.";
 
@@ -85,6 +87,83 @@ export function SyncNoticeView({
 }
 
 /**
+ * Workspace-scoped sync notice: the failing session is not the one on screen.
+ * Names the affected conversation(s) instead of implying "this session".
+ */
+export function WorkspaceSyncNoticeView({
+  error,
+  affected,
+  terminal = false,
+  onDismiss,
+  onRetry,
+}: {
+  error: string;
+  affected: ReadonlyArray<{ id: string; title: string | null }>;
+  terminal?: boolean;
+  onDismiss: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <View style={styles.container} testID="chi-sync-notice-workspace">
+      <Alert
+        variant="error"
+        title={WORKSPACE_NOTICE_TITLE}
+        description={`${describeAffectedConversations(affected)} ${syncNoticeReason(error)}`}
+      >
+        <Button size="sm" variant="ghost" onPress={onDismiss}>
+          Dismiss
+        </Button>
+        {terminal ? null : (
+          <Button size="sm" variant="outline" onPress={onRetry}>
+            Retry
+          </Button>
+        )}
+      </Alert>
+    </View>
+  );
+}
+
+function describeAffectedConversations(
+  affected: ReadonlyArray<{ id: string; title: string | null }>,
+): string {
+  if (affected.length === 0) return "A session in this workspace did not sync.";
+  const titles = affected.map((agent) => agent.title?.trim()).filter(Boolean) as string[];
+  if (titles.length === affected.length) {
+    const shown = titles.slice(0, 2);
+    const rest = affected.length - shown.length;
+    return `Affected session${affected.length === 1 ? "" : "s"}: ${shown.join(", ")}${
+      rest > 0 ? ` and ${rest} more` : ""
+    }.`;
+  }
+  return `Affected session${affected.length === 1 ? "" : "s"}: ${affected.length}.`;
+}
+
+/** Workspace-scoped omitted-content warning for a session that is not on screen. */
+export function WorkspaceSyncWarningView({
+  warning,
+  affected,
+  onDismiss,
+}: {
+  warning: string;
+  affected: ReadonlyArray<{ id: string; title: string | null }>;
+  onDismiss: () => void;
+}) {
+  return (
+    <View style={styles.container} testID="chi-sync-warning-workspace">
+      <Alert
+        variant="warning"
+        title="A session in this workspace synced with a hidden secret"
+        description={`${describeAffectedConversations(affected)} ${syncWarningReason(warning)}`}
+      >
+        <Button size="sm" variant="ghost" onPress={onDismiss}>
+          Dismiss
+        </Button>
+      </Alert>
+    </View>
+  );
+}
+
+/**
  * Non-blocking warning notice: the capture synced, but omitted content held a
  * secret. Dismiss only; there is nothing to retry.
  */
@@ -111,16 +190,18 @@ export function SyncWarningView({
 }
 
 /**
- * Dismissal state for the sync notice: hiding is per-error, so a success (null
- * error) clears the dismissal and a later distinct failure shows again.
+ * Dismissal state for the sync notice: hiding is keyed to the actual subject
+ * (session/checkpoint) and error, so dismissing one conversation never silences
+ * another's, and a success (null error) clears the dismissal.
  */
-export function useSyncNoticeDismissal(error: string | null) {
+export function useSyncNoticeDismissal(error: string | null, subject = "") {
   const [dismissed, setDismissed] = useState<string | null>(null);
+  const key = error ? `${subject}|${error}` : null;
   useEffect(() => {
     if (!error) setDismissed(null);
   }, [error]);
-  const dismiss = useCallback(() => setDismissed(error), [error]);
-  return { visible: Boolean(error) && error !== dismissed, dismiss };
+  const dismiss = useCallback(() => setDismissed(key), [key]);
+  return { visible: Boolean(error) && key !== dismissed, dismiss };
 }
 
 const styles = StyleSheet.create((theme) => ({
