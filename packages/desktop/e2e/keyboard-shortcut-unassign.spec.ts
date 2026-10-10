@@ -68,6 +68,9 @@ async function closeRowMenu(page: Page) {
 }
 
 test("unassigning a shortcut leaves it inert until it is reset", async ({ page }) => {
+  // This workflow includes several full app loads. Keep each UI assertion's
+  // deadline unchanged, but allow the reload/persistence/rebinding sequence to finish.
+  test.setTimeout(120_000);
   await openShortcutsSettings(page);
 
   const clear = page.getByTestId(`shortcut-clear-${SHORTCUTS_ROW}`);
@@ -101,11 +104,11 @@ test("unassigning a shortcut leaves it inert until it is reset", async ({ page }
   await expect(dialog).not.toBeVisible({ timeout: 5_000 });
 
   // The unassignment has to survive a restart, or "cleared" is only a UI state.
-  // A reload lands back on the app shell, so Settings has to be reopened before
-  // the section is reachable.
+  // Registry hydration must retain this route rather than briefly mounting a
+  // protected navigator that sends Settings back to the app shell.
+  const settingsRoute = page.url();
   await page.reload();
-  await openSettings(page);
-  await openSettingsSection(page, "shortcuts");
+  await expect(page).toHaveURL(settingsRoute);
   await expect(notSet).toBeVisible({ timeout: 30_000 });
   await page.keyboard.press("Shift+?");
   await expect(dialog).not.toBeVisible({ timeout: 5_000 });
