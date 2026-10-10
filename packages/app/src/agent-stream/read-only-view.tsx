@@ -3,6 +3,7 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import { AssistantMessage, MessageOuterSpacingProvider, UserMessage } from "@/components/message";
 import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
+import { ProtectedPresentationProvider } from "@/components/protected-presentation";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isWeb } from "@/constants/platform";
 import type { StreamItem } from "@/types/stream";
@@ -39,7 +40,11 @@ const ignoreGroupExpansion = () => {};
 
 /** Supplied, pinned history: no host, agent, plugin, find, file, or live-tail integration. */
 export function ReadOnlyStreamView(props: ReadOnlyStreamViewProps) {
-  return <ReadOnlyHistory key={props.historyId} {...props} />;
+  return (
+    <ProtectedPresentationProvider>
+      <ReadOnlyHistory key={props.historyId} {...props} />
+    </ProtectedPresentationProvider>
+  );
 }
 
 function ReadOnlyHistory({
