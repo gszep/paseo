@@ -59,6 +59,7 @@ async function fixture() {
             id: z.string(),
             recipient: z.string(),
             text: z.string(),
+            workspaceName: z.string().optional(),
             v: z.literal(3),
             sources: z.array(ChiEntryRefSchema),
           })
@@ -246,7 +247,7 @@ test("inbox invalid cursor has a fixed recovery code and never exposes backend d
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {
   const f = await fixture();
   const sender = f.restart();
-  await sender.prepare(f.input);
+  await sender.prepare({ ...f.input, workspaceName: "Release planning" });
   const pending = await sender.status("agent", f.input.identity);
   expect(pending.kind).toBe("delivery");
   f.loseReply();
@@ -262,6 +263,7 @@ test("durable delivery pins the persisted native user entry and replays the same
     .captured({ ...f.capture, pin: { ...f.capture.pin, head: "c".repeat(64), count: 3 } });
   expect(f.submissions).toHaveLength(2);
   expect(f.submissions[1]).toEqual(f.submissions[0]);
+  expect([...f.records.values()][0]?.workspaceName).toBe("Release planning");
   expect([...f.records.values()][0]?.sources).toEqual([
     {
       pin: f.capture.pin,

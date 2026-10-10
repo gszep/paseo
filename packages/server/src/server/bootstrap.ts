@@ -937,6 +937,13 @@ export async function createPaseoDaemon(
       getChiConfig: () => daemonConfigStore.get().chi,
       listStoredAgents: () => agentStorage.list(),
       getStoredAgent: (agentId) => agentStorage.get(agentId),
+      getWorkspaceName: async (workspaceId) => {
+        const workspace = await workspaceRegistry.get(workspaceId);
+        if (!workspace) return undefined;
+        const name = workspace.title ?? workspace.displayName;
+        // Display metadata must not make an otherwise valid send inadmissible.
+        return name.trim() && Buffer.byteLength(name) <= 256 ? name : undefined;
+      },
     },
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,

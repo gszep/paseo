@@ -157,17 +157,23 @@ Definitive rejection is also fenced to its persisted attempt UUID: an older refu
 cannot unlock correction after a newer attempt of the same operation may have committed.
 
 The **Mentions** route binds its actor and endpoint independently of the connected
-host transport. It uses a v3-capable authenticated host and requires an explicit
-repository selection from that principal's catalog. Transport discovery verifies
-the account without enumerating repositories; the picker loads its catalog when
-acquiring a scope. Inbox and detail reads do not enumerate every repository again.
-The catalog limits picker choices, never grants access: each selected-repository
+host transport. The activity feed requires a host advertising `chiInboxActivity`;
+older clients retain their v3 request shapes. A single repository mapping
+for that deployment supplies the initial repository; otherwise the reader selects
+one from the catalog. Account verification and the first inbox read do not wait for
+the repository filter's catalog. Inbox and detail reads do not enumerate every
+repository again. Mapping and catalog hints never grant access: each selected-repository
 request still passes fresh backend authorization and source ACL checks. Account
 verification, catalog loading and inbox-read failures have distinct UI states.
 Backend keysets, unread counts
 and cache keys are repository-scoped; there is no synthetic global unread badge or
 cross-repository fan-out. Search covers loaded pages. Refresh reacquires access on
-focus/reconnect and discards older pages from the preceding acquisition.
+focus/reconnect and discards older pages from the preceding acquisition. The flat
+activity list leads with the workspace name, sender and timestamp, followed by a
+two-line message preview on mobile and desktop. New mention receipts freeze the
+workspace name with the request; the backend scans and stores it with the handoff.
+Historical mentions use a known local source workspace when available, otherwise
+the repository name. Loading rows never marks them read.
 
 Every handoff and exact/context read reacquires source ACLs. Denial clears protected
 query data before delivering the error; a delayed response from a lost scope cannot
