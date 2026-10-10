@@ -182,6 +182,25 @@ workspace name with the request; the backend scans and stores it with the handof
 Historical mentions use a known local source workspace when available, otherwise
 the repository name. Loading rows never marks them read.
 
+Opening a row uses the shared-conversation route on hosts advertising
+`chiPinnedTimeline`. It reads a bounded window around the handoff's exact ordinal,
+then maps that ordinal to the native message ID for highlighting and scrolling.
+Older/newer pages stay within the original pin; refresh never follows a newer
+head. The existing context RPC carries additive timestamp/timeline fields, using
+the ordinary V2 mapping and stream rows without creating an agent or replica store.
+Pinned entry presentation is independent of preceding unloaded structured-output
+requests. Pages contain at most eight records, 256 rows per record and 512 rows
+in total, with a 1 MiB serialized response ceiling.
+
+The supplied-history boundary mounts no agent, composer, plugin, file resolver,
+rewind or live-tail integration. Native user rows are neutral **User**; the header
+attributes the verified mention author, not every message in the session. Links
+and images are inert. Protected code blocks and Mermaid use plain source display
+without shared rendering caches or grammar execution. No repository checkout is
+needed to read; local native-route reuse is deferred until an exact pin/identity
+proof exists. Source labels alone never authorize it. This reader neither enables
+Continue/import/fork nor changes stored native bytes or opaque provider-state rules.
+
 Every handoff and exact/context read reacquires source ACLs. Denial clears protected
 query data before delivering the error; a delayed response from a lost scope cannot
 restore it. Context binds actor, repository, endpoint, backend deployment and host
@@ -193,8 +212,10 @@ backend authority. V3 requests send the actual `{pin,seq}` reference.
 
 Recipient first view saves `readAt` without acknowledging work. The affected
 repository inbox then refreshes from the server rather than changing counts in
-other cached repositories. Context browsing retains the full frozen pin. Exact
-content is read-only; Continue and reply controls are absent in this MVP.
+other cached repositories. This existing first-view receipt is the only write
+associated with opening an unread recipient item; evidence and runtime access are
+read-only. Already-read opening performs no marker mutation. Context browsing
+retains the full frozen pin; Continue and reply controls are absent in this MVP.
 Account or repository changes never adopt another principal's saved intent.
 Existing local reply/human-prompt receipts are retained but not dispatched through
 retired backend mutations. Session policy consent remains backend-owned.

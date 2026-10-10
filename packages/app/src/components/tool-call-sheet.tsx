@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/isolated-bottom-sheet-modal";
 import type { ToolCallIconComponent } from "@/utils/tool-call-icon";
 import { ToolCallDetailsContent } from "./tool-call-details";
+import { useProtectedPresentationBridge } from "./protected-presentation";
 
 // ----- Types -----
 
@@ -87,6 +88,7 @@ interface ToolCallSheetProviderProps {
 }
 
 export function ToolCallSheetProvider({ children }: ToolCallSheetProviderProps) {
+  const presentationBridge = useProtectedPresentationBridge();
   const [sheetData, setSheetData] = React.useState<ToolCallSheetData | null>(null);
   const [isSheetOpen, setIsSheetOpen] = React.useState(false);
 
@@ -132,7 +134,7 @@ export function ToolCallSheetProvider({ children }: ToolCallSheetProviderProps) 
       {children}
       <ToolCallSheetModal
         ref={bottomSheetRef}
-        contextBridge={null}
+        contextBridge={presentationBridge}
         snapPoints={snapPoints}
         index={0}
         enableDynamicSizing={false}

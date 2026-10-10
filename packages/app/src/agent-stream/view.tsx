@@ -1,5 +1,4 @@
 import { ChatFind, ChatFindExpansion } from "@/agent-stream/chat-find";
-import { useEntryJump } from "@/chi/use-entry-jump";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import React, {
   forwardRef,
@@ -10,7 +9,6 @@ import React, {
   useMemo,
   useRef,
   useState,
-  type ComponentProps,
   type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -32,12 +30,7 @@ import { buildWorkspaceTabPersistenceKey } from "@/workspace-tabs/model";
 import { openExplorerSidebarView } from "@/workspace-tabs/explorer-sidebar";
 import {
   AssistantMessage,
-  SpeakMessage,
   UserMessage,
-  Notification,
-  ToolCall,
-  TodoListCard,
-  CompactionMarker,
   MessageOuterSpacingProvider,
   type InlinePathTarget,
 } from "@/components/message";
@@ -53,7 +46,6 @@ import type {
 } from "@getpaseo/protocol/agent-types";
 import type { AgentScreenAgent } from "@/hooks/use-agent-screen-state-machine";
 import { useSessionStore } from "@/stores/session-store";
-import { useRevealedText } from "@/hooks/use-revealed-text";
 import { useFileExplorerActions } from "@/hooks/use-file-explorer-actions";
 import { useLoadOlderAgentHistory } from "@/hooks/use-load-older-agent-history";
 import { useSettings } from "@/hooks/use-settings";
@@ -64,7 +56,7 @@ import { ToolCallDetailsContent } from "@/components/tool-call-details";
 import { QuestionFormCard } from "@/components/question-form-card";
 import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
 import { createStreamPresentation } from "./presentation";
-import { OverviewToolCallGroupView } from "@/tool-calls/detail-level/overview/view";
+import { StreamItemWrapper, useStreamRowRenderer } from "./rows";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
@@ -318,7 +310,6 @@ function useRetainedValue<T>(value: T, active: boolean): T {
   return active ? value : retainedRef.current;
 }
 const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
-const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
 
 function resolveBottomOverlayControlOffset(clearance: number | undefined): number {
   return Math.max(16, clearance ?? 0);
@@ -625,16 +616,6 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       visibleItemIds: visibleHistoryItemIds,
       revealLoadedItem: revealLoadedHistory,
     });
-    const referencedEntryId = useEntryJump({
-      host: resolvedServerId,
-      agentId,
-      active: isActive,
-      items: effectiveStreamItems,
-      head: effectiveStreamHead,
-      visible: visibleHistoryItemIds,
-      reveal: revealLoadedHistory,
-      viewport: viewportRef,
-    });
 
     useImperativeHandle(
       ref,
@@ -750,181 +731,46 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
       [agentId, client, handleInlinePathPress, resolvedServerId, toast, workspaceRoot],
     );
 
-    const renderThoughtItem = useCallback(
-      (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "thought" }>) => {
-        return (
-          <ThoughtSlot
-            itemId={item.id}
-            onInlineDetailsExpandedChangeByItemId={setInlineDetailsExpanded}
-            text={item.text}
-            status={item.status}
-            isLastInSequence={layoutItem.isLastInToolSequence}
-            defaultExpanded={autoExpandReasoning}
-          />
-        );
-      },
-      [autoExpandReasoning, setInlineDetailsExpanded],
-    );
-
-    const renderSingleToolCallItem = useCallback(
-      (
-        item: Extract<StreamItem, { kind: "tool_call" }>,
-        isLastInSequence: boolean,
-        maxDetailHeight?: number,
-      ) => {
-        const { payload } = item;
-
-        if (payload.source === "agent") {
-          const data = payload.data;
-
-          if (
-            data.name === "speak" &&
-            data.detail.type === "unknown" &&
-            typeof data.detail.input === "string" &&
-            data.detail.input.trim()
-          ) {
-            return (
-              <SpeakMessage message={data.detail.input} timestamp={item.timestamp.getTime()} />
-            );
-          }
-
-          return (
-            <ToolCallSlot
-              itemId={item.id}
-              onInlineDetailsExpandedChangeByItemId={setInlineDetailsExpanded}
-              toolName={data.name}
-              error={data.error}
-              status={data.status}
-              detail={data.detail}
-              cwd={context.cwd}
-              metadata={data.metadata}
-              isLastInSequence={isLastInSequence}
-              onOpenFilePath={handleToolCallOpenFile}
-              maxDetailHeight={maxDetailHeight}
-            />
-          );
-        }
-
-        const data = payload.data;
-        return (
-          <ToolCallSlot
-            itemId={item.id}
-            onInlineDetailsExpandedChangeByItemId={setInlineDetailsExpanded}
-            toolName={data.toolName}
-            args={data.arguments}
-            result={data.result}
-            status={data.status}
-            isLastInSequence={isLastInSequence}
-            onOpenFilePath={handleToolCallOpenFile}
-            maxDetailHeight={maxDetailHeight}
-          />
-        );
-      },
-      [context.cwd, setInlineDetailsExpanded, handleToolCallOpenFile],
-    );
-
-    // Read through a stable event so live group updates do not change the renderer identity
-    // every tick; history hosts whose group changed are revised through `historyRowRevision`.
-    const getToolCallGroup = useStableEvent((hostId: string) =>
-      presentation.groupsByHostId.get(hostId),
-    );
-    const renderToolCallItem = useCallback(
-      (layoutItem: StreamLayoutItem, item: Extract<StreamItem, { kind: "tool_call" }>) => {
-        const group = getToolCallGroup(item.id);
-        if (!group) {
-          return renderSingleToolCallItem(item, layoutItem.isLastInToolSequence);
-        }
-        const expanded = expandedToolCallGroupIds.has(group.run.id);
-        return (
-          <OverviewToolCallGroupView
-            group={group}
-            expanded={expanded}
-            isLastInSequence={layoutItem.isLastInToolSequence}
-            onExpandedChange={setToolCallGroupExpanded}
-          >
-            {expanded
-              ? group.run.calls.map((call, index) => (
-                  <React.Fragment key={call.id}>
-                    {renderSingleToolCallItem(
-                      call,
-                      index === group.run.calls.length - 1,
-                      GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT,
-                    )}
-                  </React.Fragment>
-                ))
-              : null}
-          </OverviewToolCallGroupView>
-        );
-      },
-      [
-        expandedToolCallGroupIds,
-        getToolCallGroup,
-        renderSingleToolCallItem,
-        setToolCallGroupExpanded,
-      ],
-    );
-
-    const renderStreamItemContent = useCallback(
+    const renderUserRow = useCallback(
       (layoutItem: StreamLayoutItem) => {
         const item = layoutItem.item;
-        switch (item.kind) {
-          case "user_message":
-            return referencedEntryId &&
-              item.timelineCursor?.epoch === referencedEntryId.epoch &&
-              item.timelineCursor.seq === referencedEntryId.seq ? (
-              <View
-                testID={`referenced-entry-${referencedEntryId.entryId}`}
-                style={stylesheet.referencedEntry}
-              >
-                {renderUserMessageItem(layoutItem, item)}
-              </View>
-            ) : (
-              renderUserMessageItem(layoutItem, item)
-            );
-
-          case "assistant_message":
-            return renderAssistantMessageItem(layoutItem, item);
-
-          case "thought":
-            return renderThoughtItem(layoutItem, item);
-
-          case "tool_call":
-            return renderToolCallItem(layoutItem, item);
-
-          case "notification":
-            return <Notification level={item.level} message={item.message} />;
-
-          case "todo_list":
-            return <TodoListCard items={item.items} activity={item.activity} />;
-
-          case "compaction":
-            return (
-              <CompactionMarker
-                status={item.status}
-                trigger={item.trigger}
-                preTokens={item.preTokens}
-              />
-            );
-
-          case "plugin":
-            return (
-              <PluginTimelineItemView agentId={agentId} item={item} serverId={resolvedServerId} />
-            );
-
-          default:
-            return null;
-        }
+        if (item.kind !== "user_message") return null;
+        return renderUserMessageItem(layoutItem, item);
       },
-      [
-        agentId,
-        renderUserMessageItem,
-        renderAssistantMessageItem,
-        renderThoughtItem,
-        renderToolCallItem,
-        resolvedServerId,
-        referencedEntryId,
-      ],
+      [renderUserMessageItem],
     );
+    const renderAssistantRow = useCallback(
+      (layout: StreamLayoutItem) => {
+        if (layout.item.kind !== "assistant_message") return null;
+        return renderAssistantMessageItem(layout, layout.item);
+      },
+      [renderAssistantMessageItem],
+    );
+    const renderPluginRow = useCallback(
+      (layout: StreamLayoutItem) => {
+        if (layout.item.kind !== "plugin") return null;
+        return (
+          <PluginTimelineItemView
+            agentId={agentId}
+            item={layout.item}
+            serverId={resolvedServerId}
+          />
+        );
+      },
+      [agentId, resolvedServerId],
+    );
+    const renderStreamItemContent = useStreamRowRenderer({
+      renderUserMessage: renderUserRow,
+      renderAssistantMessage: renderAssistantRow,
+      renderPlugin: renderPluginRow,
+      groups: presentation.groupsByHostId,
+      expandedGroupIds: expandedToolCallGroupIds,
+      onGroupExpandedChange: setToolCallGroupExpanded,
+      onInlineExpandedChange: setInlineDetailsExpanded,
+      autoExpandReasoning,
+      cwd: context.cwd,
+      onOpenFilePath: handleToolCallOpenFile,
+    });
 
     const bottomTurnFooterHost = streamLayout.auxiliaryTurnFooter;
 
@@ -1300,59 +1146,6 @@ function agentStreamViewPropsEqual(
 export const AgentStreamView = memo(AgentStreamViewComponent, agentStreamViewPropsEqual);
 AgentStreamView.displayName = "AgentStreamView";
 
-interface ToolCallSlotProps extends Omit<
-  ComponentProps<typeof ToolCall>,
-  "onInlineDetailsExpandedChange"
-> {
-  itemId: string;
-  onInlineDetailsExpandedChangeByItemId: (itemId: string, expanded: boolean) => void;
-}
-
-interface ThoughtSlotProps {
-  itemId: string;
-  onInlineDetailsExpandedChangeByItemId: (itemId: string, expanded: boolean) => void;
-  text: string;
-  status: Extract<StreamItem, { kind: "thought" }>["status"];
-  isLastInSequence: boolean;
-  defaultExpanded: boolean;
-}
-
-// Reasoning text is paced the same way assistant text is; see @/hooks/use-revealed-text.
-function ThoughtSlot({
-  itemId,
-  onInlineDetailsExpandedChangeByItemId,
-  text,
-  status,
-  isLastInSequence,
-  defaultExpanded,
-}: ThoughtSlotProps) {
-  const revealedText = useRevealedText(text, status === "ready" ? "complete" : "streaming");
-  return (
-    <ToolCallSlot
-      itemId={itemId}
-      onInlineDetailsExpandedChangeByItemId={onInlineDetailsExpandedChangeByItemId}
-      toolName="thinking"
-      args={revealedText}
-      status={status === "ready" ? "completed" : "executing"}
-      isLastInSequence={isLastInSequence}
-      defaultExpanded={defaultExpanded}
-      forceInline={defaultExpanded}
-    />
-  );
-}
-
-function ToolCallSlot({
-  itemId,
-  onInlineDetailsExpandedChangeByItemId,
-  ...rest
-}: ToolCallSlotProps) {
-  const handleExpandedChange = useCallback(
-    (expanded: boolean) => onInlineDetailsExpandedChangeByItemId(itemId, expanded),
-    [onInlineDetailsExpandedChangeByItemId, itemId],
-  );
-  return <ToolCall {...rest} onInlineDetailsExpandedChange={handleExpandedChange} />;
-}
-
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const ThemedCheckIcon = withUnistyles(Check);
 const ThemedXIcon = withUnistyles(X);
@@ -1635,7 +1428,6 @@ function PermissionRequestCard({
 }
 
 const stylesheet = StyleSheet.create((theme) => ({
-  referencedEntry: { backgroundColor: theme.colors.surface2, borderRadius: theme.borderRadius.lg },
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface0,
@@ -1660,12 +1452,6 @@ const stylesheet = StyleSheet.create((theme) => ({
   },
   list: {
     flex: 1,
-  },
-  streamItemWrapper: {
-    width: "100%",
-    maxWidth: MAX_CONTENT_WIDTH,
-    alignSelf: "center",
-    paddingHorizontal: theme.spacing[2],
   },
   emptyState: {
     flex: 1,
@@ -1790,17 +1576,3 @@ const permissionStyles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
   },
 }));
-
-interface StreamItemWrapperProps {
-  itemId: string;
-  gapBelow: number;
-  children: ReactNode;
-}
-
-function StreamItemWrapper({ gapBelow, children }: StreamItemWrapperProps) {
-  const wrapperStyle = useMemo(
-    () => [stylesheet.streamItemWrapper, { marginBottom: gapBelow }],
-    [gapBelow],
-  );
-  return <View style={wrapperStyle}>{children}</View>;
-}

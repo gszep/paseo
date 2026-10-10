@@ -11,6 +11,11 @@ import { useSessionStore } from "@/stores/session-store";
 import { inboxContextObserver, useMentionScope } from "./use-mention-scope";
 import { mentionQueryKey, sameMentionContext } from "./mention-context";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import type {
+  ChiMentionContext,
+  ChiMentionOperation,
+  ChiMentionResult,
+} from "@getpaseo/protocol/chi-mentions";
 import { inboxAuthority } from "./inbox-identity";
 import { inboxHostsSettled } from "./inbox-authority";
 import { inboxTransportQueryOptions, useInboxQuery } from "./inbox-query";
@@ -81,6 +86,30 @@ export function useInbox(
     context: state.context ?? undefined,
     run: scope.run,
   });
+}
+
+export interface InboxContext {
+  identity: ChiMentionContext;
+  queryKey: readonly unknown[];
+  execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
+  isCurrent(): boolean;
+}
+
+export function useInboxReader() {
+  const transport = useInboxTransport();
+  const { scope, state, queryKey } = transport;
+  const context = useMemo<InboxContext | null>(() => {
+    const identity = state.context;
+    if (!identity) return null;
+    return {
+      identity,
+      queryKey,
+      execute: (operation) => scope.run(operation, identity),
+      isCurrent: () =>
+        scope.getState().generation === state.generation && scope.getState().context === identity,
+    };
+  }, [scope, state, queryKey]);
+  return { ...transport, context };
 }
 
 export function useInboxCatalog(transport: ReturnType<typeof useInboxTransport>) {

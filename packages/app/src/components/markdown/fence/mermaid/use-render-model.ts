@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
 import {
   createMermaidRenderModel,
   getMermaidRenderRequest,
@@ -9,6 +9,7 @@ import {
 } from "./render-model";
 import { containsUnsafeMermaidSource } from "./source-policy";
 import type { MarkdownPhase } from "../types";
+import { useProtectedPresentation } from "@/components/protected-presentation";
 
 const renderCache = new Map<string, RenderedDiagram>();
 const RENDER_CACHE_LIMIT = 50;
@@ -40,15 +41,23 @@ export function useMermaidRenderModel({
   phase: MarkdownPhase;
   colorScheme: DiagramColorScheme;
 }) {
+  const protectedPresentation = useProtectedPresentation();
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const renderInput = useMemo(
     () => ({
       source,
       phase,
       colorScheme,
       rejected: containsUnsafeMermaidSource(source),
-      cached: readCachedRender(source, colorScheme),
+      cached: protectedPresentation ? null : readCachedRender(source, colorScheme),
     }),
-    [colorScheme, phase, source],
+    [colorScheme, phase, source, protectedPresentation],
   );
   const [state, dispatch] = useReducer(
     reduceMermaidRenderModel,
@@ -67,12 +76,15 @@ export function useMermaidRenderModel({
       colorScheme: DiagramColorScheme;
       dimensions: DiagramDimensions;
     }) => {
+      // A queued iframe/WebView completion may outlive the reading surface.
+      // Never publish it into the process-wide cache after that surface is gone.
+      if (!mounted.current) return;
       const cached: RenderedDiagram = {
         source: response.source,
         colorScheme: response.colorScheme,
         ...response.dimensions,
       };
-      cacheRender(cached);
+      if (!protectedPresentation) cacheRender(cached);
       dispatch({
         type: "rendered",
         revision: response.revision,
@@ -81,9 +93,10 @@ export function useMermaidRenderModel({
         dimensions: response.dimensions,
       });
     },
-    [],
+    [protectedPresentation],
   );
   const renderFailed = useCallback((revision: number) => {
+    if (!mounted.current) return;
     dispatch({ type: "renderFailed", revision });
   }, []);
 

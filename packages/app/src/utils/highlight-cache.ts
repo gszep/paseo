@@ -42,7 +42,8 @@ class LRUCache<K, V> {
   }
 }
 
-const tokenizationCache = new LRUCache<string, HighlightToken[][]>(200);
+export const HIGHLIGHT_CACHE_LIMIT = 200;
+const tokenizationCache = new LRUCache<string, HighlightToken[][]>(HIGHLIGHT_CACHE_LIMIT);
 
 // Tokenize `code` to per-line tokens, cached. Returns null when the language is
 // unsupported, the input is over the size cap, or parsing throws — callers then

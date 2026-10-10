@@ -22,6 +22,7 @@ export const critical = {
     "src/server/chi/append-capture.test.ts",
     "src/server/chi/destinations.test.ts",
     "src/server/chi/mentions.test.ts",
+    "src/server/chi/pinned-timeline.test.ts",
     "src/server/chi/human-prompts.test.ts",
     "src/server/chi/provenance.test.ts",
     "src/server/message-receipts/index.test.ts",
@@ -30,7 +31,9 @@ export const critical = {
   app: [
     "src/utils/scanned-pairing-offer.test.ts",
     "src/chi/continuation-state.test.ts",
-    "src/chi/entry-navigation.test.ts",
+    "src/chi/pinned-conversation.test.ts",
+    "src/chi/conversation-screen.browser.test.tsx",
+    "src/agent-stream/read-only-view.browser.test.tsx",
     "src/chi/mention-submission.test.ts",
     "src/chi/mention-context.test.ts",
     "src/chi/mention-errors.test.ts",
@@ -65,7 +68,10 @@ export const criticalExemptions = {
 
 // This regression is not part of the old server test:integration allowlist.
 // Run it explicitly on BOTH selected and full paths.
-export const criticalServerIntegration = ["src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts"];
+export const criticalServerIntegration = [
+  "src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts",
+  "src/server/daemon-e2e/chi-pinned-context.e2e.test.ts",
+];
 
 export const criticalCli = [
   "12-permit-ls.test.ts",

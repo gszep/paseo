@@ -11,6 +11,7 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { syntaxTokenStyleFor } from "@/styles/syntax-token-styles";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
 import { highlightToKeyedLines, type KeyedLine } from "@/utils/highlight-cache";
+import { useProtectedPresentation } from "./protected-presentation";
 import {
   markdownCopyCodeBlockDataSet,
   markdownCopyDataSet,
@@ -60,6 +61,7 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
   inheritedStyles,
   textStyle,
 }: HighlightedCodeBlockProps) {
+  const protectedPresentation = useProtectedPresentation();
   // Box styles (bg / padding / border / radius / margin) go on the wrapper View
   // so the absolute copy button positions relative to the visible code area,
   // not to a parent that includes the Text's own marginVertical.
@@ -74,8 +76,13 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
   );
 
   const keyedLines = useMemo<KeyedLine[] | null>(
-    () => highlightToKeyedLines(renderedCode, fenceLanguageToExtension(language)),
-    [renderedCode, language],
+    // Some grammars retain their last input too (for example Svelte's scanner).
+    // Use the existing plain-code path, not merely an uncached tokenizer call.
+    () =>
+      protectedPresentation
+        ? null
+        : highlightToKeyedLines(renderedCode, fenceLanguageToExtension(language)),
+    [renderedCode, language, protectedPresentation],
   );
 
   const isCompact = useIsCompactFormFactor();
