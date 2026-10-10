@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Text,
   View,
@@ -12,10 +12,8 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
 import type { Theme } from "@/styles/theme";
-import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
-import { router, useFocusEffect } from "expo-router";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useFocusEffect } from "expo-router";
 import type {
   ChiHandoff,
   ChiMentionOperation,
@@ -25,19 +23,14 @@ import type {
 import { useFetchQuery } from "@/data/query";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
-import { FormTextInput } from "@/components/ui/form-field";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { SearchField } from "@/components/ui/search-field";
 import { HighlightedText } from "@/components/ui/highlighted-text";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
-import { formatDateSectionLabel } from "@/components/date-sections";
 import { formatTimeAgo } from "@/utils/time";
-import { confirmDialog } from "@/utils/confirm-dialog";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import { openReplyForm } from "./reply-model";
-import { readHumanPrompts } from "@getpaseo/protocol/chi-mentions";
 import { mentionError } from "./mention-errors";
-import { useInbox, useInboxTransport } from "./use-inbox";
+import { useInbox, useInboxTransport, useInboxCatalog } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
 import { RepositoryFilter } from "./repository-filter";
 import { inboxDetailQueryOptions } from "./inbox-query";
@@ -46,8 +39,10 @@ import {
   ALL_REPOSITORIES_OPTION_ID,
   buildInboxRows,
   filterInboxHandoffs,
-  inboxRepositories,
   repositoryLabel,
+  inboxWorkspaceName,
+  inboxRepositoryOptions,
+  defaultInboxRepository,
   type InboxListRow,
 } from "./inbox-model";
 
@@ -65,6 +60,30 @@ function EmptyInbox({ filtered }: { filtered: boolean }) {
 }
 function LoadingMore() {
   return <Text style={styles.hint}>Loading more mentions…</Text>;
+}
+function InboxReadStatus({
+  query,
+  repo,
+  refresh,
+}: {
+  query: ReturnType<typeof useInbox>;
+  repo: string | undefined;
+  refresh(): void;
+}) {
+  if (!repo) return <Text style={styles.empty}>Choose a repository to read its mentions.</Text>;
+  if (query.isError)
+    return (
+      <Alert
+        variant="error"
+        title="Unable to load mentions"
+        description={mentionError(query.error)}
+      >
+        <Button onPress={refresh}>Retry</Button>
+      </Alert>
+    );
+  if (query.isFetching && !query.data)
+    return <Text style={styles.empty}>Refreshing mentions…</Text>;
+  return <InboxCoverageNotice unavailableRepos={query.unavailableRepos} />;
 }
 
 const ThemedMessageSquare = withUnistyles(MessageSquare);
@@ -111,7 +130,7 @@ export function ChiInboxScreen() {
         </Text>
       ) : null}
       {host && (!state.context || state.loading) && !state.error ? (
-        <Text style={styles.empty}>Loading mentions…</Text>
+        <Text style={styles.empty}>Verifying your Chi inbox account…</Text>
       ) : null}
       {host && state.error && !state.loading ? (
         <Alert
@@ -137,11 +156,14 @@ function Inbox({
   context: InboxContext;
 }) {
   const cache = useQueryClient();
-  const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
   const [searchInput, setSearchInput] = useState("");
-  const [repository, setRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
+  const [repository, selectRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
   const [selected, setSelected] = useState<ChiHandoff | null>(null);
+  const setRepository = useCallback((repo: string) => {
+    selectRepository(repo);
+    setSelected(null);
+  }, []);
   const [openSession, setOpenSession] = useState(true);
   const [scrolledDown, setScrolledDown] = useState(false);
   useEffect(() => {
@@ -152,13 +174,20 @@ function Inbox({
       setScrolledDown(event.nativeEvent.contentOffset.y > 0),
     [],
   );
+  const catalog = useInboxCatalog(transport);
+  const repositories = inboxRepositoryOptions(context.identity, catalog.data);
+  const defaultRepo = defaultInboxRepository(context.identity, repositories);
+  const selectedRepo = repository === ALL_REPOSITORIES_OPTION_ID ? defaultRepo : repository;
   // The recipient inbox shares its first page with the sidebar badge.
-  const query = useInbox(transport, { paused: scrolledDown, autoContinue: true });
+  const query = useInbox(transport, {
+    paused: scrolledDown,
+    autoContinue: true,
+    repo: selectedRepo,
+  });
   const loaded = useMemo(
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
     [query.data],
   );
-  const repositories = useMemo(() => inboxRepositories(loaded), [loaded]);
   const filtered = useMemo(
     () => filterInboxHandoffs(loaded, { search: searchInput, repository }),
     [loaded, searchInput, repository],
@@ -182,27 +211,21 @@ function Inbox({
     setSelected(handoff);
   }, []);
   const renderRow = useCallback(
-    ({ item }: { item: InboxListRow }) =>
-      "section" in item ? (
-        <Text accessibilityRole="header" style={styles.section}>
-          {formatDateSectionLabel(t, item.section)}
-        </Text>
-      ) : (
-        <InboxRow
-          handoff={item.handoff}
-          search={searchInput}
-          unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
-          selected={selected?.id === item.handoff.id}
-          onSelect={choose}
-          onDiscuss={discuss}
-        />
-      ),
-    [t, searchInput, selected?.id, choose, discuss, context.identity.actor],
+    ({ item }: { item: InboxListRow }) => (
+      <InboxRow
+        handoff={item.handoff}
+        search={searchInput}
+        unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
+        selected={selected?.id === item.handoff.id}
+        onSelect={choose}
+        onDiscuss={discuss}
+      />
+    ),
+    [searchInput, selected?.id, choose, discuss, context.identity.actor],
   );
   const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
   const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
   const emptyComponent = useMemo(() => <EmptyInbox filtered={isFiltered} />, [isFiltered]);
-  const refreshing = query.isFetching && !query.isFetchingNextPage;
   return (
     <View style={styles.screen}>
       <View style={styles.filterRail}>
@@ -217,7 +240,7 @@ function Inbox({
           />
           <RepositoryFilter
             repositories={repositories}
-            selected={repository}
+            selected={selectedRepo ?? ALL_REPOSITORIES_OPTION_ID}
             onSelect={setRepository}
             triggerTestID="inbox-repo-filter-trigger"
             optionTestID={repositoryOptionTestID}
@@ -226,24 +249,19 @@ function Inbox({
         <Text style={styles.identity} testID="inbox-identity">
           Signed in as @{context.identity.actor.slice(7)}
         </Text>
+        {catalog.isError ? (
+          <Text accessibilityRole="alert" style={styles.hint}>
+            Repository filter unavailable. {mentionError(catalog.error)}
+          </Text>
+        ) : null}
       </View>
-      {query.isError ? (
-        <Alert
-          variant="error"
-          title="Unable to load mentions"
-          description={mentionError(query.error)}
-        >
-          <Button onPress={refresh}>Retry</Button>
-        </Alert>
-      ) : null}
-      {refreshing && !query.data ? <Text style={styles.empty}>Refreshing mentions…</Text> : null}
-      {!query.isError ? <InboxCoverageNotice unavailableRepos={query.unavailableRepos} /> : null}
+      <InboxReadStatus query={query} repo={selectedRepo} refresh={refresh} />
       {query.data && !query.isError ? (
         <View style={compact ? styles.screen : styles.split}>
           {!compact || !selected ? (
             <FlatList
               testID="chi-flat-inbox"
-              style={compact ? styles.screen : styles.list}
+              style={compact || !selected ? styles.screen : styles.list}
               contentContainerStyle={styles.listContent}
               data={rows}
               keyExtractor={rowKey}
@@ -282,7 +300,7 @@ function Inbox({
   );
 }
 
-/** One Mentions row, laid out on the History agent-row rails. */
+/** A workspace-led activity row, with the same readable preview on every screen size. */
 function InboxRow({
   handoff,
   search,
@@ -298,18 +316,17 @@ function InboxRow({
   onSelect(h: ChiHandoff): void;
   onDiscuss(h: ChiHandoff): void;
 }) {
-  const compact = useIsCompactFormFactor();
   const handle = `@${handoff.author.slice(7)}`;
   const repo = repositoryLabel(handoff.repo);
-  const replies = handoff.replies?.length ?? 0;
+  const workspace = inboxWorkspaceName(handoff);
   const timeAgo = formatTimeAgo(new Date(handoff.createdAt));
   const ranges = useMemo(
     () => ({
       handle: findHighlightRanges(search, handle),
-      repo: findHighlightRanges(search, repo),
+      workspace: findHighlightRanges(search, workspace),
       text: findHighlightRanges(search, handoff.text),
     }),
-    [search, handle, repo, handoff.text],
+    [search, handle, workspace, handoff.text],
   );
 
   const choose = useCallback(() => onSelect(handoff), [handoff, onSelect]);
@@ -341,8 +358,8 @@ function InboxRow({
         <View style={styles.rowContent}>
           <View style={styles.rowTitleRow}>
             <HighlightedText
-              text={handle}
-              ranges={ranges.handle}
+              text={workspace}
+              ranges={ranges.workspace}
               style={styles.rowHandle}
               numberOfLines={1}
             />
@@ -353,46 +370,28 @@ function InboxRow({
                 style={styles.unread}
               />
             ) : null}
-            <Text style={styles.rowState}>{handoff.state}</Text>
+            <Text style={styles.rowTime}>{timeAgo}</Text>
           </View>
-          {compact ? (
-            <View style={styles.rowMetaRow}>
-              <HighlightedText
-                text={repo}
-                ranges={ranges.repo}
-                style={styles.rowMetaText}
-                numberOfLines={1}
-              />
-              <Text style={styles.rowMetaSeparator}>·</Text>
-              <Text style={styles.rowMetaText}>{replies} replies</Text>
-              <Text style={styles.rowMetaSeparator}>·</Text>
-              <Text style={styles.rowMetaText}>{timeAgo}</Text>
-            </View>
-          ) : (
+          <View style={styles.rowMetaRow}>
             <HighlightedText
-              text={handoff.text}
-              ranges={ranges.text}
-              style={styles.rowSnippet}
+              text={handle}
+              ranges={ranges.handle}
+              style={styles.rowMetaText}
               numberOfLines={1}
             />
-          )}
+            <Text style={styles.rowMetaSeparator}>·</Text>
+            <Text style={styles.rowMetaText} numberOfLines={1}>
+              {repo}
+            </Text>
+          </View>
+          <HighlightedText
+            text={handoff.text}
+            ranges={ranges.text}
+            style={styles.rowSnippet}
+            numberOfLines={2}
+            testID={`mention-preview-${handoff.id}`}
+          />
         </View>
-        {!compact ? (
-          <View style={styles.rowColumns}>
-            <HighlightedText
-              text={repo}
-              ranges={ranges.repo}
-              style={styles.columnMeta}
-              numberOfLines={1}
-            />
-            <Text style={styles.columnMetaReplies} numberOfLines={1}>
-              {replies} replies
-            </Text>
-            <Text style={styles.columnMetaFixed} numberOfLines={1}>
-              {timeAgo}
-            </Text>
-          </View>
-        ) : null}
       </Pressable>
       <Pressable
         onPress={discuss}
@@ -417,8 +416,6 @@ function HandoffDetail({
   selected: ChiHandoff;
   openSession: boolean;
 }) {
-  const cache = useQueryClient();
-  const [autoOpen, setAutoOpen] = useState(openSession);
   const query = useFetchQuery(
     inboxDetailQueryOptions({
       queryKey: context.queryKey,
@@ -427,10 +424,6 @@ function HandoffDetail({
       run: context.execute,
     }),
   );
-  const updated = useCallback(() => {
-    setAutoOpen(false);
-    void cache.invalidateQueries({ queryKey: context.queryKey });
-  }, [cache, context.queryKey]);
   const { refetch } = query;
   const refresh = useCallback(() => void refetch(), [refetch]);
   if (query.isFetching && !query.data) return <Text style={styles.empty}>Loading discussion…</Text>;
@@ -441,21 +434,17 @@ function HandoffDetail({
       </Alert>
     );
   if (!query.data) return null;
-  return (
-    <Discussion context={context} handoff={query.data} autoOpen={autoOpen} onUpdated={updated} />
-  );
+  return <Discussion context={context} handoff={query.data} autoOpen={openSession} />;
 }
 
 function Discussion({
   context,
   handoff: h,
   autoOpen,
-  onUpdated,
 }: {
   context: InboxContext;
   handoff: ChiHandoff;
   autoOpen: boolean;
-  onUpdated(): void;
 }) {
   const cache = useQueryClient();
   const [index, setIndex] = useState(0);
@@ -466,22 +455,7 @@ function Discussion({
     onSuccess: (result) => {
       if (result.kind !== "handoff") return;
       cache.setQueryData([...context.queryKey, "handoff", h.repo, h.id], result.handoff);
-      cache.setQueriesData<InfiniteData<Extract<ChiMentionResult, { kind: "inbox" }>>>(
-        { queryKey: [...context.queryKey, "inbox"] },
-        (previous) =>
-          previous
-            ? {
-                ...previous,
-                pages: previous.pages.map((page) => ({
-                  ...page,
-                  unreadCount: Math.max(0, page.unreadCount - 1),
-                  handoffs: page.handoffs.map((record) =>
-                    record.repo === h.repo && record.id === h.id ? result.handoff : record,
-                  ),
-                })),
-              }
-            : previous,
-      );
+      void cache.invalidateQueries({ queryKey: [...context.queryKey, "inbox", true, h.repo] });
     },
   });
   const { mutate: markViewed, isIdle } = viewed;
@@ -490,17 +464,13 @@ function Discussion({
   useEffect(() => {
     if (!h.readAt && h.recipient === context.identity.actor && isIdle) markViewed();
   }, [h.readAt, h.recipient, context.identity.actor, isIdle, markViewed]);
-  const canReply = h.author === context.identity.actor || h.recipient === context.identity.actor;
-  const prompts = readHumanPrompts(h.text);
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.hint}>
         @{h.author.slice(7)} → @{h.recipient.slice(7)}
       </Text>
       <Text selectable style={styles.text}>
-        {prompts
-          ? `Agent-initiated · ${prompts.sessionId} · ${prompts.turnId}\n${prompts.items.map((item) => `${item.kind}: ${item.text}`).join("\n\n")}`
-          : h.text}
+        {h.text}
       </Text>
       <Text style={styles.hint}>
         {h.state} · revision {h.revision}
@@ -517,7 +487,7 @@ function Discussion({
       {h.sources.length > 1
         ? h.sources.map((source, n) => (
             <ChoiceButton
-              key={`${source.id}/${source.entryId}`}
+              key={`${source.id}/${source.kind === "neutral" ? source.snapshot : ""}/${source.entryId}`}
               variant="ghost"
               value={String(n)}
               onSelect={chooseIndex}
@@ -547,9 +517,6 @@ function Discussion({
           </Text>
         </View>
       ))}
-      {canReply ? (
-        <ReplyForm key={h.revision} handoff={h} context={context} onSuccess={onUpdated} />
-      ) : null}
     </ScrollView>
   );
 }
@@ -574,12 +541,12 @@ function ExactSource({
       };
     }, []),
   );
-  const [entryId, setEntryId] = useState<string | undefined>();
+  const [selectedSeq, setSelectedSeq] = useState<string | undefined>();
   const [browse, setBrowse] = useState(false);
   const [navigated, setNavigated] = useState(!autoOpen);
   const query = useFetchQuery({
     dataShape: "value",
-    queryKey: [...context.queryKey, "source", handoff.repo, handoff.id, index, entryId],
+    queryKey: [...context.queryKey, "source", handoff.repo, handoff.id, index, selectedSeq],
     gcTime: 0,
     staleTimeMs: 0,
     retry: false,
@@ -590,7 +557,7 @@ function ExactSource({
         repo: handoff.repo,
         id: handoff.id,
         index,
-        entryId,
+        seq: selectedSeq === undefined ? undefined : Number(selectedSeq),
       });
       if (result.kind !== "source") throw new Error("chi-invalid-response");
       return result;
@@ -621,20 +588,6 @@ function ExactSource({
   }, [navigated, query.data, query.isFetching, mutate]);
   const next = useCallback(() => setBrowse(true), []);
   const retry = useCallback(() => void query.refetch(), [query]);
-  const continueHere = useCallback(() => {
-    const source = handoff.sources[index];
-    if (source?.kind === "neutral")
-      router.push({
-        pathname: "/chi",
-        params: {
-          repo: handoff.repo,
-          source: source.id,
-          snapshot: source.snapshot,
-          sourceHost: query.data?.origin?.hostId,
-          sourceSession: query.data?.origin?.sessionId,
-        },
-      });
-  }, [handoff, index, query.data]);
   if (query.isFetching && !query.data)
     return <Text style={styles.hint}>Reading exact source…</Text>;
   if (query.isError)
@@ -659,18 +612,16 @@ function ExactSource({
           Could not open the connected session. The exact read-only source is shown above.
         </Text>
       ) : null}
-      <Button size="sm" variant="ghost" onPress={continueHere}>
-        Continue here
-      </Button>
-      <Text style={styles.hint}>
-        Managed Continue requires the source host online to prepare a transfer, or an already
-        prepared transfer. It never resumes a bare evidence pin.
-      </Text>
       <Button size="sm" variant="ghost" onPress={next}>
         Browse pinned context
       </Button>
       {browse ? (
-        <PinnedContext context={context} handoff={handoff} index={index} onSelect={setEntryId} />
+        <PinnedContext
+          context={context}
+          handoff={handoff}
+          index={index}
+          onSelect={setSelectedSeq}
+        />
       ) : null}
     </View>
   );
@@ -722,7 +673,7 @@ function PinnedContext({
         <ChoiceButton
           key={entry.nativeId}
           variant="ghost"
-          value={entry.nativeId}
+          value={String(entry.seq)}
           onSelect={onSelect}
         >
           {entry.type}: {entry.nativeId}
@@ -732,226 +683,6 @@ function PinnedContext({
         <Button variant="ghost" onPress={next}>
           Next context page
         </Button>
-      ) : null}
-    </View>
-  );
-}
-
-function HumanPromptControl({
-  handoff,
-  context,
-  onSuccess,
-  control,
-}: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-  control: "mute" | "snooze";
-}) {
-  const [form] = useState(() =>
-    openReplyForm({
-      handoff,
-      context: { ...context.identity, repo: handoff.repo },
-      key: `chi-reply:${JSON.stringify([context.identity.deployment, handoff.repo, context.identity.actor, handoff.id])}`,
-      storage: AsyncStorage,
-      control,
-      confirmMute: () =>
-        confirmDialog({
-          title: "Mute prompts from this session?",
-          message:
-            "This permanently stops new human prompts from this session. You cannot undo this mute.",
-          confirmLabel: "Mute prompts",
-          destructive: true,
-        }),
-      execute: (operation) => {
-        if (operation.action !== "reply") throw new Error("chi-invalid-operation");
-        return context.execute({ ...operation, repo: handoff.repo });
-      },
-      uuid: () => crypto.randomUUID(),
-      onSuccess,
-    }),
-  );
-  useEffect(() => () => form.close(), [form]);
-  const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
-  const send = useCallback(() => void form.send("reply"), [form]);
-  const reauthorize = useCallback(() => void form.reauthorize(), [form]);
-  const discard = useCallback(
-    () =>
-      void form.discardConflict().then((changed) => {
-        return changed ? onSuccess() : undefined;
-      }),
-    [form, onSuccess],
-  );
-  const label = control === "mute" ? "Mute prompts from this session" : "Snooze prompts for 1 hour";
-  return (
-    <>
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={
-          state.status === "loading" ||
-          state.status === "blocked" ||
-          state.status === "pending" ||
-          state.status === "sent"
-        }
-        onPress={send}
-      >
-        {state.operation ? `Retry ${control}` : label}
-      </Button>
-      {state.status === "pending" ? (
-        <Text style={styles.hint}>
-          {control === "mute" ? "Muting prompts…" : "Snoozing prompts…"}
-        </Text>
-      ) : null}
-      {state.status === "sent" ? (
-        <Alert
-          variant="success"
-          title={
-            control === "mute" ? "Prompts muted for this session" : "Prompts snoozed for 1 hour"
-          }
-        />
-      ) : null}
-      {state.status === "failed" || state.status === "blocked" ? (
-        <Alert
-          variant="error"
-          title={`${control === "mute" ? "Mute" : "Snooze"} not confirmed`}
-          description={mentionError(state.error)}
-        >
-          {state.canDiscard ? (
-            <Button size="sm" variant="outline" onPress={discard}>
-              Refresh rejected {control}
-            </Button>
-          ) : null}
-          {state.canReauthorize ? (
-            <Button size="sm" variant="outline" onPress={reauthorize}>
-              Authorize saved {control} with current credentials
-            </Button>
-          ) : null}
-        </Alert>
-      ) : null}
-    </>
-  );
-}
-
-function HumanPromptControls(props: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-}) {
-  if (
-    !readHumanPrompts(props.handoff.text) ||
-    props.handoff.humanPromptControls !== true ||
-    props.handoff.recipient !== props.context.identity.actor
-  )
-    return null;
-  return (
-    <>
-      <HumanPromptControl {...props} control="mute" />
-      <HumanPromptControl {...props} control="snooze" />
-    </>
-  );
-}
-
-function ReplyForm({
-  handoff,
-  context,
-  onSuccess,
-}: {
-  handoff: ChiHandoff;
-  context: InboxContext;
-  onSuccess(): void;
-}) {
-  const compact = useIsCompactFormFactor();
-  const [form] = useState(() =>
-    openReplyForm({
-      handoff,
-      context: { ...context.identity, repo: handoff.repo },
-      key: `chi-reply:${JSON.stringify([context.identity.deployment, handoff.repo, context.identity.actor, handoff.id])}`,
-      storage: AsyncStorage,
-      execute: (operation) => {
-        if (operation.action !== "reply" && operation.action !== "acknowledge")
-          throw new Error("chi-invalid-operation");
-        return context.execute({ ...operation, repo: handoff.repo });
-      },
-      uuid: () => crypto.randomUUID(),
-      onSuccess,
-    }),
-  );
-  useEffect(() => () => form.close(), [form]);
-  const state = useSyncExternalStore(form.subscribe, form.getState, form.getState);
-  const locked =
-    state.status === "loading" ||
-    state.status === "blocked" ||
-    state.status === "pending" ||
-    state.operation !== null;
-  const acknowledge = useCallback(() => void form.send("acknowledge"), [form]);
-  const reply = useCallback(() => void form.send("reply"), [form]);
-  const prompts = readHumanPrompts(handoff.text);
-  const answer = useCallback((id: string) => void form.send("reply", id), [form]);
-  const reauthorize = useCallback(() => void form.reauthorize().catch(() => undefined), [form]);
-  const refresh = useCallback(
-    () => void form.discardConflict().then((discarded) => (discarded ? onSuccess() : undefined)),
-    [form, onSuccess],
-  );
-  return (
-    <View style={styles.row}>
-      {handoff.state === "open" && handoff.recipient === context.identity.actor ? (
-        <Button size="sm" variant="outline" disabled={locked} onPress={acknowledge}>
-          Acknowledge
-        </Button>
-      ) : null}
-      {state.status !== "loading" ? (
-        <FormTextInput
-          key={state.status === "sent" ? "sent" : "draft"}
-          initialValue={state.text}
-          accessibilityLabel="Reply to mention"
-          placeholder="Reply"
-          multiline
-          size={compact ? "md" : "sm"}
-          editable={!locked}
-          onChangeText={form.setText}
-        />
-      ) : null}
-      <Button size="sm" disabled={locked || !state.text.trim()} onPress={reply}>
-        Send reply
-      </Button>
-      {handoff.recipient === context.identity.actor
-        ? prompts?.items.map((item, index) => (
-            <ChoiceButton
-              key={item.id}
-              value={item.id}
-              disabled={locked || !state.text.trim()}
-              onSelect={answer}
-            >
-              Answer prompt {index + 1}
-            </ChoiceButton>
-          ))
-        : null}
-      {state.status === "pending" ? <Text style={styles.hint}>Sending…</Text> : null}
-      <HumanPromptControls handoff={handoff} context={context} onSuccess={onSuccess} />
-      {state.status === "sent" ? <Alert variant="success" title="Reply delivered" /> : null}
-      {state.status === "failed" || state.status === "blocked" ? (
-        <Alert
-          variant="error"
-          title="Operation not confirmed"
-          description={mentionError(state.error)}
-        >
-          {state.operation && state.status !== "blocked" ? (
-            <Button variant="outline" size="sm" onPress={reply}>
-              Retry saved operation
-            </Button>
-          ) : null}
-          {state.canDiscard ? (
-            <Button variant="outline" size="sm" onPress={refresh}>
-              Correct rejected reply
-            </Button>
-          ) : null}
-          {state.canReauthorize ? (
-            <Button variant="outline" size="sm" onPress={reauthorize}>
-              Authorize saved reply with current credentials
-            </Button>
-          ) : null}
-        </Alert>
       ) : null}
     </View>
   );
@@ -979,6 +710,9 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
   },
   listContent: {
+    maxWidth: 720,
+    width: "100%",
+    alignSelf: "center",
     paddingHorizontal: {
       xs: theme.spacing[3],
       md: theme.spacing[6],
@@ -1002,12 +736,6 @@ const styles = StyleSheet.create((theme) => ({
   row: { padding: theme.spacing[3], gap: theme.spacing[2], borderRadius: theme.borderRadius.lg },
   exact: { backgroundColor: theme.colors.surface1 },
   unread: { width: 7, height: 7, borderRadius: 4, backgroundColor: theme.colors.accent },
-  section: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    padding: theme.spacing[3],
-  },
   text: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
   hint: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   rowFrame: {
@@ -1024,7 +752,7 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: theme.spacing[2],
+    paddingVertical: theme.spacing[4],
     paddingLeft: theme.spacing[3],
     paddingRight: theme.spacing[2],
     borderRadius: theme.borderRadius.lg,
@@ -1040,14 +768,20 @@ const styles = StyleSheet.create((theme) => ({
     overflow: "hidden",
   },
   rowHandle: {
+    flex: 1,
     flexShrink: 1,
     minWidth: 0,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
   },
-  rowState: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted },
-  rowSnippet: { fontSize: theme.fontSize.base, color: theme.colors.foregroundMuted },
+  rowTime: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted, flexShrink: 0 },
+  rowSnippet: {
+    fontSize: theme.fontSize.content,
+    color: theme.colors.foreground,
+    lineHeight: theme.fontSize.content * 1.4,
+    marginTop: theme.spacing[1],
+  },
   rowMetaRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1056,40 +790,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowMetaText: {
     maxWidth: "100%",
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   rowMetaSeparator: {
     fontSize: theme.fontSize.base,
     color: theme.colors.foregroundMuted,
     opacity: 0.7,
-  },
-  rowColumns: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexShrink: 0,
-    gap: theme.spacing[3],
-    marginLeft: theme.spacing[2],
-  },
-  columnMeta: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 132,
-  },
-  columnMetaReplies: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 96,
-    textAlign: "right" as const,
-  },
-  columnMetaFixed: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 72,
-    textAlign: "right" as const,
   },
   rowDiscuss: {
     paddingHorizontal: theme.spacing[2],

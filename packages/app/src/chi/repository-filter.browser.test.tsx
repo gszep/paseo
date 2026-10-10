@@ -69,7 +69,7 @@ describe("RepositoryFilter", () => {
       const container = mountFilter();
       const trigger = container.querySelector('[data-testid="inbox-repo-filter-trigger"]');
       expect(trigger).toBeInstanceOf(HTMLElement);
-      expect(trigger?.textContent).toContain("All repositories");
+      expect(trigger?.textContent).toContain("Choose repository");
       expect(document.querySelector('[data-testid="combobox-desktop-container"]')).toBeNull();
     },
   );

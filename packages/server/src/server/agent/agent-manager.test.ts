@@ -1,7 +1,6 @@
 import { expect, test, vi } from "vitest";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
-import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID, createHash } from "node:crypto";
@@ -231,164 +230,26 @@ test.each(["importing", "forking", "failed-forking", "verifying", "ready"])(
       if (process.platform === "win32" || status === "forking" || status === "failed-forking")
         return;
       if (status === "ready") {
-        execFileSync("git", ["init", "--quiet", home]);
-        execFileSync("git", [
-          "-C",
-          home,
-          "remote",
-          "add",
-          "origin",
-          "https://github.com/fixture/repo.git",
-        ]);
-        const claim = {
-          id: "conversation",
-          revision: 2,
-          transferId: "move",
-          claimId: "claim",
-          destination,
-        };
-        writeFileSync(join(directory, `${key}.claim.json`), JSON.stringify({ identity, claim }), {
-          mode: 0o600,
-        });
-        const nativeFork = {
-          sessionID: "ses_replica",
-          boundary: { type: "through", messageID: "msg_source" },
-        };
-        const payload = { text: "synthetic", type: "user" };
-        const ready = {
-          ...receipt,
-          destination: { ...receipt.destination, nativeFork },
-          messageMapping: [
-            {
-              sourceEntryId: "msg_source",
-              destinationEntryId: "msg_fork",
-              payloadWithoutIdSHA256: createHash("sha256")
-                .update(JSON.stringify(payload))
-                .digest("hex"),
-            },
-          ],
-        };
-        writeFileSync(join(directory, `${key}.json`), JSON.stringify(ready), { mode: 0o600 });
-        const transfer = {
-          id: "move",
-          sourceId: identity.sourceId,
-          snapshotId: identity.snapshotId,
-          destination,
-          phase: "claimed",
-          claim: { id: "claim" },
-        };
-        let published = false;
-        const current = {
-          sourceId: "c".repeat(64),
-          snapshotId: "d".repeat(64),
-          instanceId: "host:opencode",
-          nativeSessionId: "ses_fork",
-        };
-        const request = vi.fn<typeof fetch>(async (url) => {
-          const path = new URL(String(url)).pathname;
-          if (path === "/auth/session")
-            return Response.json({ ok: true, chiUserId: identity.actor });
-          if (path === "/repos")
-            return Response.json({ ok: true, repos: [{ repo: identity.repo }] });
-          if (path === "/evidence/inspect") return Response.json({ sourceId: identity.sourceId });
-          if (path.endsWith("/publish")) published = true;
-          if (!path.startsWith("/conversations")) throw new Error("unexpected request");
-          return Response.json({
-            ok: true,
-            conversation: {
-              id: "conversation",
-              repo: identity.repo,
-              ownerId: identity.actor,
-              revision: published ? 4 : 3,
-              current: published
-                ? current
-                : {
-                    sourceId: identity.sourceId,
-                    instanceId: "source:opencode",
-                    nativeSessionId: "ses_replica",
-                  },
-              pending: published ? null : "move",
-              transfers: [],
-            },
-            transfer: {
-              ...transfer,
-              ...(published ? { phase: "published", publication: { destination: current } } : {}),
-            },
-          });
-        });
-        const manager = new AgentManager({
-          clients: { opencode: client },
-          logger: createTestLogger(),
-          registry: new AgentStorage(join(home, "agents"), createTestLogger()),
-          chi: {
-            home,
-            serverId: "host",
-            getChiConfig: () => admittedChiConfig(identity.endpoint),
-            authority: {
-              endpoint: identity.endpoint,
-              invalidate: vi.fn(),
-              request,
-              login: async () => ({ chiUserId: identity.actor, sessionToken: "synthetic" }),
-            },
-            // Recovery is the subject here; the real gitleaks binary is not
-            // part of the unit environment.
-            scanCapture: async () => ({ verdict: "clean" as const }),
-          },
-        });
-        const runtime: NativeRuntime = {
-          identity: "host:opencode",
-          info: vi.fn(),
-          schema: vi.fn(),
-          get: vi.fn(),
-          import: vi.fn(),
-          fork: vi.fn(),
-          export: vi.fn(async () => ({
-            info: { id: "ses_fork", location: { directory: home }, fork: nativeFork },
-            messages: [{ id: "msg_fork", ...payload }],
-          })),
-        };
-        vi.spyOn(manager, "withNativeRuntime").mockImplementation(async (_id, action) =>
-          action(runtime),
-        );
+        const manager = makeManager();
         const registration = {
-          find: async (sessionId: string) =>
-            manager.listAgents().find((agent) => agent.persistence?.sessionId === sessionId) ??
-            null,
-          register: (sessionId: string, labels: Record<string, string>, chiRegistration?: object) =>
-            manager.importProviderSession({
-              provider: "opencode",
-              providerHandleId: sessionId,
-              cwd: home,
-              workspaceId: "workspace",
-              labels,
-              chiRegistration,
-            }),
+          find: vi.fn(async () => null),
+          register: vi.fn(async () => {
+            throw new Error("must not register");
+          }),
         };
-        const input = {
-          repo: identity.repo,
-          sourceId: identity.sourceId,
-          snapshotId: identity.snapshotId,
-          cwd: home,
-          workspaceId: "workspace",
-          requestId: "first",
-          canonical: identity.canonical,
-        };
-        const result = await manager.chi!.continue(input, registration);
-        try {
-          expect(JSON.parse(result.snapshot.labels["chi.native"]!)).toMatchObject({
-            sourceId: current.sourceId,
-            blocked: false,
-          });
-          expect(
-            (await manager.chi!.continue({ ...input, requestId: "retry" }, registration)).snapshot
-              .id,
-          ).toBe(result.snapshot.id);
-          expect(client.importSession).toHaveBeenCalledTimes(1);
-          expect(runtime.import).not.toHaveBeenCalled();
-          expect(runtime.fork).not.toHaveBeenCalled();
-        } finally {
-          await manager.closeAgent(result.snapshot.id);
-        }
+        await expect(
+          manager.chi!.continue({ ...identity, cwd: home, requestId: "deferred" }, registration),
+        ).rejects.toThrow("chi-operation-unsupported");
+        expect(registration.register).not.toHaveBeenCalled();
+        expect(client.importSession).not.toHaveBeenCalled();
+        await expect(
+          manager.importProviderSession({
+            provider: "opencode",
+            providerHandleId: "ses_fork",
+            cwd: home,
+            workspaceId: "workspace",
+          }),
+        ).rejects.toThrow("chi-conversation-recovery-required");
       }
       // An already present same-host source is not a newly imported replica.
       receipt.destination.importDisposition = "reused";
@@ -453,7 +314,7 @@ test("Chi admission checks queued prompts at the execution boundary and releases
   expect(start).not.toHaveBeenCalled();
   gate.resolve();
   await preparation;
-  await expect(running).rejects.toThrow("chi-conversation-pending");
+  await expect(running).rejects.toThrow("chi-native-reset-required");
   expect(start).not.toHaveBeenCalled();
   expect(manager.isChiAgentBusy(agent.id)).toBe(false);
   delete live.labels["chi.native"];
@@ -524,7 +385,9 @@ test("Chi admission blocks a persisted predecessor unarchive after manager resta
     await manager.archiveAgent(agent.id);
     const archivedAt = (await storage.get(agent.id))!.archivedAt;
     const restarted = new AgentManager(options);
-    await expect(restarted.unarchiveSnapshot(agent.id)).rejects.toThrow("chi-conversation-pending");
+    await expect(restarted.unarchiveSnapshot(agent.id)).rejects.toThrow(
+      "chi-native-reset-required",
+    );
     expect((await storage.get(agent.id))!.archivedAt).toBe(archivedAt);
     expect(restarted.getAgent(agent.id)).toBeNull();
   } finally {

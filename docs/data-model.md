@@ -565,6 +565,16 @@ These small files are not validated as full Zod schemas but are persisted under 
 
 These live in React Native `AsyncStorage` or browser `IndexedDB`, not on the daemon filesystem.
 
+### Saved hosts
+
+The paired-host registry (`@paseo:daemon-registry`) is authoritative local data,
+not a disposable cache. On web its AsyncStorage adapter uses localStorage.
+A failed read or an unsupported/corrupt entry blocks startup with **Retry**;
+the app neither clears the original bytes nor presents the failure as an empty
+host list. Retry rereads the same store. Do not clear app storage to recover it.
+Host edits and pairing report success only after their serialized save completes.
+The service worker's app-shell cache is separate from this registry.
+
 ### Keying convention: directory-backed vs workspace-owned
 
 Right-sidebar client state splits on whether it is determined by the directory or owned by the workspace (two workspaces can share one `cwd`). The split is enforced by the cache key, so changing a key changes the sharing semantics — see [architecture.md](architecture.md#right-sidebar-boundary-directory-backed-vs-workspace-owned) for the full table.

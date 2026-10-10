@@ -25,6 +25,7 @@ interface SendMessageInput {
   request: unknown;
   send: () => Promise<void>;
   prepare?: (fingerprint: string) => Promise<void>;
+  recover?: (fingerprint: string) => Promise<boolean>;
   durable?: boolean;
 }
 
@@ -65,7 +66,13 @@ export class MessageReceipts {
         throw new MessageNotAdmittedError(new Error("agent_request_key_conflict"));
       if (existing.state === "completed") return;
       // A provider may have accepted the message before its receipt was committed.
-      if (existing.state === "pending") throw new Error("agent_request_outcome_unknown");
+      if (existing.state === "pending") {
+        if (existing.agentId !== input.agentId || !(await input.recover?.(fingerprint)))
+          throw new Error("agent_request_outcome_unknown");
+        const writeReceipt = input.durable ? writeConversationReceipt : writeJsonFileAtomic;
+        await writeReceipt(file, { ...existing, state: "completed" });
+        return;
+      }
     }
     const receipt = { fingerprint, agentId: input.agentId };
     const writeReceipt = input.durable ? writeConversationReceipt : writeJsonFileAtomic;

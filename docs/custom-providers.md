@@ -17,6 +17,21 @@ Provider definitions live under `agents.providers` in config.json:
 
 Provider IDs must be lowercase alphanumeric with hyphens (`/^[a-z][a-z0-9-]*$/`).
 
+For reusable OpenCode roles, keep instructions in native OpenCode agent definitions
+and select their catalog ID with `settings.modeId` in `create_agent`. The definition
+must allow primary use (`primary` or `all`), because each managed child owns a native
+session. Put durable role environment (for example Git authorship and a runtime
+`PATH`) in a derived provider's `env`. OpenCode session shells receive those defaults
+on creation and resume; per-launch values, including the daemon-assigned agent ID
+and working directory, take precedence. This does not persist creation-only `env`.
+
+Paseo agent profiles can save the provider and mode selection. `list_profiles` only
+lists them: callers must copy the selected provider/model and settings into
+`create_agent`. Profile notes are selection guidance, not injected instructions.
+Keep role instructions in the native definition rather than duplicating them in
+notes or the task prompt. Parent linkage and notifications follow the normal
+[child lifecycle](agent-lifecycle.md#relationships).
+
 Each provider catalog refresh waits up to 2 minutes. If a provider loads many plugins or a large
 agent catalog during startup, raise the limit in milliseconds:
 

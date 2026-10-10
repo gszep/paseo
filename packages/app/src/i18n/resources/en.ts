@@ -1473,6 +1473,11 @@ export const en = {
     body: "Try again to reload the app. If this keeps happening, include the details below when you report it.",
     details: "Details",
   },
+  hostRegistry: {
+    loadFailed: "Saved hosts could not be loaded",
+    retained:
+      "Your saved host data has not been changed. Retry loading it before pairing or editing hosts. Do not clear app storage.",
+  },
   startup: {
     errorTitle: "Something went wrong",
     errorDescription:

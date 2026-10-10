@@ -9,7 +9,8 @@ import {
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import { inboxContextObserver, useMentionScope } from "./use-mention-scope";
-import { mentionQueryKey } from "./mention-context";
+import { mentionQueryKey, sameMentionContext } from "./mention-context";
+import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { inboxAuthority } from "./inbox-identity";
 import { inboxHostsSettled } from "./inbox-authority";
 import { inboxTransportQueryOptions, useInboxQuery } from "./inbox-query";
@@ -22,7 +23,7 @@ export function useInboxTransport() {
   const statuses = useHostRuntimeConnectionStatuses(ids);
   const capable = useSessionStore(
     useShallow((state) =>
-      ids.filter((id) => state.sessions[id]?.serverInfo?.features?.chiInbox === true),
+      ids.filter((id) => state.sessions[id]?.serverInfo?.features?.chiInboxActivity === true),
     ),
   );
   const candidates = ids.filter((id) => statuses.get(id) === "online" && capable.includes(id));
@@ -38,7 +39,9 @@ export function useInboxTransport() {
           const runtime = getHostRuntimeStore().getSnapshot(id);
           if (!runtime?.client || runtime.connectionStatus !== "online")
             throw new Error("chi-host-disconnected");
-          const result = await runtime.client.chiMentions({ operation: { action: "scope" } });
+          const result = await runtime.client.chiMentions({
+            operation: { action: "scope", includeRepositories: false },
+          });
           observe(result.context);
           return result.context;
         } catch (error) {
@@ -65,15 +68,48 @@ export function useInboxTransport() {
 
 export function useInbox(
   transport: ReturnType<typeof useInboxTransport>,
-  options: { paused?: boolean; autoContinue?: boolean } = {},
+  options: { paused?: boolean; autoContinue?: boolean; repo?: string } = {},
 ) {
   const { scope, state, host, queryKey } = transport;
+  const repo = options.repo ?? state.context?.defaultRepository;
   return useInboxQuery({
     queryKey,
     inbox: true,
     ...options,
-    enabled: Boolean(host && state.context),
+    repo,
+    enabled: Boolean(host && state.context && repo),
     context: state.context ?? undefined,
     run: scope.run,
+  });
+}
+
+export function useInboxCatalog(transport: ReturnType<typeof useInboxTransport>) {
+  const { client, scope, state, queryKey } = transport;
+  const identity = state.context;
+  const isCurrent = () =>
+    scope.getState().generation === state.generation && scope.getState().context === identity;
+  return useFetchQuery({
+    dataShape: "value",
+    queryKey: [...queryKey, "repositories"],
+    enabled: Boolean(client && identity),
+    retry: false,
+    staleTimeMs: 0,
+    gcTime: 0,
+    queryFn: async () => {
+      if (!client || !identity) throw new Error("chi-host-disconnected");
+      try {
+        const result = await client.chiMentions({ operation: { action: "scope" } });
+        if (!isCurrent()) throw new Error("chi-mention-context-changed");
+        if (!sameMentionContext(identity, result.context)) {
+          scope.lose();
+          throw new Error("chi-mention-context-changed");
+        }
+        return result.context.repositories ?? [];
+      } catch (error) {
+        if (isCurrent() && error instanceof ChiOperationError && error.failure?.accessLost)
+          scope.lose(error.message);
+        throw error;
+      }
+    },
   });
 }

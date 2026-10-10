@@ -1434,6 +1434,7 @@ export const zhCN: TranslationResources = {
     body: "请重试以重新加载应用。如果问题持续发生，请在报告时附上下面的详细信息。",
     details: "详情",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "出现问题",
     errorDescription: "本地服务器启动失败。如果持续发生，请在 GitHub 报告问题并附上下方日志。",

@@ -22,7 +22,10 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
       if (!client) throw new Error("chi-host-disconnected");
       const result = await client.chiMentions({
         workspaceId: workspace || undefined,
-        operation,
+        operation:
+          !workspace && operation.action === "scope"
+            ? { ...operation, includeRepositories: false }
+            : operation,
         expectedContext,
       });
       if (!workspace && !inboxAuthority.accepts(result.context))

@@ -44,6 +44,8 @@ import { WorkspaceSetupDialog } from "@/components/workspace-setup-dialog";
 import { WorkspaceShortcutTargetsSubscriber } from "@/components/workspace-shortcut-targets-subscriber";
 import { FloatingPanelPortalHost } from "@/components/ui/floating-panel-portal";
 import { HostChooserModal, useHostChooser } from "@/hosts/host-chooser";
+import { HostRegistryBoundary } from "@/hosts/host-registry-recovery";
+import { useHostRegistryStatus } from "@/runtime/host-runtime";
 import {
   getIsElectronRuntime,
   HEADER_INNER_HEIGHT,
@@ -368,6 +370,10 @@ async function shouldStartBuiltInDaemon(): Promise<boolean> {
 }
 
 function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
+  const registryStatus = useHostRegistryStatus();
+  const retryRegistry = useCallback(() => {
+    void getHostRuntimeStore().boot();
+  }, []);
   useEffect(() => {
     const store = getHostRuntimeStore();
     return bindHostRuntimeAppState(store, AppState);
@@ -432,7 +438,9 @@ function HostRuntimeBootstrapProvider({ children }: { children: ReactNode }) {
 
   return (
     <HostRuntimeBootstrapContext.Provider value={state}>
-      {children}
+      <HostRegistryBoundary status={registryStatus} onRetry={retryRegistry}>
+        {children}
+      </HostRegistryBoundary>
     </HostRuntimeBootstrapContext.Provider>
   );
 }

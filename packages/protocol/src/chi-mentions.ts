@@ -9,6 +9,9 @@ export const ChiMentionContextSchema = z.object({
   repo: id,
   generation: hash,
   deployment: z.string().optional(),
+  evidenceVersion: z.literal(3).optional(),
+  repositories: z.array(id).optional(),
+  defaultRepository: id.optional(),
 });
 export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
 export const ChiFailureSchema = z.object({
@@ -29,8 +32,27 @@ export class ChiOperationError extends Error {
 export const ChiParticipantSchema = z.object({ ownerId: principal, handle: id });
 export type ChiParticipant = z.infer<typeof ChiParticipantSchema>;
 export const ChiMentionRecipientsSchema = z.array(principal).min(1).max(8);
+export const ChiPinSchema = z.object({
+  v: z.literal(3),
+  deployment: id,
+  repo: id,
+  sourceId: hash,
+  count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  head: hash,
+});
+export const ChiEntryRefSchema = z.object({
+  pin: ChiPinSchema,
+  seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+export type ChiEntryRef = z.infer<typeof ChiEntryRefSchema>;
 export const ChiSourceSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("neutral"), id, snapshot: hash, entryId: id }),
+  z.object({
+    kind: z.literal("neutral"),
+    id,
+    snapshot: hash,
+    entryId: id,
+    appendRef: ChiEntryRefSchema.optional(),
+  }),
   z.object({ kind: z.literal("session"), id, entryId: id.optional() }),
   z.object({ kind: z.literal("artifact"), id, entryId: id.optional() }),
 ]);
@@ -38,12 +60,14 @@ export type ChiSource = z.infer<typeof ChiSourceSchema>;
 const state = z.enum(["open", "acknowledged", "working", "resolved", "declined"]);
 export const ChiHandoffSchema = z.object({
   schemaVersion: z.literal(1),
+  evidenceVersion: z.literal(3).optional(),
   id: z.string().uuid(),
   repo: id,
   author: principal,
   recipient: principal,
   text,
-  sources: z.array(ChiSourceSchema).min(1).max(8),
+  workspaceName: z.string().min(1).max(256).optional(),
+  sources: z.array(ChiSourceSchema).min(1).max(32),
   state,
   revision: z.number().int().positive(),
   createdAt: id,
@@ -143,11 +167,12 @@ export const ChiDeliverySchema = z.object({
 });
 export type ChiDelivery = z.infer<typeof ChiDeliverySchema>;
 export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("scope") }),
+  z.object({ action: z.literal("scope"), includeRepositories: z.boolean().optional() }),
   z.object({ action: z.literal("participants") }),
   z.object({
     action: z.literal("inbox"),
     inbox: z.boolean(),
+    repo: id.optional(),
     cursor: z.string().max(4096).optional(),
   }),
   z.object({
@@ -166,14 +191,15 @@ export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
     action: z.literal("source"),
     repo: id.optional(),
     id: z.string().uuid(),
-    index: z.number().int().min(0).max(7),
+    index: z.number().int().min(0).max(31),
     entryId: id.optional(),
+    seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   }),
   z.object({
     action: z.literal("context"),
     repo: id.optional(),
     id: z.string().uuid(),
-    index: z.number().int().min(0).max(7),
+    index: z.number().int().min(0).max(31),
     cursor: z.string().max(4096).optional(),
   }),
   z.object({
@@ -229,7 +255,9 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
     kind: z.literal("context"),
     actor: principal,
     source: ChiSourceSchema,
-    entries: z.array(z.object({ nativeId: id, type: id })).max(30),
+    entries: z
+      .array(z.object({ nativeId: id, type: id, seq: z.number().int().nonnegative().optional() }))
+      .max(30),
     nextCursor: z.string().nullable(),
   }),
   z.object({

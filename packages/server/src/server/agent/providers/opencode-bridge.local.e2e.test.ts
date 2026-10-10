@@ -1,4 +1,5 @@
 import { V2Runtime } from "./opencode/v2/runtime.js";
+import { confirmsNativeSubmission } from "../../message-receipts/native.js";
 import type { V2Api } from "./opencode/v2/api.js";
 import type { OpenCodeClient } from "@opencode/client";
 import {
@@ -518,6 +519,69 @@ test("v2 native transfer returns null for a missing destination session before i
   } finally {
     await inspection?.release();
     await runtime.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("v2 saved-send proof survives native persistence and runtime reconstruction without a model turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "paseo-v2-saved-send-"));
+  vi.stubEnv("PASEO_HOME", path.join(root, "paseo"));
+  const options = {
+    logger: createTestLogger(),
+    decorateEnv: (env: Record<string, string>) => env,
+    settings: {
+      env: {
+        HOME: root,
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        OPENCODE_CONFIG_CONTENT: "{}",
+      },
+    },
+  };
+  let runtime = new V2Runtime(options);
+  let inspection: Awaited<ReturnType<typeof runtime.acquire>> | undefined;
+  try {
+    inspection = await runtime.acquire();
+    const seed = await inspection.client.session.create({ location: { directory: root } });
+    const sessionId = `${seed.id}_proof`;
+    const text = "@reader synthetic saved send";
+    const messageId = "saved-send-native-contract";
+    await inspection.transfer!.import(
+      {
+        info: { ...seed, id: sessionId },
+        messages: [
+          {
+            id: "msg_saved_send",
+            type: "user",
+            text,
+            metadata: { paseoClientMessageId: messageId },
+            files: [],
+            time: { created: 1 },
+          },
+        ],
+      },
+      root,
+    );
+    const before = await inspection.transfer!.export(sessionId);
+    const proof = { sessionId, cwd: root, text, messageId };
+    expect(confirmsNativeSubmission({ ...proof, native: before })).toBe(true);
+    await inspection.release();
+    await runtime.shutdown();
+    runtime = new V2Runtime(options);
+    inspection = await runtime.acquire();
+    expect(await inspection.transfer!.info()).toMatchObject({ version: "2.0.15-chi.1" });
+    const after = await inspection.transfer!.export(sessionId);
+    expect(after).toEqual(before);
+    expect(confirmsNativeSubmission({ ...proof, native: after })).toBe(true);
+    expect(confirmsNativeSubmission({ ...proof, native: after, messageId: "never-accepted" })).toBe(
+      false,
+    );
+  } finally {
+    await inspection?.release();
+    await runtime.shutdown();
+    vi.unstubAllEnvs();
     await rm(root, { recursive: true, force: true });
   }
 }, 60_000);

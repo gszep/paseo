@@ -5,29 +5,40 @@ import { join } from "node:path";
 import { z } from "zod";
 import { ChiMentions, hasMention } from "./mentions.js";
 import {
-  ChiHandoffSchema,
   ChiMentionResultSchema,
+  ChiEntryRefSchema,
+  type ChiEntryRef,
   type ChiHandoff,
 } from "@getpaseo/protocol/chi-mentions";
 import { MessageReceipts } from "../message-receipts/index.js";
+import { encodeEntry, type Pin } from "@henkaku-center/chi-native/append-codec";
 import {
   mentionFixtureTitle,
   purgeMentionFixtureSources,
 } from "../test-utils/chi-mention-fixture-sources.js";
 
 const homes: string[] = [];
+type WireHandoff = Omit<ChiHandoff, "schemaVersion" | "sources" | "events"> & {
+  v: 3;
+  sources: ChiEntryRef[];
+};
 afterEach(async () => {
   await Promise.all(homes.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), "chi-mentions-"));
   homes.push(home);
-  const records = new Map<string, ChiHandoff>();
+  const records = new Map<string, WireHandoff>();
   const submissions: unknown[] = [];
   const reads: URL[] = [];
   let failAfterCommit = false;
   let denied = false;
-  const identity = { repo: "github:fixture/repo", actor: "github:sender", token: "fixture" };
+  const identity = {
+    repo: "github:fixture/repo",
+    actor: "github:sender",
+    token: "fixture",
+    deployment: "fixture",
+  };
   const authority = {
     endpoint: "https://chi.invalid/api",
     request: (async (url, init) => {
@@ -48,51 +59,53 @@ async function fixture() {
             id: z.string(),
             recipient: z.string(),
             text: z.string(),
-            sources: ChiHandoffSchema.shape.sources,
+            workspaceName: z.string().optional(),
+            v: z.literal(3),
+            sources: z.array(ChiEntryRefSchema),
           })
           .parse(JSON.parse(String(init.body)));
         submissions.push(value);
         const existing = records.get(value.id);
-        const handoff =
-          existing ??
-          ChiHandoffSchema.parse({
-            ...value,
-            schemaVersion: 1,
-            repo: identity.repo,
-            author: identity.actor,
-            state: "open",
-            revision: 1,
-            createdAt: "2026-09-25T00:00:00Z",
-            updatedAt: "2026-09-25T00:00:00Z",
-            events: [],
-          });
+        const handoff: WireHandoff = existing ?? {
+          ...value,
+          repo: identity.repo,
+          author: identity.actor,
+          state: "open",
+          revision: 1,
+          createdAt: "2026-09-25T00:00:00Z",
+          updatedAt: "2026-09-25T00:00:00Z",
+        };
         records.set(value.id, handoff);
         if (failAfterCommit) {
           failAfterCommit = false;
           throw new Error("socket lost after commit");
         }
-        return Response.json({ ok: true, handoff });
+        return Response.json({ ok: true, handoff, replay: existing !== undefined });
       }
       if (target.pathname === "/api/handoffs" && init?.method === "GET")
         return Response.json({ ok: true, handoff: records.get(target.searchParams.get("id")!) });
-      if (target.pathname === "/api/evidence/exact")
+      if (
+        target.pathname === "/api/evidence/exact" ||
+        target.pathname === "/api/evidence/entries"
+      ) {
+        const pin = JSON.parse(target.searchParams.get("pin")!);
+        expect(pin).toEqual(capture.pin);
+        const start = Number(target.searchParams.get("start"));
+        const end = target.pathname.endsWith("exact")
+          ? start + 1
+          : Number(target.searchParams.get("end"));
         return Response.json({
-          snapshot: target.searchParams.get("snapshot"),
-          entry: { nativeId: target.searchParams.get("entryId") },
-          native: { text: "exact content" },
+          entries: archive.slice(start, end).map((native, index) =>
+            encodeEntry({
+              v: 3,
+              seq: start + index,
+              kind: "message",
+              minimiser: "min-v1",
+              payload: { native: JSON.stringify(native) },
+            }),
+          ),
         });
-      if (target.pathname === "/api/evidence/inspect")
-        return Response.json({
-          sourceId: target.searchParams.get("sourceId"),
-          nativeSessionId: "ses_source",
-          workspace: { hostId: "host" },
-        });
-      if (target.pathname === "/api/evidence/entries")
-        return Response.json({
-          snapshot: target.searchParams.get("snapshot"),
-          items: [{ nativeId: "neighbor", type: "assistant" }],
-          nextCursor: null,
-        });
+      }
       throw new Error("unexpected fixture operation");
     }) satisfies typeof fetch,
   };
@@ -115,16 +128,24 @@ async function fixture() {
     },
     send: async () => undefined,
   });
+  const pin: Pin = {
+    v: 3,
+    deployment: "fixture",
+    repo: identity.repo,
+    sourceId: "a".repeat(64),
+    count: 2,
+    head: "b".repeat(64),
+  };
   const capture = {
     identity,
     agentId: "agent",
-    sourceId: "a".repeat(64),
-    snapshot: "b".repeat(64),
+    pin,
     messages: [
       {
-        id: "exact_native_user_id",
+        id: "msg_exact",
+        seq: 0,
         payload: {
-          id: "exact_native_user_id",
+          id: "msg_exact",
           type: "user",
           text: input.text,
           metadata: { paseoClientMessageId: input.messageId },
@@ -132,6 +153,10 @@ async function fixture() {
       },
     ],
   };
+  const archive = [
+    capture.messages[0]!.payload,
+    { id: "msg_neighbor", type: "user", text: "neighbor" },
+  ];
   const restart = () => new ChiMentions(home, authority);
   return {
     restart,
@@ -142,6 +167,7 @@ async function fixture() {
     records,
     submissions,
     reads,
+    archive,
     loseReply: () => {
       failAfterCommit = true;
     },
@@ -158,7 +184,12 @@ test("inbox retries a read fence conflict but does not automatically retry a mut
     attempts++;
     return attempts === 1
       ? new Response(null, { status: 409 })
-      : Response.json({ ok: true, handoffs: [], nextCursor: null, unreadCount: 0 });
+      : Response.json({
+          handoffs: [],
+          nextCursor: null,
+          unreadCount: 0,
+          unreadCountLowerBound: false,
+        });
   }) satisfies typeof fetch;
   expect(
     await f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
@@ -176,31 +207,26 @@ test("inbox retries a read fence conflict but does not automatically retry a mut
   expect(attempts).toBe(1);
 });
 
-test("inbox carries incomplete coverage through backend and wire parsing; legacy pages remain valid", async () => {
+test("per-repository inbox carries the v3 unread lower bound through the daemon protocol", async () => {
   const f = await fixture();
-  for (const unavailableRepos of [undefined, [], ["github:fixture/broken"]]) {
-    for (const unreadCountIsLowerBound of [undefined, true]) {
-      f.authority.request = async () =>
-        Response.json({
-          ok: true,
-          handoffs: [],
-          nextCursor: "next",
-          unreadCount: 3,
-          ...(unreadCountIsLowerBound ? { unreadCountIsLowerBound } : {}),
-          ...(unavailableRepos ? { unavailableRepos } : {}),
-        });
-      const result = await f.restart().execute(f.input.identity, { action: "inbox", inbox: true });
-      const parsed = ChiMentionResultSchema.parse(result);
-      expect(parsed).toEqual({
-        kind: "inbox",
-        actor: f.input.identity.actor,
+  for (const unreadCountIsLowerBound of [false, true]) {
+    f.authority.request = async () =>
+      Response.json({
         handoffs: [],
         nextCursor: "next",
         unreadCount: 3,
-        ...(unreadCountIsLowerBound ? { unreadCountIsLowerBound } : {}),
-        ...(unavailableRepos ? { unavailableRepos } : {}),
+        unreadCountLowerBound: unreadCountIsLowerBound,
       });
-    }
+    const result = await f.restart().execute(f.input.identity, { action: "inbox", inbox: true });
+    const parsed = ChiMentionResultSchema.parse(result);
+    expect(parsed).toEqual({
+      kind: "inbox",
+      actor: f.input.identity.actor,
+      handoffs: [],
+      nextCursor: "next",
+      unreadCount: 3,
+      unreadCountIsLowerBound,
+    });
   }
 });
 
@@ -221,7 +247,7 @@ test("inbox invalid cursor has a fixed recovery code and never exposes backend d
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {
   const f = await fixture();
   const sender = f.restart();
-  await sender.prepare(f.input);
+  await sender.prepare({ ...f.input, workspaceName: "Release planning" });
   const pending = await sender.status("agent", f.input.identity);
   expect(pending.kind).toBe("delivery");
   f.loseReply();
@@ -232,15 +258,16 @@ test("durable delivery pins the persisted native user entry and replays the same
       { status: "failed", recipient: { ownerId: "github:steffenpl", handle: "SteffenPL" } },
     ],
   });
-  await f.restart().captured({ ...f.capture, snapshot: "c".repeat(64) });
+  await f
+    .restart()
+    .captured({ ...f.capture, pin: { ...f.capture.pin, head: "c".repeat(64), count: 3 } });
   expect(f.submissions).toHaveLength(2);
   expect(f.submissions[1]).toEqual(f.submissions[0]);
+  expect([...f.records.values()][0]?.workspaceName).toBe("Release planning");
   expect([...f.records.values()][0]?.sources).toEqual([
     {
-      kind: "neutral",
-      id: f.capture.sourceId,
-      snapshot: f.capture.snapshot,
-      entryId: "exact_native_user_id",
+      pin: f.capture.pin,
+      seq: 0,
     },
   ]);
   expect(await f.restart().status("agent", f.input.identity)).toMatchObject({
@@ -293,6 +320,7 @@ test("restart after intent publication cannot activate the intent through an ord
       },
     ],
   };
+  f.archive[0] = capture.messages[0]!.payload;
   await f.restart().captured(capture);
   await f.restart().retry(input.agentId, input.identity);
   expect(f.submissions).toEqual([]);
@@ -317,7 +345,11 @@ test("never substitutes a matching assistant message or guesses a native ID for 
   await sender.captured({
     ...f.capture,
     messages: [
-      { id: "assistant", payload: { ...f.capture.messages[0]!.payload, type: "assistant" } },
+      {
+        id: "msg_assistant",
+        seq: 0,
+        payload: { ...f.capture.messages[0]!.payload, type: "assistant" },
+      },
     ],
   });
   expect(f.submissions).toEqual([]);
@@ -346,6 +378,66 @@ test("revalidates delivery access, sanitizes failures and never exposes another 
     deliveries: [],
   });
   expect(f.records.size).toBe(0);
+  expect(await sender.status("agent", { ...f.input.identity, deployment: "other" })).toEqual({
+    kind: "delivery",
+    actor: f.input.identity.actor,
+    deliveries: [],
+  });
+});
+
+test("a metadata ordinal cannot authorize a mention even if its native text impersonates the user entry", async () => {
+  const f = await fixture();
+  const request = f.authority.request;
+  f.authority.request = async (url, init) => {
+    if (new URL(String(url)).pathname.endsWith("/evidence/exact"))
+      return Response.json({
+        entries: [
+          encodeEntry({
+            v: 3,
+            seq: 0,
+            kind: "metadata",
+            minimiser: "min-v1",
+            payload: { native: JSON.stringify(f.capture.messages[0]!.payload) },
+          }),
+        ],
+      });
+    return request(url, init);
+  };
+  await f.restart().prepare(f.input);
+  await f.restart().captured(f.capture);
+  expect(f.submissions).toEqual([]);
+  expect(await f.restart().status("agent", f.input.identity)).toMatchObject({
+    deliveries: [{ status: "failed", error: "chi-mention-invalid-response" }],
+  });
+});
+
+test("a cross-deployment pin stops before protected lookup or handoff publication", async () => {
+  const f = await fixture();
+  await f.restart().prepare(f.input);
+  const reads = f.reads.length;
+  await expect(
+    f.restart().captured({ ...f.capture, pin: { ...f.capture.pin, deployment: "other" } }),
+  ).rejects.toThrow("chi-mention-invalid-response");
+  expect(f.reads).toHaveLength(reads);
+  expect(f.submissions).toEqual([]);
+});
+
+test("v3 refuses deferred writes and enforces the UTF-8 mention bound", async () => {
+  const f = await fixture();
+  await expect(
+    f.restart().prepare({ ...f.input, text: "@SteffenPL " + "雪".repeat(3000) }),
+  ).rejects.toThrow("chi-mention-text-too-long");
+  expect(f.reads).toEqual([]);
+  await expect(
+    f.restart().execute(f.input.identity, {
+      action: "reply",
+      id: "00000000-0000-4000-8000-000000000001",
+      operationId: "00000000-0000-4000-8000-000000000002",
+      revision: 1,
+      text: "reply",
+    }),
+  ).rejects.toThrow("chi-operation-unsupported");
+  expect(f.reads).toEqual([]);
 });
 
 test("human mentions reject file and email adjacency", () => {
@@ -426,26 +518,28 @@ test("source and neighboring context reads reacquire the handoff and retain its 
   await sender.prepare(f.input);
   await sender.captured(f.capture);
   const id = [...f.records.keys()][0]!;
+  await expect(
+    sender.execute(f.input.identity, { action: "source", id, index: 0, entryId: "msg_neighbor" }),
+  ).rejects.toThrow("chi-mention-invalid-source");
   const source = await sender.execute(f.input.identity, { action: "source", id, index: 0 });
   expect(source).toMatchObject({
     kind: "source",
-    source: { entryId: "exact_native_user_id", snapshot: f.capture.snapshot },
-    payload: JSON.stringify({ text: "exact content" }, null, 2),
+    source: { entryId: "0", appendRef: { pin: f.capture.pin, seq: 0 } },
+    payload: JSON.stringify(f.capture.messages[0]!.payload, null, 2),
   });
   await sender.execute(f.input.identity, { action: "context", id, index: 0 });
-  await sender.execute(f.input.identity, { action: "source", id, index: 0, entryId: "neighbor" });
+  await sender.execute(f.input.identity, { action: "source", id, index: 0, seq: 1 });
   const evidence = f.reads.filter(
     (url) => url.pathname === "/api/evidence/exact" || url.pathname === "/api/evidence/entries",
   );
-  expect(evidence).toHaveLength(3);
+  expect(evidence).toHaveLength(4);
   for (const url of evidence) {
-    expect(url.searchParams.get("sourceId")).toBe(f.capture.sourceId);
-    expect(url.searchParams.get("snapshot")).toBe(f.capture.snapshot);
+    expect(JSON.parse(url.searchParams.get("pin")!)).toEqual(f.capture.pin);
   }
-  expect(evidence[2]!.searchParams.get("entryId")).toBe("neighbor");
+  expect(evidence[3]!.searchParams.get("start")).toBe("1");
   f.deny();
   await expect(
     sender.execute(f.input.identity, { action: "source", id, index: 0 }),
   ).rejects.toThrow("chi-mentions-http-403");
-  expect(f.reads.filter((url) => url.pathname.startsWith("/api/evidence/"))).toHaveLength(5);
+  expect(f.reads.filter((url) => url.pathname.startsWith("/api/evidence/"))).toHaveLength(4);
 });

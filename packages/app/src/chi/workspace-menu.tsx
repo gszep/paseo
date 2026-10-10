@@ -24,7 +24,7 @@ export function ChiWorkspaceMenu({
 
 function AgentMenu({ serverId, agentId }: { serverId: string; agentId: string }) {
   const supported = useSessionStore(
-    (state) => state.sessions[serverId]?.serverInfo?.features?.chiNative === true,
+    (state) => state.sessions[serverId]?.serverInfo?.features?.chiAppendV3 === true,
   );
   const canonical = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.chiCanonical === true,

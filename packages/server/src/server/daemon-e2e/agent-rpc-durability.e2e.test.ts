@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 import type { AgentAttachment } from "@getpaseo/protocol/messages";
 
@@ -14,212 +15,306 @@ const CREATED_AT = "2026-06-29T11:12:42.000Z";
 const HEALTHY_UPDATED_AT = "2026-06-29T11:40:00.000Z";
 const ORPHAN_ARCHIVED_AT = "2026-06-29T11:35:35.000Z";
 
-test("mention intent is created only inside admitted message receipts, and transformed sends reject before admission", async () => {
-  const cwd = mkdtempSync(path.join(os.tmpdir(), "mention-admission-"));
-  execFileSync("git", ["init", "-q", cwd]);
-  execFileSync("git", [
-    "-C",
-    cwd,
-    "remote",
-    "add",
-    "origin",
-    "https://github.com/fixture/repo.git",
-  ]);
-  const repo = "github:fixture/repo",
-    actor = "github:sender";
-  const submitted: string[] = [];
-  const backendWrites: string[] = [];
-  let credentialGeneration = "original",
-    loggedOut = false;
-  const host = await createTestPaseoDaemon({
-    mcpEnabled: false,
-    chi: {
-      destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
-      mappings: [{ repo, destination: "fixture", audience: "shared" }],
-    },
-    agentClients: {
-      opencode: createTestAgentClient("opencode", {
-        onStartTurn(_prompt, options) {
-          submitted.push(options!.clientMessageId!);
-        },
-      }),
-    },
-    chiAuthority: {
-      invalidate: () => undefined,
-      endpoint: "https://chi.invalid",
-      login: async () => {
-        if (loggedOut) throw new Error("chi-github-login-required");
-        return { sessionToken: "fixture", chiUserId: actor, credentialGeneration };
-      },
-      request: async (url, init) => {
-        const target = new URL(String(url));
-        if (init?.method && init.method !== "GET") backendWrites.push(target.pathname);
-        if (target.pathname === "/auth/session")
-          return Response.json({ ok: true, chiUserId: actor });
-        if (target.pathname === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
-        if (target.pathname === "/participants")
-          return Response.json({
-            ok: true,
-            self: actor,
-            participants: [{ ownerId: "github:recipient", handle: "recipient" }],
-          });
-        return new Response(null, { status: 503 });
-      },
-    },
-  });
-  const client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
-  let projectId: string | undefined;
-  try {
-    await client.connect();
-    await client.fetchAgents();
-    const project = await client.addProject(cwd);
-    projectId = project.project!.projectId;
-    const workspace = (
-      await client.createWorkspace({ source: { kind: "directory", path: cwd, projectId } })
-    ).workspace!;
-    const agent = await client.createAgent({
-      provider: "opencode",
+test.skipIf(process.platform === "win32")(
+  "mention intent is created only inside admitted message receipts, and transformed sends reject before admission",
+  async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "mention-admission-"));
+    const paseoHomeRoot = mkdtempSync(path.join(os.tmpdir(), "mention-admission-home-"));
+    execFileSync("git", ["init", "-q", cwd]);
+    execFileSync("git", [
+      "-C",
       cwd,
-      workspaceId: workspace.id,
-      labels: {
-        "chi.native": JSON.stringify({
-          repo,
-          actor,
-          sourceId: null,
-          head: null,
-          error: null,
-          endpoint: "https://chi.invalid",
-          destination: "fixture",
-        }),
-      },
-    });
-    const scope = await client.chiMentions({
-      workspaceId: workspace.id,
-      operation: { action: "scope" },
-    });
-    const text = "@recipient please check";
-    await client.sendAgentMessage(agent.id, text, { messageId: "ordinary-first" });
-    await client.waitForFinish(agent.id);
-    await expect(
-      client.sendAgentMessage(agent.id, text, {
-        messageId: "ordinary-first",
-        chiMentions: ["github:recipient"],
-        chiMentionContext: scope.context,
-      }),
-    ).rejects.toThrow("agent_request_key_conflict");
-    const owner = host.daemon.agentManager.chi!;
-    await owner.mentions.captured({
-      agentId: agent.id,
-      identity: { repo, actor, token: "fixture" },
-      sourceId: "a".repeat(64),
-      snapshot: "b".repeat(64),
-      messages: [
-        {
-          id: "native-exact",
-          payload: { type: "user", text, metadata: { paseoClientMessageId: "ordinary-first" } },
-        },
-      ],
-    });
-    expect(
-      await client.chiMentions({
-        workspaceId: workspace.id,
-        expectedContext: scope.context,
-        operation: { action: "delivery", agentId: agent.id },
-      }),
-    ).toMatchObject({ kind: "delivery", deliveries: [] });
-    const transformed: Array<{
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/fixture/repo.git",
+    ]);
+    const repo = "github:fixture/repo",
+      actor = "github:sender";
+    const submitted: string[] = [];
+    const nativeMessages: Array<{
+      id: string;
+      type: string;
       text: string;
-      attachments?: AgentAttachment[];
-      images?: Array<{ data: string; mimeType: string }>;
-    }> = [
-      { text: "/review @recipient" },
-      { text: "/skill @recipient" },
-      { text, attachments: [{ type: "text", mimeType: "text/plain", text: "expanded context" }] },
-      { text, images: [{ data: "aGVsbG8=", mimeType: "image/png" }] },
-    ];
-    for (const [i, input] of transformed.entries()) {
-      const messageId = `rejected-transform-${i}`;
+      metadata: { paseoClientMessageId: string };
+    }> = [];
+    const backendWrites: string[] = [];
+    let credentialGeneration = "original",
+      loggedOut = false;
+    const startHost = () =>
+      createTestPaseoDaemon({
+        paseoHomeRoot,
+        cleanup: false,
+        mcpEnabled: false,
+        chi: {
+          destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
+          mappings: [{ repo, destination: "fixture", audience: "shared" }],
+        },
+        agentClients: {
+          opencode: createTestAgentClient("opencode", {
+            onStartTurn(prompt, options) {
+              submitted.push(options!.clientMessageId!);
+              nativeMessages.push({
+                id: `native-${submitted.length}`,
+                type: "user",
+                text: typeof prompt === "string" ? prompt : "",
+                metadata: { paseoClientMessageId: options!.clientMessageId! },
+              });
+            },
+            nativeRuntime: {
+              identity: "http://fixture-runtime",
+              info: async () => ({ version: "2.0.15-chi.1" }),
+              export: async (sessionId) => ({
+                info: { id: sessionId, location: { directory: cwd } },
+                messages: nativeMessages,
+              }),
+              schema: async () => {
+                throw new Error("not used");
+              },
+              get: async () => {
+                throw new Error("not used");
+              },
+              import: async () => {
+                throw new Error("not used");
+              },
+              fork: async () => {
+                throw new Error("not used");
+              },
+            },
+          }),
+        },
+        chiAuthority: {
+          invalidate: () => undefined,
+          endpoint: "https://chi.invalid",
+          login: async () => {
+            if (loggedOut) throw new Error("chi-github-login-required");
+            return { sessionToken: "fixture", chiUserId: actor, credentialGeneration };
+          },
+          request: async (url, init) => {
+            const target = new URL(String(url));
+            if (init?.method && init.method !== "GET") backendWrites.push(target.pathname);
+            if (target.pathname === "/auth/session")
+              return Response.json({
+                ok: true,
+                chiUserId: actor,
+                capabilities: {
+                  appendLog: { v: 3, deployment: "fixture" },
+                  handoffs: { v: 3, references: "pin-seq" },
+                },
+              });
+            if (target.pathname === "/repos") return Response.json({ ok: true, repos: [{ repo }] });
+            if (target.pathname === "/participants")
+              return Response.json({
+                ok: true,
+                self: actor,
+                participants: [{ ownerId: "github:recipient", handle: "recipient" }],
+              });
+            return new Response(null, { status: 503 });
+          },
+        },
+      });
+    let host = await startHost();
+    let client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
+    let projectId: string | undefined;
+    try {
+      await client.connect();
+      await client.fetchAgents();
+      const project = await client.addProject(cwd);
+      projectId = project.project!.projectId;
+      const workspace = (
+        await client.createWorkspace({ source: { kind: "directory", path: cwd, projectId } })
+      ).workspace!;
+      const agent = await client.createAgent({
+        provider: "opencode",
+        cwd,
+        workspaceId: workspace.id,
+        labels: {
+          "chi.native": JSON.stringify({
+            repo,
+            actor,
+            sourceId: null,
+            head: null,
+            error: null,
+            endpoint: "https://chi.invalid",
+            destination: "fixture",
+          }),
+        },
+      });
+      const scope = await client.chiMentions({
+        workspaceId: workspace.id,
+        operation: { action: "scope" },
+      });
+      const text = "@recipient please check";
+      await client.sendAgentMessage(agent.id, text, { messageId: "ordinary-first" });
+      await client.waitForFinish(agent.id);
       await expect(
-        client.sendAgentMessage(agent.id, input.text, {
-          ...input,
-          messageId,
+        client.sendAgentMessage(agent.id, text, {
+          messageId: "ordinary-first",
           chiMentions: ["github:recipient"],
           chiMentionContext: scope.context,
         }),
-      ).rejects.toThrow("chi-mention-plain-text-required");
-      // The rejected request did not reserve the ID. A plain send can still use it.
-      await client.sendAgentMessage(agent.id, "plain replacement", { messageId });
+      ).rejects.toThrow("agent_request_key_conflict");
+      const owner = host.daemon.agentManager.chi!;
+      await owner.mentions.captured({
+        agentId: agent.id,
+        identity: { repo, actor, token: "fixture", deployment: "fixture" },
+        pin: {
+          v: 3,
+          deployment: "fixture",
+          repo,
+          sourceId: "a".repeat(64),
+          count: 1,
+          head: "b".repeat(64),
+        },
+        messages: [
+          {
+            id: "native-exact",
+            seq: 0,
+            payload: { type: "user", text, metadata: { paseoClientMessageId: "ordinary-first" } },
+          },
+        ],
+      });
+      expect(
+        await client.chiMentions({
+          workspaceId: workspace.id,
+          expectedContext: scope.context,
+          operation: { action: "delivery", agentId: agent.id },
+        }),
+      ).toMatchObject({ kind: "delivery", deliveries: [] });
+      const transformed: Array<{
+        text: string;
+        attachments?: AgentAttachment[];
+        images?: Array<{ data: string; mimeType: string }>;
+      }> = [
+        { text: "/review @recipient" },
+        { text: "/skill @recipient" },
+        { text, attachments: [{ type: "text", mimeType: "text/plain", text: "expanded context" }] },
+        { text, images: [{ data: "aGVsbG8=", mimeType: "image/png" }] },
+      ];
+      for (const [i, input] of transformed.entries()) {
+        const messageId = `rejected-transform-${i}`;
+        await expect(
+          client.sendAgentMessage(agent.id, input.text, {
+            ...input,
+            messageId,
+            chiMentions: ["github:recipient"],
+            chiMentionContext: scope.context,
+          }),
+        ).rejects.toThrow("chi-mention-plain-text-required");
+        // The rejected request did not reserve the ID. A plain send can still use it.
+        await client.sendAgentMessage(agent.id, "plain replacement", { messageId });
+        await client.waitForFinish(agent.id);
+      }
+      expect(submitted).toEqual([
+        "ordinary-first",
+        ...transformed.map((_, i) => `rejected-transform-${i}`),
+      ]);
+      expect(backendWrites).toEqual([]);
+      await expect(
+        client.sendAgentMessage(agent.id, "x".repeat(8001), {
+          messageId: "oversized",
+          chiMentions: ["github:recipient"],
+          chiMentionContext: scope.context,
+        }),
+      ).rejects.toMatchObject({ failure: { outcome: "not_committed" } });
+      await expect(
+        client.sendAgentMessage(agent.id, "@missing check", {
+          messageId: "unavailable",
+          chiMentions: ["github:missing"],
+          chiMentionContext: scope.context,
+        }),
+      ).rejects.toMatchObject({
+        message: "chi-mention-recipient-unavailable",
+        failure: { outcome: "not_committed" },
+      });
+      await client.sendAgentMessage(agent.id, "ordinary after rejection", {
+        messageId: "ordinary-after-rejection",
+      });
       await client.waitForFinish(agent.id);
-    }
-    expect(submitted).toEqual([
-      "ordinary-first",
-      ...transformed.map((_, i) => `rejected-transform-${i}`),
-    ]);
-    expect(backendWrites).toEqual([]);
-    await expect(
-      client.sendAgentMessage(agent.id, "x".repeat(8001), {
-        messageId: "oversized",
+      const saved = {
+        messageId: "rotate-credentials",
         chiMentions: ["github:recipient"],
         chiMentionContext: scope.context,
-      }),
-    ).rejects.toMatchObject({ failure: { outcome: "not_committed" } });
-    await expect(
-      client.sendAgentMessage(agent.id, "@missing check", {
-        messageId: "unavailable",
-        chiMentions: ["github:missing"],
-        chiMentionContext: scope.context,
-      }),
-    ).rejects.toMatchObject({
-      message: "chi-mention-recipient-unavailable",
-      failure: { outcome: "not_committed" },
-    });
-    await client.sendAgentMessage(agent.id, "ordinary after rejection", {
-      messageId: "ordinary-after-rejection",
-    });
-    await client.waitForFinish(agent.id);
-    const saved = {
-      messageId: "rotate-credentials",
-      chiMentions: ["github:recipient"],
-      chiMentionContext: scope.context,
-    };
-    credentialGeneration = "rotated";
-    await expect(client.sendAgentMessage(agent.id, text, saved)).rejects.toMatchObject({
-      message: "chi-mention-context-changed",
-      failure: { outcome: "not_committed" },
-    });
-    const fresh = await client.chiMentions({
-      workspaceId: workspace.id,
-      operation: { action: "scope" },
-    });
-    const authorized = { ...saved, chiMentionAuthorization: fresh.context };
-    await client.sendAgentMessage(agent.id, text, authorized);
-    await client.waitForFinish(agent.id);
-    await client.sendAgentMessage(agent.id, text, authorized);
-    expect(submitted.filter((id) => id === saved.messageId)).toHaveLength(1);
-    await expect(
-      client.sendAgentMessage(agent.id, text, {
-        ...authorized,
-        chiMentionAuthorization: { ...fresh.context, actor: "github:other" },
-      }),
-    ).rejects.toMatchObject({ message: "chi-mention-context-changed" });
-    loggedOut = true;
-    await expect(
-      client.chiMentions({
+      };
+      credentialGeneration = "rotated";
+      await expect(client.sendAgentMessage(agent.id, text, saved)).rejects.toMatchObject({
+        message: "chi-mention-context-changed",
+        failure: { outcome: "not_committed" },
+      });
+      const fresh = await client.chiMentions({
         workspaceId: workspace.id,
-        expectedContext: fresh.context,
-        operation: { action: "retry", agentId: agent.id },
-      }),
-    ).rejects.toMatchObject({
-      message: "chi-github-login-required",
-      failure: { accessLost: true, outcome: "unknown" },
-    });
-  } finally {
-    if (projectId) await client.removeProject(projectId);
-    await client.close();
-    await host.close();
-    rmSync(cwd, { recursive: true, force: true });
-  }
-});
+        operation: { action: "scope" },
+      });
+      const authorized = { ...saved, chiMentionAuthorization: fresh.context };
+      await client.sendAgentMessage(agent.id, text, authorized);
+      await client.waitForFinish(agent.id);
+      // Reproduce a provider-accepted send whose durable completion write was lost.
+      const receiptPath = path.join(
+        host.paseoHome,
+        "agent-requests",
+        `${createHash("sha256")
+          .update(JSON.stringify(["send", agent.id, saved.messageId]))
+          .digest("hex")}.json`,
+      );
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      writeFileSync(receiptPath, JSON.stringify({ ...receipt, state: "pending" }));
+      await client.close();
+      await host.close();
+      host = await startHost();
+      client = new DaemonClient({ url: `ws://127.0.0.1:${host.port}/ws` });
+      await client.connect();
+      const original = nativeMessages.find(
+        (message) => message.metadata.paseoClientMessageId === saved.messageId,
+      )!;
+      original.text = "unrelated text";
+      await expect(client.sendAgentMessage(agent.id, text, authorized)).rejects.toThrow(
+        "agent_request_outcome_unknown",
+      );
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("pending");
+      original.text = text;
+      loggedOut = true;
+      await expect(client.sendAgentMessage(agent.id, text, authorized)).rejects.toMatchObject({
+        failure: { outcome: "unknown" },
+      });
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("pending");
+      loggedOut = false;
+      await Promise.all([
+        client.sendAgentMessage(agent.id, text, authorized),
+        client.sendAgentMessage(agent.id, text, authorized),
+      ]);
+      expect(JSON.parse(readFileSync(receiptPath, "utf8")).state).toBe("completed");
+      expect(submitted.filter((id) => id === saved.messageId)).toHaveLength(1);
+      await client.sendAgentMessage(agent.id, "ordinary after recovery", {
+        messageId: "after-recovery",
+      });
+      await client.waitForFinish(agent.id);
+      expect(submitted.filter((id) => id === "after-recovery")).toHaveLength(1);
+      await expect(
+        client.sendAgentMessage(agent.id, text, {
+          ...authorized,
+          chiMentionAuthorization: { ...fresh.context, actor: "github:other" },
+        }),
+      ).rejects.toMatchObject({ message: "chi-mention-context-changed" });
+      loggedOut = true;
+      await expect(
+        client.chiMentions({
+          workspaceId: workspace.id,
+          expectedContext: fresh.context,
+          operation: { action: "retry", agentId: agent.id },
+        }),
+      ).rejects.toMatchObject({
+        message: "chi-github-login-required",
+        failure: { accessLost: true, outcome: "unknown" },
+      });
+    } finally {
+      if (projectId) await client.removeProject(projectId);
+      await client.close();
+      await host.close();
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(paseoHomeRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 interface StaleAgentFixture {
   healthyProjectId: string;

@@ -1476,6 +1476,7 @@ export const ru: TranslationResources = {
     body: "Попробуйте перезагрузить приложение. Если ошибка повторится, приложите приведённые ниже сведения к отчёту.",
     details: "Подробности",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "Что-то пошло не так",
     errorDescription:

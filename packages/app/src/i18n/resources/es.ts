@@ -1494,6 +1494,7 @@ export const es: TranslationResources = {
     body: "Vuelve a intentarlo para recargar la app. Si sigue ocurriendo, incluye los detalles de abajo al reportarlo.",
     details: "Detalles",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "algo salió mal",
     errorDescription:

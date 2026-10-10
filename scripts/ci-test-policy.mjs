@@ -19,11 +19,13 @@ export const critical = {
     "src/server/agent/permission-response.test.ts",
     "src/server/agent/agent-manager.test.ts",
     "src/server/chi/connection.test.ts",
+    "src/server/chi/append-capture.test.ts",
     "src/server/chi/destinations.test.ts",
     "src/server/chi/mentions.test.ts",
     "src/server/chi/human-prompts.test.ts",
     "src/server/chi/provenance.test.ts",
     "src/server/message-receipts/index.test.ts",
+    "src/server/message-receipts/native.test.ts",
   ],
   app: [
     "src/utils/scanned-pairing-offer.test.ts",

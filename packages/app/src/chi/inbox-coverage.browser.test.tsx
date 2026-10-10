@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { userEvent } from "vitest/browser";
 import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { AtSign } from "lucide-react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
@@ -31,7 +32,16 @@ vi.mock("expo-router", () => ({
 }));
 vi.mock("@/components/headers/menu-header", () => ({ MenuHeader: () => null }));
 vi.mock("@/components/ui/form-field", () => ({ FormTextInput: () => null }));
-vi.mock("./repository-filter", () => ({ RepositoryFilter: () => null }));
+vi.mock("./repository-filter", () => ({
+  RepositoryFilter: function RepositoryFilter({ onSelect }: { onSelect(repo: string): void }) {
+    const select = React.useCallback(() => onSelect("github:o/a"), [onSelect]);
+    return (
+      <button type="button" data-testid="choose-test-repo" onClick={select}>
+        Choose fixture repository
+      </button>
+    );
+  },
+}));
 vi.mock("./entry-navigation", () => ({ locateMention: vi.fn(), openMentionTarget: vi.fn() }));
 vi.mock("./reply-model", () => ({ openReplyForm: vi.fn() }));
 vi.mock("@/constants/layout", async (importOriginal) => ({
@@ -162,7 +172,7 @@ test.each(["account", "credential", "deployment", "failure"])(
     let transport!: ReturnType<typeof useInboxTransport>;
     function Probe() {
       transport = useInboxTransport();
-      const inbox = useInbox(transport);
+      const inbox = useInbox(transport, { repo: "github:o/a" });
       return <div>{inbox.data ? "protected" : "empty"}</div>;
     }
     const view = mount(
@@ -171,7 +181,7 @@ test.each(["account", "credential", "deployment", "failure"])(
       </QueryClientProvider>,
     );
     await vi.waitFor(() => expect(view.container.textContent).toBe("protected"));
-    const oldKey = [...transport.queryKey, "inbox", true];
+    const oldKey = [...transport.queryKey, "inbox", true, "github:o/a"];
     expect(queryClient.getQueryData(oldKey)).toMatchObject({ unreadCount: 7 });
     // Keep the real scope alive, but remount only transport verification so neither
     // an inbox query nor scope.acquire can accidentally mask missing reconciliation.
@@ -220,7 +230,7 @@ test.each(["account", "credential", "deployment", "failure"])(
   },
 );
 
-test("the real sidebar displays the backend lower-bound badge even with complete repository availability", async () => {
+test("the v3 sidebar does not invent a global unread count from a repository inbox", async () => {
   const context: ChiMentionContext = {
     actor: "github:alice",
     deployment: "synthetic-deployment",
@@ -248,12 +258,10 @@ test("the real sidebar displays the backend lower-bound badge even with complete
       <SidebarMentionsRow />
     </QueryClientProvider>,
   );
-  await vi.waitFor(() =>
-    expect(
-      view.container.querySelector('[aria-label="0 unread mentions, count incomplete"]'),
-    ).not.toBeNull(),
-  );
-  expect(view.container.textContent).toContain("0+");
+  expect(
+    view.container.querySelector('[aria-label="0 unread mentions, count incomplete"]'),
+  ).toBeNull();
+  expect(host.client.chiMentions).not.toHaveBeenCalled();
 });
 
 test("empty cursor pages continue automatically, stop on data, and bound repeated or endless cursors", async () => {
@@ -398,7 +406,114 @@ test("scroll pause suppresses both route and sidebar interval/focus refresh and 
   }
 });
 
-test("production screen connects empty-page continuation and scroll pause to the shared sidebar query", async () => {
+test("the default workspace feed loads before a delayed catalog and retries without marking a handoff read", async () => {
+  const context: ChiMentionContext = {
+    actor: "github:alice",
+    deployment: "synthetic-deployment",
+    generation: "a".repeat(64),
+    evidenceVersion: 3,
+    repo: "*",
+    defaultRepository: "github:o/a",
+  };
+  const catalog = deferred<{ kind: "scope"; actor: string; context: ChiMentionContext }>();
+  const handoff: ChiHandoff = {
+    schemaVersion: 1,
+    id: "00000000-0000-4000-8000-000000000008",
+    repo: "github:o/a",
+    author: "github:bob",
+    recipient: "github:alice",
+    text: "Please review the deployment plan and confirm the next steps before the release. ".repeat(
+      8,
+    ),
+    workspaceName: "Release planning",
+    sources: [{ kind: "neutral", id: "source", snapshot: "a".repeat(64), entryId: "entry" }],
+    state: "open",
+    revision: 1,
+    createdAt: "2026-10-08T00:00:00Z",
+    updatedAt: "2026-10-08T00:00:00Z",
+    events: [],
+  };
+  let inboxReads = 0;
+  let denied = false;
+  host.client = {
+    chiMentions: vi.fn(async ({ operation }) => {
+      if (operation.action === "scope") {
+        if (operation.includeRepositories === false)
+          return { kind: "scope", actor: context.actor, context };
+        return catalog.promise;
+      }
+      if (operation.action !== "inbox") throw new Error("Unexpected read-marker or mutation");
+      expect(operation.repo).toBe("github:o/a");
+      inboxReads++;
+      if (denied)
+        throw new ChiOperationError("chi-mentions-http-403", {
+          accessLost: true,
+          outcome: "unknown",
+        });
+      if (inboxReads === 1)
+        throw new ChiOperationError("chi-mentions-http-503", {
+          accessLost: false,
+          outcome: "unknown",
+        });
+      return {
+        kind: "inbox",
+        actor: context.actor,
+        context,
+        handoffs: [handoff],
+        nextCursor: null,
+        unreadCount: 1,
+      };
+    }),
+  };
+  const view = mount(
+    <QueryClientProvider client={queryClient}>
+      <SidebarMentionsRow />
+      <ChiInboxScreen />
+    </QueryClientProvider>,
+  );
+  await vi.waitFor(() => expect(view.container.textContent).toContain("Unable to load mentions"));
+  const row = () => view.container.querySelector(`[data-testid="mention-row-${handoff.id}"]`);
+  expect(row()).toBeNull();
+  const retry = Array.from(view.container.querySelectorAll("button, [role=button]")).find(
+    (element) => element.textContent === "Retry",
+  )!;
+  await act(async () => {
+    await userEvent.click(retry);
+  });
+  await vi.waitFor(() => expect(row()).not.toBeNull());
+  expect(row()!.textContent).toContain("Release planning");
+  expect(row()!.textContent).toContain(handoff.text);
+  expect(
+    view.container.querySelector(`[data-testid="mention-unread-${handoff.id}"]`),
+  ).not.toBeNull();
+  expect(inboxReads).toBe(2);
+  expect(
+    host.client.chiMentions.mock.calls.filter(([request]) => request.operation.action === "scope"),
+  ).toHaveLength(3);
+  catalog.resolve({
+    kind: "scope",
+    actor: context.actor,
+    context: { ...context, repositories: ["github:o/a"] },
+  });
+  expect(handoff.readAt).toBeUndefined();
+  denied = true;
+  await act(async () => {
+    await queryClient.invalidateQueries({ queryKey: ["chi-mentions", "transport-host"] });
+  });
+  await vi.waitFor(() =>
+    expect(view.container.textContent).toContain("Mention context unavailable"),
+  );
+  expect(row()).toBeNull();
+  expect(inboxReads).toBe(3);
+  expect(
+    queryClient
+      .getQueryCache()
+      .getAll()
+      .filter((query) => query.queryKey[0] === "chi-mentions" && query.state.data !== undefined),
+  ).toEqual([]);
+});
+
+test("production screen scopes empty-page continuation and scroll pause to the selected repository", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const context: ChiMentionContext = {
     actor: "github:alice",
@@ -428,6 +543,14 @@ test("production screen connects empty-page continuation and scroll pause to the
     </QueryClientProvider>,
   );
   try {
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[data-testid="choose-test-repo"]')).not.toBeNull(),
+    );
+    act(() =>
+      (
+        view.container.querySelector('[data-testid="choose-test-repo"]') as HTMLButtonElement
+      ).click(),
+    );
     await vi.waitFor(() => expect(calls).toEqual([undefined, "1", "2"]));
     const list = view.container.querySelector('[data-testid="chi-flat-inbox"]') as HTMLDivElement;
     expect(list).not.toBeNull();
@@ -505,6 +628,14 @@ test("compact discussion unmount releases the list pause and returning to its to
     </QueryClientProvider>,
   );
   try {
+    await vi.waitFor(() =>
+      expect(view.container.querySelector('[data-testid="choose-test-repo"]')).not.toBeNull(),
+    );
+    act(() =>
+      (
+        view.container.querySelector('[data-testid="choose-test-repo"]') as HTMLButtonElement
+      ).click(),
+    );
     await vi.waitFor(() =>
       expect(
         view.container.querySelector('[aria-label="Discuss mention Compact fixture"]'),
@@ -819,7 +950,7 @@ test("unavailable refresh clears cached head synchronously before the error is o
       await query.refetch();
     });
     expect(view.container.textContent).toBe("empty");
-    expect(cache.getQueryData(["fail-test", "inbox", true])).toBeUndefined();
+    expect(cache.getQueryData(["fail-test", "inbox", true, undefined])).toBeUndefined();
   } finally {
     cache.clear();
   }
@@ -881,7 +1012,9 @@ test("a cancelled older-page failure cannot erase a newly reauthorized head", as
       release.resolve();
     });
     expect(view.container.textContent).toBe("2");
-    expect(cache.getQueryData(["late-test", "inbox", true])).toMatchObject({ unreadCount: 2 });
+    expect(cache.getQueryData(["late-test", "inbox", true, undefined])).toMatchObject({
+      unreadCount: 2,
+    });
   } finally {
     cache.clear();
   }

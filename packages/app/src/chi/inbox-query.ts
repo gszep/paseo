@@ -181,12 +181,13 @@ export function useInboxQuery(
 export function inboxQueryOptions(input: {
   queryKey: readonly unknown[];
   inbox: boolean;
+  repo?: string;
   enabled: boolean;
   context: ChiMentionContext | undefined;
   run: MentionScope["run"];
 }) {
   return {
-    queryKey: [...input.queryKey, "inbox", input.inbox],
+    queryKey: [...input.queryKey, "inbox", input.inbox, input.repo],
     enabled: input.enabled,
     initialPageParam: undefined as string | undefined,
     retry: false,
@@ -197,7 +198,7 @@ export function inboxQueryOptions(input: {
     refetchInterval: mentionRefreshIntervalMs,
     queryFn: async ({ pageParam }: { pageParam: string | undefined }) => {
       const result = await input.run(
-        { action: "inbox" as const, inbox: input.inbox, cursor: pageParam },
+        { action: "inbox" as const, inbox: input.inbox, cursor: pageParam, repo: input.repo },
         input.context,
       );
       if (result.kind !== "inbox") throw new Error("chi-invalid-response");
