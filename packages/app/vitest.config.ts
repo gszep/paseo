@@ -13,6 +13,7 @@ const resolvePackageEntry = (packageName: string) => {
 };
 
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
   test: {
     environment: "node",
     exclude: [...configDefaults.exclude, "e2e/**"],
@@ -93,6 +94,7 @@ export default defineConfig({
       "zustand",
       "zod",
       "react/jsx-runtime",
+      "react/jsx-dev-runtime",
       "react-native-gesture-handler > hoist-non-react-statics",
       "react-native-gesture-handler > invariant",
     ],
@@ -163,7 +165,7 @@ export default defineConfig({
       // Vite alias resolution).
       {
         find: "react-native",
-        replacement: path.resolve(rootNodeModules, "react-native-web/dist/index.js"),
+        replacement: path.resolve(__dirname, "test-stubs/react-native.js"),
       },
       { find: "react", replacement: resolvePackageEntry("react") },
       {

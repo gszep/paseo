@@ -101,7 +101,7 @@ import { AttachmentLightbox, type ImageLightboxSource } from "@/components/attac
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { isWeb, isNative } from "@/constants/platform";
 import type { AgentCapabilityFlags } from "@getpaseo/protocol/agent-types";
-import { RewindMenu, type RewindMode } from "@/components/rewind/rewind-menu";
+import { RewindMenu } from "@/components/rewind/rewind-menu";
 import { useRewindAgentMutation } from "@/components/rewind/use-rewind-agent-mutation";
 import { AssistantForkMenu, type AssistantForkTarget } from "@/components/assistant-fork-menu";
 import { useRetainedPanelActive } from "@/components/retained-panel";
@@ -116,6 +116,8 @@ export type { InlinePathTarget } from "@/assistant-file-links";
 export type { AssistantForkTarget };
 
 interface UserMessageProps {
+  /** Supplied evidence has no recipient-host actions or attachment acquisition. */
+  readOnly?: boolean;
   serverId?: string;
   agentId?: string;
   messageId?: string;
@@ -423,21 +425,41 @@ function UserMessageImagePill({ image, onOpen, accessibilityLabel }: UserMessage
 
 const MESSAGE_TEXT_DATASET = { messageText: "true" };
 
-export const UserMessage = memo(function UserMessage({
-  serverId,
-  agentId,
-  messageId,
+export const UserMessage = memo(function UserMessage(props: UserMessageProps) {
+  if (props.readOnly) return <UserMessageBody {...props} />;
+  return <InteractiveUserMessage {...props} />;
+});
+
+function InteractiveUserMessage(props: UserMessageProps) {
+  const { serverId, agentId, messageId, client, capabilities, message } = props;
+  const rewindMutation = useRewindAgentMutation({ serverId, agentId, client, messageId });
+  const rewind = useMemo(
+    () =>
+      capabilities && messageId ? (
+        <RewindMenu
+          capabilities={capabilities}
+          isPending={rewindMutation.isPending}
+          rewoundText={message}
+          onRewind={rewindMutation.rewindAgent}
+        />
+      ) : null,
+    [capabilities, messageId, message, rewindMutation.isPending, rewindMutation.rewindAgent],
+  );
+  return <UserMessageBody {...props} rewind={rewind} />;
+}
+
+function UserMessageBody({
+  readOnly = false,
+  rewind,
   message,
   images = [],
   attachments = [],
   timestamp,
-  capabilities,
-  client,
   isFirstInGroup = true,
   isLastInGroup = true,
   isPending = false,
   disableOuterSpacing,
-}: UserMessageProps) {
+}: UserMessageProps & { rewind?: ReactNode }) {
   const isCompact = useIsCompactFormFactor();
   const { t } = useTranslation();
   const [isHovered, setIsHovered] = useState(false);
@@ -456,17 +478,10 @@ export const UserMessage = memo(function UserMessage({
     () => formatMessageTimestamp(new Date(timestamp)),
     [timestamp],
   );
-  const rewindMutation = useRewindAgentMutation({ serverId, agentId, client, messageId });
 
   const handlePointerEnter = useCallback(() => setIsHovered(true), []);
   const handlePointerLeave = useCallback(() => setIsHovered(false), []);
   const getMessageContent = useCallback(() => message, [message]);
-  const handleRewind = useCallback(
-    (input: { mode: RewindMode; rewoundText: string }) => {
-      return rewindMutation.rewindAgent(input);
-    },
-    [rewindMutation],
-  );
 
   const containerStyle = useMemo(
     () => [
@@ -504,23 +519,39 @@ export const UserMessage = memo(function UserMessage({
   );
 
   return (
-    <View style={containerStyle} testID="user-message" aria-busy={isPending}>
+    <View
+      style={containerStyle}
+      testID="user-message"
+      aria-busy={isPending}
+      accessibilityLabel={readOnly ? "User" : undefined}
+    >
       <View
         style={userMessageStylesheet.content}
         onPointerEnter={handlePointerEnter}
         onPointerLeave={handlePointerLeave}
       >
         <View style={userMessageStylesheet.bubble}>
+          {readOnly ? (
+            <Text style={userMessageStylesheet.timestampText} testID="user-message-author">
+              User
+            </Text>
+          ) : null}
           {hasImages ? (
             <View style={imagePreviewContainerStyle}>
-              {images.map((image) => (
-                <UserMessageImagePill
-                  key={image.id}
-                  image={image}
-                  onOpen={setLightboxMetadata}
-                  accessibilityLabel={t("composer.attachments.openImage")}
-                />
-              ))}
+              {images.map((image) =>
+                readOnly ? (
+                  <Text key={image.id} style={userMessageStylesheet.timestampText}>
+                    Image (not loaded)
+                  </Text>
+                ) : (
+                  <UserMessageImagePill
+                    key={image.id}
+                    image={image}
+                    onOpen={setLightboxMetadata}
+                    accessibilityLabel={t("composer.attachments.openImage")}
+                  />
+                ),
+              )}
             </View>
           ) : null}
           {hasAttachments ? (
@@ -556,26 +587,23 @@ export const UserMessage = memo(function UserMessage({
             <Text style={userMessageStylesheet.timestampText} testID="user-message-timestamp">
               {formattedTimestamp}
             </Text>
-            {capabilities && messageId ? (
-              <RewindMenu
-                capabilities={capabilities}
-                isPending={rewindMutation.isPending}
-                rewoundText={message}
-                onRewind={handleRewind}
+            {rewind}
+            {!readOnly ? (
+              <TurnCopyButton
+                getContent={getMessageContent}
+                containerStyle={userMessageStylesheet.copyButton}
+                accessibilityLabel={t("message.actions.copyMessage")}
               />
             ) : null}
-            <TurnCopyButton
-              getContent={getMessageContent}
-              containerStyle={userMessageStylesheet.copyButton}
-              accessibilityLabel={t("message.actions.copyMessage")}
-            />
           </View>
         ) : null}
       </View>
-      <AttachmentLightbox source={lightboxSource} onClose={handleLightboxClose} />
+      {!readOnly ? (
+        <AttachmentLightbox source={lightboxSource} onClose={handleLightboxClose} />
+      ) : null}
     </View>
   );
-});
+}
 
 interface AssistantTurnFooterProps {
   getContent: () => string;
@@ -748,6 +776,8 @@ export const LiveElapsed = memo(function LiveElapsed({
 });
 
 interface AssistantMessageProps {
+  /** Render supplied text without links, file lookup, or image acquisition. */
+  readOnly?: boolean;
   renderFullContent?: boolean;
   occurrenceKey: string;
   message: string;
@@ -1492,7 +1522,19 @@ function MarkdownListView({
   );
 }
 
-export const AssistantMessage = memo(function AssistantMessage({
+export const AssistantMessage = memo(function AssistantMessage(props: AssistantMessageProps) {
+  if (props.readOnly) return <AssistantMessageBody {...props} />;
+  return <InteractiveAssistantMessage {...props} />;
+});
+
+function InteractiveAssistantMessage(props: AssistantMessageProps) {
+  const fileLinkActions = useAssistantFileLinkActions();
+  return <AssistantMessageBody {...props} fileLinkActions={fileLinkActions} />;
+}
+
+function AssistantMessageBody({
+  readOnly = false,
+  fileLinkActions,
   renderFullContent = false,
   occurrenceKey,
   message,
@@ -1502,7 +1544,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   client,
   spacing = "default",
   phase,
-}: AssistantMessageProps) {
+}: AssistantMessageProps & { fileLinkActions?: ReturnType<typeof useAssistantFileLinkActions> }) {
   const { t } = useTranslation();
   const markdownParser = useMemo(createAssistantMarkdownParser, []);
   const streamingMarkdownParser = useMemo(
@@ -1521,9 +1563,8 @@ export const AssistantMessage = memo(function AssistantMessage({
     [message, phase, renderedMessage.capped],
   );
 
-  const fileLinkActions = useAssistantFileLinkActions();
   const handleMarkdownLinkPress = useStableEvent((url: string) => {
-    fileLinkActions.open({ href: url }, "preferred");
+    fileLinkActions?.open({ href: url }, "preferred");
     // react-native-markdown-display opens the link itself when this returns true.
     // We already handled it above, so return false to avoid duplicate opens.
     return false;
@@ -1787,7 +1828,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           sourceType: "inline-code",
         };
         const shouldResolveInlinePath =
-          !isLinkedInlineCode && fileLinkActions.canResolveFile(inlineCodeSource);
+          !isLinkedInlineCode && fileLinkActions?.canResolveFile(inlineCodeSource);
 
         if (shouldResolveInlinePath) {
           return (
@@ -1802,7 +1843,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         }
 
         const inlineCodeLinkUrl = getInlineCodeAutoLinkUrl(markdownParser, content);
-        if (inlineCodeLinkUrl) {
+        if (inlineCodeLinkUrl && !readOnly) {
           const source = getInlineCodeAutoLinkSource({
             href: inlineCodeLinkUrl,
             content,
@@ -1918,21 +1959,31 @@ export const AssistantMessage = memo(function AssistantMessage({
           {children}
         </MarkdownParagraphView>
       ),
-      link: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) => (
-        <AssistantMarkdownLink
-          key={node.key}
-          source={getMarkdownLinkSource(node)}
-          style={styles.link}
-        >
-          {colorMarkdownLinkChildren(children, styles.link.color)}
-        </AssistantMarkdownLink>
-      ),
+      link: (node: ASTNode, children: ReactNode[], _parent: ASTNode[], styles: MarkdownStyles) =>
+        readOnly ? (
+          <MarkdownTextSpan key={node.key}>{children}</MarkdownTextSpan>
+        ) : (
+          <AssistantMarkdownLink
+            key={node.key}
+            source={getMarkdownLinkSource(node)}
+            style={styles.link}
+          >
+            {colorMarkdownLinkChildren(children, styles.link.color)}
+          </AssistantMarkdownLink>
+        ),
       image: (
         node: ASTNode,
         _children: ReactNode[],
         parent: ASTNode[],
         _styles: MarkdownStyles,
       ) => {
+        if (readOnly) {
+          return (
+            <MarkdownTextSpan key={node.key}>
+              [{node.attributes?.alt || "Image"}: not loaded]
+            </MarkdownTextSpan>
+          );
+        }
         const paragraphNode = Array.isArray(parent)
           ? parent.find((ancestor) => ancestor?.type === "paragraph")
           : null;
@@ -1956,7 +2007,16 @@ export const AssistantMessage = memo(function AssistantMessage({
         );
       },
     };
-  }, [client, fileLinkActions, markdownParser, occurrenceKey, phase, serverId, workspaceRoot]);
+  }, [
+    client,
+    fileLinkActions,
+    markdownParser,
+    occurrenceKey,
+    phase,
+    readOnly,
+    serverId,
+    workspaceRoot,
+  ]);
 
   const blocks = useMemo(() => splitMarkdownBlocks(revealedMessage), [revealedMessage]);
   const keyedBlocks = useMemo(
@@ -2016,7 +2076,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       ) : null}
     </View>
   );
-});
+}
 
 interface SpeakMessageProps {
   message: string;
@@ -3023,6 +3083,7 @@ function areExpandableBadgePropsEqual(previous: ExpandableBadgeProps, next: Expa
 }
 
 interface ToolCallProps {
+  readOnly?: boolean;
   toolName: string;
   args?: unknown;
   result?: unknown;
@@ -3042,6 +3103,7 @@ interface ToolCallProps {
 }
 
 export const ToolCall = memo(function ToolCall({
+  readOnly = false,
   toolName,
   args,
   result,
@@ -3177,6 +3239,7 @@ export const ToolCall = memo(function ToolCall({
   if (presentation.isPlan && effectiveDetail?.type === "plan") {
     return (
       <PlanCard
+        readOnly={readOnly}
         text={effectiveDetail.text}
         outcome={presentation.planOutcome}
         testID="timeline-plan-card"
@@ -3205,6 +3268,7 @@ export const ToolCall = memo(function ToolCall({
 }, areToolCallPropsEqual);
 
 function areToolCallPropsEqual(previous: ToolCallProps, next: ToolCallProps) {
+  if (previous.readOnly !== next.readOnly) return false;
   if (previous.toolName !== next.toolName) return false;
   if (previous.args !== next.args) return false;
   if (previous.result !== next.result) return false;
