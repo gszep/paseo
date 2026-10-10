@@ -39,3 +39,7 @@ export async function pickImagesWithDesktopDialog(
 ): Promise<PickedImageAttachmentInput[]> {
   throw new Error("Desktop dialog API is not available on native.");
 }
+
+export async function pickImagesWithWebInput(): Promise<PickedImageAttachmentInput[] | null> {
+  throw new Error("Web file input is not available on native.");
+}
