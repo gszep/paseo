@@ -13,7 +13,6 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
 import type { Theme } from "@/styles/theme";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
 import { useFocusEffect } from "expo-router";
 import type {
   ChiHandoff,
@@ -28,11 +27,10 @@ import { MenuHeader } from "@/components/headers/menu-header";
 import { SearchField } from "@/components/ui/search-field";
 import { HighlightedText } from "@/components/ui/highlighted-text";
 import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
-import { formatDateSectionLabel } from "@/components/date-sections";
 import { formatTimeAgo } from "@/utils/time";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { mentionError } from "./mention-errors";
-import { useInbox, useInboxTransport } from "./use-inbox";
+import { useInbox, useInboxTransport, useInboxCatalog } from "./use-inbox";
 import { locateMention, openMentionTarget } from "./entry-navigation";
 import { RepositoryFilter } from "./repository-filter";
 import { inboxDetailQueryOptions } from "./inbox-query";
@@ -42,6 +40,9 @@ import {
   buildInboxRows,
   filterInboxHandoffs,
   repositoryLabel,
+  inboxWorkspaceName,
+  inboxRepositoryOptions,
+  defaultInboxRepository,
   type InboxListRow,
 } from "./inbox-model";
 
@@ -129,7 +130,7 @@ export function ChiInboxScreen() {
         </Text>
       ) : null}
       {host && (!state.context || state.loading) && !state.error ? (
-        <Text style={styles.empty}>Loading repositories…</Text>
+        <Text style={styles.empty}>Verifying your Chi inbox account…</Text>
       ) : null}
       {host && state.error && !state.loading ? (
         <Alert
@@ -155,7 +156,6 @@ function Inbox({
   context: InboxContext;
 }) {
   const cache = useQueryClient();
-  const { t } = useTranslation();
   const compact = useIsCompactFormFactor();
   const [searchInput, setSearchInput] = useState("");
   const [repository, selectRepository] = useState(ALL_REPOSITORIES_OPTION_ID);
@@ -174,8 +174,11 @@ function Inbox({
       setScrolledDown(event.nativeEvent.contentOffset.y > 0),
     [],
   );
+  const catalog = useInboxCatalog(transport);
+  const repositories = inboxRepositoryOptions(context.identity, catalog.data);
+  const defaultRepo = defaultInboxRepository(context.identity, repositories);
+  const selectedRepo = repository === ALL_REPOSITORIES_OPTION_ID ? defaultRepo : repository;
   // The recipient inbox shares its first page with the sidebar badge.
-  const selectedRepo = repository === ALL_REPOSITORIES_OPTION_ID ? undefined : repository;
   const query = useInbox(transport, {
     paused: scrolledDown,
     autoContinue: true,
@@ -185,7 +188,6 @@ function Inbox({
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
     [query.data],
   );
-  const repositories = context.identity.repositories ?? [];
   const filtered = useMemo(
     () => filterInboxHandoffs(loaded, { search: searchInput, repository }),
     [loaded, searchInput, repository],
@@ -209,22 +211,17 @@ function Inbox({
     setSelected(handoff);
   }, []);
   const renderRow = useCallback(
-    ({ item }: { item: InboxListRow }) =>
-      "section" in item ? (
-        <Text accessibilityRole="header" style={styles.section}>
-          {formatDateSectionLabel(t, item.section)}
-        </Text>
-      ) : (
-        <InboxRow
-          handoff={item.handoff}
-          search={searchInput}
-          unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
-          selected={selected?.id === item.handoff.id}
-          onSelect={choose}
-          onDiscuss={discuss}
-        />
-      ),
-    [t, searchInput, selected?.id, choose, discuss, context.identity.actor],
+    ({ item }: { item: InboxListRow }) => (
+      <InboxRow
+        handoff={item.handoff}
+        search={searchInput}
+        unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
+        selected={selected?.id === item.handoff.id}
+        onSelect={choose}
+        onDiscuss={discuss}
+      />
+    ),
+    [searchInput, selected?.id, choose, discuss, context.identity.actor],
   );
   const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
   const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
@@ -243,7 +240,7 @@ function Inbox({
           />
           <RepositoryFilter
             repositories={repositories}
-            selected={repository}
+            selected={selectedRepo ?? ALL_REPOSITORIES_OPTION_ID}
             onSelect={setRepository}
             triggerTestID="inbox-repo-filter-trigger"
             optionTestID={repositoryOptionTestID}
@@ -252,6 +249,11 @@ function Inbox({
         <Text style={styles.identity} testID="inbox-identity">
           Signed in as @{context.identity.actor.slice(7)}
         </Text>
+        {catalog.isError ? (
+          <Text accessibilityRole="alert" style={styles.hint}>
+            Repository filter unavailable. {mentionError(catalog.error)}
+          </Text>
+        ) : null}
       </View>
       <InboxReadStatus query={query} repo={selectedRepo} refresh={refresh} />
       {query.data && !query.isError ? (
@@ -259,7 +261,7 @@ function Inbox({
           {!compact || !selected ? (
             <FlatList
               testID="chi-flat-inbox"
-              style={compact ? styles.screen : styles.list}
+              style={compact || !selected ? styles.screen : styles.list}
               contentContainerStyle={styles.listContent}
               data={rows}
               keyExtractor={rowKey}
@@ -298,7 +300,7 @@ function Inbox({
   );
 }
 
-/** One Mentions row, laid out on the History agent-row rails. */
+/** A workspace-led activity row, with the same readable preview on every screen size. */
 function InboxRow({
   handoff,
   search,
@@ -314,18 +316,17 @@ function InboxRow({
   onSelect(h: ChiHandoff): void;
   onDiscuss(h: ChiHandoff): void;
 }) {
-  const compact = useIsCompactFormFactor();
   const handle = `@${handoff.author.slice(7)}`;
   const repo = repositoryLabel(handoff.repo);
-  const replies = handoff.replies?.length ?? 0;
+  const workspace = inboxWorkspaceName(handoff);
   const timeAgo = formatTimeAgo(new Date(handoff.createdAt));
   const ranges = useMemo(
     () => ({
       handle: findHighlightRanges(search, handle),
-      repo: findHighlightRanges(search, repo),
+      workspace: findHighlightRanges(search, workspace),
       text: findHighlightRanges(search, handoff.text),
     }),
-    [search, handle, repo, handoff.text],
+    [search, handle, workspace, handoff.text],
   );
 
   const choose = useCallback(() => onSelect(handoff), [handoff, onSelect]);
@@ -357,8 +358,8 @@ function InboxRow({
         <View style={styles.rowContent}>
           <View style={styles.rowTitleRow}>
             <HighlightedText
-              text={handle}
-              ranges={ranges.handle}
+              text={workspace}
+              ranges={ranges.workspace}
               style={styles.rowHandle}
               numberOfLines={1}
             />
@@ -369,46 +370,28 @@ function InboxRow({
                 style={styles.unread}
               />
             ) : null}
-            <Text style={styles.rowState}>{handoff.state}</Text>
+            <Text style={styles.rowTime}>{timeAgo}</Text>
           </View>
-          {compact ? (
-            <View style={styles.rowMetaRow}>
-              <HighlightedText
-                text={repo}
-                ranges={ranges.repo}
-                style={styles.rowMetaText}
-                numberOfLines={1}
-              />
-              <Text style={styles.rowMetaSeparator}>·</Text>
-              <Text style={styles.rowMetaText}>{replies} replies</Text>
-              <Text style={styles.rowMetaSeparator}>·</Text>
-              <Text style={styles.rowMetaText}>{timeAgo}</Text>
-            </View>
-          ) : (
+          <View style={styles.rowMetaRow}>
             <HighlightedText
-              text={handoff.text}
-              ranges={ranges.text}
-              style={styles.rowSnippet}
+              text={handle}
+              ranges={ranges.handle}
+              style={styles.rowMetaText}
               numberOfLines={1}
             />
-          )}
+            <Text style={styles.rowMetaSeparator}>·</Text>
+            <Text style={styles.rowMetaText} numberOfLines={1}>
+              {repo}
+            </Text>
+          </View>
+          <HighlightedText
+            text={handoff.text}
+            ranges={ranges.text}
+            style={styles.rowSnippet}
+            numberOfLines={2}
+            testID={`mention-preview-${handoff.id}`}
+          />
         </View>
-        {!compact ? (
-          <View style={styles.rowColumns}>
-            <HighlightedText
-              text={repo}
-              ranges={ranges.repo}
-              style={styles.columnMeta}
-              numberOfLines={1}
-            />
-            <Text style={styles.columnMetaReplies} numberOfLines={1}>
-              {replies} replies
-            </Text>
-            <Text style={styles.columnMetaFixed} numberOfLines={1}>
-              {timeAgo}
-            </Text>
-          </View>
-        ) : null}
       </Pressable>
       <Pressable
         onPress={discuss}
@@ -727,6 +710,9 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
   },
   listContent: {
+    maxWidth: 720,
+    width: "100%",
+    alignSelf: "center",
     paddingHorizontal: {
       xs: theme.spacing[3],
       md: theme.spacing[6],
@@ -750,12 +736,6 @@ const styles = StyleSheet.create((theme) => ({
   row: { padding: theme.spacing[3], gap: theme.spacing[2], borderRadius: theme.borderRadius.lg },
   exact: { backgroundColor: theme.colors.surface1 },
   unread: { width: 7, height: 7, borderRadius: 4, backgroundColor: theme.colors.accent },
-  section: {
-    color: theme.colors.foregroundMuted,
-    fontSize: theme.fontSize.sm,
-    fontWeight: theme.fontWeight.medium,
-    padding: theme.spacing[3],
-  },
   text: { color: theme.colors.foreground, fontSize: theme.fontSize.base },
   hint: { color: theme.colors.foregroundMuted, fontSize: theme.fontSize.sm },
   rowFrame: {
@@ -772,7 +752,7 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: theme.spacing[2],
+    paddingVertical: theme.spacing[4],
     paddingLeft: theme.spacing[3],
     paddingRight: theme.spacing[2],
     borderRadius: theme.borderRadius.lg,
@@ -788,14 +768,20 @@ const styles = StyleSheet.create((theme) => ({
     overflow: "hidden",
   },
   rowHandle: {
+    flex: 1,
     flexShrink: 1,
     minWidth: 0,
     fontSize: theme.fontSize.base,
     fontWeight: theme.fontWeight.medium,
     color: theme.colors.foreground,
   },
-  rowState: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted },
-  rowSnippet: { fontSize: theme.fontSize.base, color: theme.colors.foregroundMuted },
+  rowTime: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted, flexShrink: 0 },
+  rowSnippet: {
+    fontSize: theme.fontSize.content,
+    color: theme.colors.foreground,
+    lineHeight: theme.fontSize.content * 1.4,
+    marginTop: theme.spacing[1],
+  },
   rowMetaRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -804,40 +790,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowMetaText: {
     maxWidth: "100%",
-    fontSize: theme.fontSize.base,
+    fontSize: theme.fontSize.sm,
     color: theme.colors.foregroundMuted,
   },
   rowMetaSeparator: {
     fontSize: theme.fontSize.base,
     color: theme.colors.foregroundMuted,
     opacity: 0.7,
-  },
-  rowColumns: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexShrink: 0,
-    gap: theme.spacing[3],
-    marginLeft: theme.spacing[2],
-  },
-  columnMeta: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 132,
-  },
-  columnMetaReplies: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 96,
-    textAlign: "right" as const,
-  },
-  columnMetaFixed: {
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foregroundMuted,
-    flexShrink: 0,
-    width: 72,
-    textAlign: "right" as const,
   },
   rowDiscuss: {
     paddingHorizontal: theme.spacing[2],

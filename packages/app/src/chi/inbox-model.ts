@@ -1,5 +1,4 @@
-import type { ChiHandoff } from "@getpaseo/protocol/chi-mentions";
-import { deriveDateSectionKey, type DateSectionKey } from "@/components/date-sections";
+import type { ChiHandoff, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 
 /** Sentinel for "no repository narrowing"; never a real repository id. */
 export const ALL_REPOSITORIES_OPTION_ID = "__all_repositories__";
@@ -9,9 +8,10 @@ export function repositoryLabel(repository: string): string {
   return repository.replace(/^github:/, "");
 }
 
-export type InboxListRow =
-  | { key: string; section: DateSectionKey }
-  | { key: string; handoff: ChiHandoff };
+export interface InboxListRow {
+  key: string;
+  handoff: ChiHandoff;
+}
 
 /**
  * Search is client-side over the pages already loaded. The backend inbox read has
@@ -29,6 +29,7 @@ export function filterInboxHandoffs(
     if (!search) return true;
     return (
       handoff.text.toLowerCase().includes(search) ||
+      inboxWorkspaceName(handoff).toLowerCase().includes(search) ||
       handoff.author.slice(7).toLowerCase().includes(search) ||
       handoff.recipient.slice(7).toLowerCase().includes(search) ||
       repositoryLabel(handoff.repo).toLowerCase().includes(search)
@@ -46,23 +47,37 @@ export function inboxRepositories(handoffs: readonly ChiHandoff[]): string[] {
 }
 
 /**
- * Pages arrive newest-first, so date sections appear in order. Duplicate
+ * Pages arrive newest-first. Duplicate
  * repo/id pairs are dropped: paging can overlap after a first-view CAS.
  */
 export function buildInboxRows(handoffs: readonly ChiHandoff[]): InboxListRow[] {
   const rows: InboxListRow[] = [];
   const seen = new Set<string>();
-  let section: DateSectionKey | undefined;
   for (const handoff of handoffs) {
     const key = `${handoff.repo}/${handoff.id}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const next = deriveDateSectionKey(new Date(handoff.createdAt));
-    if (next !== section) {
-      rows.push({ key: next, section: next });
-      section = next;
-    }
     rows.push({ key, handoff });
   }
   return rows;
+}
+
+/** Historical mentions may predate workspace labels. Keep their repository identifiable. */
+export function inboxWorkspaceName(handoff: ChiHandoff): string {
+  return handoff.workspaceName || repositoryLabel(handoff.repo).split("/").at(-1)!;
+}
+
+export function inboxRepositoryOptions(context: ChiMentionContext, catalog?: string[]): string[] {
+  return (
+    catalog ??
+    context.repositories ??
+    (context.defaultRepository ? [context.defaultRepository] : [])
+  );
+}
+
+export function defaultInboxRepository(
+  context: ChiMentionContext,
+  repositories: string[],
+): string | undefined {
+  return context.defaultRepository ?? (repositories.length === 1 ? repositories[0] : undefined);
 }

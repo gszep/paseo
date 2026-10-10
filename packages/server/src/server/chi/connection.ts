@@ -33,7 +33,11 @@ import { readQuarantinedSessions } from "./quarantine.js";
 import { execCommand } from "../../utils/spawn.js";
 import { ChiMentions, type MentionIdentity } from "./mentions.js";
 import { HumanPrompts, quoteHumanAnswer, type HumanPromptOperation } from "./human-prompts.js";
-import type { ChiMentionOperation, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
+import type {
+  ChiMentionOperation,
+  ChiMentionContext,
+  ChiHandoff,
+} from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
 import { createSessionLogin } from "./session-login.js";
@@ -189,6 +193,7 @@ export interface ChiConnectionOptions {
   /** Persisted agents not yet loaded into memory, for restart reconciliation. */
   listStoredAgents?: () => Promise<readonly StoredChiAgent[]>;
   getStoredAgent?: (agentId: string) => Promise<StoredChiAgent | null>;
+  getWorkspaceName?: (workspaceId: string) => Promise<string | undefined>;
 }
 /** Minimal persisted-agent shape needed to reconcile a sync without a live session. */
 export interface StoredChiAgent {
@@ -469,7 +474,18 @@ export class ChiConnection {
       throw new Error("chi-identity-mismatch");
     }
     if (!admission) throw new Error("chi-mention-admission-required");
-    await this.mentions.prepare({ agentId, messageId, text, recipients, identity, admission });
+    const workspaceName = agent.workspaceId
+      ? await this.options.getWorkspaceName?.(agent.workspaceId)
+      : undefined;
+    await this.mentions.prepare({
+      agentId,
+      messageId,
+      text,
+      recipients,
+      identity,
+      admission,
+      workspaceName,
+    });
   }
 
   async recoverMentionSend(input: {
@@ -871,6 +887,12 @@ export class ChiConnection {
     try {
       const current = await identity();
       const context = this.mentionContext(current);
+      const config = this.chiConfig();
+      const mapped = (config?.mappings ?? []).filter(
+        (mapping) =>
+          config?.destinations[mapping.destination]?.endpoint === this.authority.endpoint,
+      );
+      if (mapped.length === 1) context.defaultRepository = mapped[0]!.repo;
       if (operation.action === "scope") {
         // Account discovery needs identity only. The picker acquires its catalog
         // separately; each repository read still authorizes at the backend.
@@ -903,15 +925,50 @@ export class ChiConnection {
         throw new Error("chi-mention-workspace-required");
       const repo = operation.repo;
       if (!repo) throw new Error("chi-mention-repository-required");
-      if (!expected?.repositories?.includes(repo)) throw new Error("chi-repository-denied");
       // Backend authorizes the supplied repository; inbox transport needs no local checkout.
-      // The previous catalog is a picker bound, never an authorization verdict.
+      // Catalog loading is independent discovery, never an authorization verdict.
       const result = await this.mentions.execute({ ...current, repo }, operation);
+      if (result.kind === "inbox") await this.nameInboxWorkspaces(repo, result.handoffs);
       this.requireMentionContext(await identity(), context);
-      return { context: { ...context, repositories: expected.repositories }, result };
+      return { context: { ...context, repositories: expected?.repositories }, result };
     } catch (error) {
       if (classifyMentionFailure(error).accessLost) this.loseMentionAuthority();
       throw error;
+    }
+  }
+
+  private async nameInboxWorkspaces(repo: string, handoffs: ChiHandoff[]) {
+    const getName = this.options.getWorkspaceName;
+    if (!getName) return;
+    const workspaces = new Map<string, string>();
+    for (const agent of this.manager.listAgents()) {
+      if (!agent.workspaceId || !agent.labels[label]) continue;
+      let association: Association;
+      try {
+        association = associationSchema.parse(JSON.parse(agent.labels[label]!));
+      } catch {
+        continue;
+      }
+      if (
+        association.repo === repo &&
+        association.sourceId &&
+        association.endpoint === this.authority.endpoint
+      )
+        workspaces.set(association.sourceId, agent.workspaceId);
+    }
+    const names = new Map<string, Promise<string | undefined>>();
+    for (const handoff of handoffs) {
+      if (handoff.workspaceName) continue;
+      const source = handoff.sources[0];
+      const workspace = source?.kind === "neutral" ? workspaces.get(source.id) : undefined;
+      if (!workspace) continue;
+      let name = names.get(workspace);
+      if (!name) {
+        name = getName(workspace);
+        names.set(workspace, name);
+      }
+      const workspaceName = await name;
+      if (workspaceName) handoff.workspaceName = workspaceName;
     }
   }
 

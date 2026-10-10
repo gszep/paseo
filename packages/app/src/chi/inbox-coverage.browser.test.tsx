@@ -406,13 +406,14 @@ test("scroll pause suppresses both route and sidebar interval/focus refresh and 
   }
 });
 
-test("account discovery skips the catalog, then a failed repository read can retry without marking a handoff read", async () => {
+test("the default workspace feed loads before a delayed catalog and retries without marking a handoff read", async () => {
   const context: ChiMentionContext = {
     actor: "github:alice",
     deployment: "synthetic-deployment",
     generation: "a".repeat(64),
     evidenceVersion: 3,
     repo: "*",
+    defaultRepository: "github:o/a",
   };
   const catalog = deferred<{ kind: "scope"; actor: string; context: ChiMentionContext }>();
   const handoff: ChiHandoff = {
@@ -421,7 +422,10 @@ test("account discovery skips the catalog, then a failed repository read can ret
     repo: "github:o/a",
     author: "github:bob",
     recipient: "github:alice",
-    text: "Synthetic inbox retry fixture",
+    text: "Please review the deployment plan and confirm the next steps before the release. ".repeat(
+      8,
+    ),
+    workspaceName: "Release planning",
     sources: [{ kind: "neutral", id: "source", snapshot: "a".repeat(64), entryId: "entry" }],
     state: "open",
     revision: 1,
@@ -467,23 +471,6 @@ test("account discovery skips the catalog, then a failed repository read can ret
       <ChiInboxScreen />
     </QueryClientProvider>,
   );
-  await vi.waitFor(() => expect(view.container.textContent).toContain("Loading repositories…"));
-  expect(view.container.textContent).not.toContain("Verifying your Chi inbox account…");
-  expect(host.client.chiMentions.mock.calls.map(([request]) => request.operation)).toEqual([
-    { action: "scope", includeRepositories: false },
-    { action: "scope" },
-  ]);
-  catalog.resolve({
-    kind: "scope",
-    actor: context.actor,
-    context: { ...context, repositories: ["github:o/a"] },
-  });
-  await vi.waitFor(() =>
-    expect(view.container.querySelector('[data-testid="choose-test-repo"]')).not.toBeNull(),
-  );
-  await act(async () => {
-    await userEvent.click(view.container.querySelector('[data-testid="choose-test-repo"]')!);
-  });
   await vi.waitFor(() => expect(view.container.textContent).toContain("Unable to load mentions"));
   const row = () => view.container.querySelector(`[data-testid="mention-row-${handoff.id}"]`);
   expect(row()).toBeNull();
@@ -494,16 +481,20 @@ test("account discovery skips the catalog, then a failed repository read can ret
     await userEvent.click(retry);
   });
   await vi.waitFor(() => expect(row()).not.toBeNull());
+  expect(row()!.textContent).toContain("Release planning");
+  expect(row()!.textContent).toContain(handoff.text);
   expect(
     view.container.querySelector(`[data-testid="mention-unread-${handoff.id}"]`),
   ).not.toBeNull();
   expect(inboxReads).toBe(2);
-  expect(host.client.chiMentions.mock.calls.map(([request]) => request.operation.action)).toEqual([
-    "scope",
-    "scope",
-    "inbox",
-    "inbox",
-  ]);
+  expect(
+    host.client.chiMentions.mock.calls.filter(([request]) => request.operation.action === "scope"),
+  ).toHaveLength(3);
+  catalog.resolve({
+    kind: "scope",
+    actor: context.actor,
+    context: { ...context, repositories: ["github:o/a"] },
+  });
   expect(handoff.readAt).toBeUndefined();
   denied = true;
   await act(async () => {
