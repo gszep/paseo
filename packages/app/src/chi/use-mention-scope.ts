@@ -5,7 +5,6 @@ import { queryClient } from "@/data/query-client";
 import { createMentionScope, reconcileMentionScope, type MentionScope } from "./mention-context";
 import type { ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
 import { clearHostMentionSelection } from "./mention-selection";
-import { useEntryTarget } from "./entry-target";
 import { inboxAuthority } from "./inbox-identity";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 
@@ -38,7 +37,6 @@ function scopeFor(host: string, workspace: string, client: DaemonClient | null) 
     () => {
       queryClient.removeQueries({ queryKey: ["chi-mentions", host, workspace] });
       clearHostMentionSelection(host);
-      useEntryTarget.setState({ target: null });
     },
   );
   scopes.set(key, { client, scope });

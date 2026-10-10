@@ -135,8 +135,10 @@ beforeAll(async () => {
     configurable: true,
   });
 
+  // The real composer capability graph is transformed on this cold import.
+  // Bound setup separately; the draft-contract assertions keep their own limits.
   ({ useAgentInputDraft } = await import("./input-draft"));
-});
+}, 30_000);
 
 describe("useAgentInputDraft live contract", () => {
   beforeEach(() => {

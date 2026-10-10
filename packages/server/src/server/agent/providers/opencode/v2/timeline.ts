@@ -45,16 +45,32 @@ export class V2Timeline {
   }
 
   messages(messages: SessionMessageInfo[]): AgentStreamEvent[] {
-    const events: AgentStreamEvent[] = [];
     const state: TimelineState = { structured: false, accepted: false };
-    for (const message of messages) {
-      const timestamp = new Date(message.time.created).toISOString();
-      const push = (item: AgentTimelineItem) =>
-        events.push({ type: "timeline", provider: "opencode", item, timestamp });
-      if (message.type === "user") this.userMessage(message, state, push);
-      else if (message.type === "assistant") this.assistantMessage(message, state, push);
-      else if (message.type === "compaction") this.compactionMessage(message, push);
-    }
+    return messages.flatMap((message) => this.messageEvents(message, state, "session"));
+  }
+
+  /** A fixed entry cannot infer structured-output suppression from an unloaded
+   * preceding request. Inspect its actual text/tool parts, independent of pages. */
+  static pinnedMessage(message: SessionMessageInfo): AgentStreamEvent[] {
+    return new V2Timeline(false).messageEvents(
+      message,
+      { structured: false, accepted: false },
+      "pinned",
+    );
+  }
+
+  private messageEvents(
+    message: SessionMessageInfo,
+    state: TimelineState,
+    mode: "session" | "pinned",
+  ) {
+    const events: AgentStreamEvent[] = [];
+    const timestamp = new Date(message.time.created).toISOString();
+    const push = (item: AgentTimelineItem) =>
+      events.push({ type: "timeline", provider: "opencode", item, timestamp });
+    if (message.type === "user") this.userMessage(message, state, push);
+    else if (message.type === "assistant") this.assistantMessage(message, state, push, mode);
+    else if (message.type === "compaction") this.compactionMessage(message, push);
     return events;
   }
 
@@ -83,6 +99,7 @@ export class V2Timeline {
     message: Extract<SessionMessageInfo, { type: "assistant" }>,
     state: TimelineState,
     push: (item: AgentTimelineItem) => void,
+    mode: "session" | "pinned",
   ) {
     // Snapshot parts are indexed by position in `message.content`, but deltas
     // number text and reasoning separately. Track a per-type ordinal so both
@@ -90,7 +107,7 @@ export class V2Timeline {
     let textOrdinal = 0;
     let reasoningOrdinal = 0;
     message.content.forEach((part, partIndex) => {
-      if (part.type === "tool" && part.name === STRUCTURED_OUTPUT_TOOL) {
+      if (part.type === "tool" && part.name === STRUCTURED_OUTPUT_TOOL && mode === "session") {
         this.structuredOutputPart(message.id, partIndex, part, state, push);
       } else if (part.type === "text" || part.type === "reasoning") {
         const ordinal = part.type === "text" ? textOrdinal++ : reasoningOrdinal++;

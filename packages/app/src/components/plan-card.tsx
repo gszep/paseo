@@ -193,6 +193,7 @@ function createPlanMarkdownRules() {
 export type PlanOutcome = "pending" | "approved" | "rejected" | "canceled";
 
 interface PlanCardProps {
+  readOnly?: boolean;
   title?: string;
   description?: string;
   text: string;
@@ -205,6 +206,13 @@ interface PlanCardProps {
 const ThemedChevron = withUnistyles(ChevronRight);
 const chevronColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const markdownRules = createPlanMarkdownRules();
+const readOnlyMarkdownRules = {
+  ...markdownRules,
+  image: (node: ASTNode) => (
+    <Text key={node.key}>[{node.attributes?.alt || "Image"}: not loaded]</Text>
+  ),
+  link: (node: ASTNode, children: ReactNode[]) => <Text key={node.key}>{children}</Text>,
+};
 
 export function PlanCard(props: PlanCardProps) {
   // A resolution starts its own presentation state; subsequent taps stay local.
@@ -212,6 +220,7 @@ export function PlanCard(props: PlanCardProps) {
 }
 
 function PlanCardContent({
+  readOnly = false,
   title,
   description,
   text,
@@ -262,7 +271,12 @@ function PlanCardContent({
       {expanded ? (
         <View style={styles.body}>
           {description ? <Text style={styles.description}>{description}</Text> : null}
-          <MarkdownRenderer text={text} rules={markdownRules} markdownit={planMarkdownParser} />
+          <MarkdownRenderer
+            text={text}
+            rules={readOnly ? readOnlyMarkdownRules : markdownRules}
+            markdownit={planMarkdownParser}
+            enableHtmlish={!readOnly}
+          />
         </View>
       ) : null}
       {footer ? <View style={styles.footer}>{footer}</View> : null}

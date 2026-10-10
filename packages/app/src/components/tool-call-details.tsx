@@ -1,4 +1,5 @@
 import React, { useMemo, type ReactNode } from "react";
+import { useProtectedPresentation } from "./protected-presentation";
 import {
   View,
   Text,
@@ -138,13 +139,14 @@ function useDetailStyles(
 }
 
 function useDiffLines(detail: ToolCallDetail | undefined): DiffLine[] | undefined {
+  const protectedPresentation = useProtectedPresentation();
   return useMemo(() => {
     if (!detail || detail.type !== "edit") return undefined;
     const diffLines = detail.unifiedDiff
       ? parseUnifiedDiff(detail.unifiedDiff)
       : buildLineDiff(detail.oldString ?? "", detail.newString ?? "");
-    return highlightDiffLines(diffLines, detail.filePath);
-  }, [detail]);
+    return protectedPresentation ? diffLines : highlightDiffLines(diffLines, detail.filePath);
+  }, [detail, protectedPresentation]);
 }
 
 interface ShellDetailProps {
@@ -443,9 +445,13 @@ function ScrollableTextSection({
   filePath,
   startLine,
 }: ScrollableContentProps) {
+  const protectedPresentation = useProtectedPresentation();
   const keyedLines = useMemo(
-    () => (filePath ? highlightToKeyedLines(content, extensionFromPath(filePath)) : null),
-    [content, filePath],
+    () =>
+      filePath && !protectedPresentation
+        ? highlightToKeyedLines(content, extensionFromPath(filePath))
+        : null,
+    [content, filePath, protectedPresentation],
   );
   const body = (
     <ScrollView

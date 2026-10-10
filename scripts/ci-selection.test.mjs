@@ -233,13 +233,18 @@ test("critical inventory cannot lose the named security contracts", () => {
       "src/server/chi/connection.test.ts",
       "src/server/chi/destinations.test.ts",
       "src/server/chi/mentions.test.ts",
+      "src/server/chi/pinned-timeline.test.ts",
       "src/server/chi/provenance.test.ts",
       "src/server/message-receipts/index.test.ts",
     ],
     app: [
       "src/utils/scanned-pairing-offer.test.ts",
       "src/chi/continuation-state.test.ts",
-      "src/chi/entry-navigation.test.ts",
+      // The retired local jump's denial/unmount guards moved to the pinned
+      // conversation boundary; keep its mapping, late-response and cache tests.
+      "src/chi/pinned-conversation.test.ts",
+      "src/chi/conversation-screen.browser.test.tsx",
+      "src/agent-stream/read-only-view.browser.test.tsx",
       "src/chi/mention-submission.test.ts",
       "src/chi/mention-context.test.ts",
       "src/chi/mention-errors.test.ts",
@@ -259,6 +264,9 @@ test("critical inventory cannot lose the named security contracts", () => {
     for (const file of files) assert.ok(critical[pkg].includes(file), `${pkg}/${file}`);
   assert.ok(
     criticalServerIntegration.includes("src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts"),
+  );
+  assert.ok(
+    criticalServerIntegration.includes("src/server/daemon-e2e/chi-pinned-context.e2e.test.ts"),
   );
   for (const file of [
     "12-permit-ls.test.ts",

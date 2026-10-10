@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Text,
   View,
@@ -12,14 +12,9 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
 import type { Theme } from "@/styles/theme";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useFocusEffect } from "expo-router";
-import type {
-  ChiHandoff,
-  ChiMentionOperation,
-  ChiMentionResult,
-  ChiMentionContext,
-} from "@getpaseo/protocol/chi-mentions";
+import { useQueryClient } from "@tanstack/react-query";
+import { router } from "expo-router";
+import type { ChiHandoff } from "@getpaseo/protocol/chi-mentions";
 import { useFetchQuery } from "@/data/query";
 import { Button } from "@/components/ui/button";
 import { Alert } from "@/components/ui/alert";
@@ -30,8 +25,14 @@ import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
 import { formatTimeAgo } from "@/utils/time";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { mentionError } from "./mention-errors";
-import { useInbox, useInboxTransport, useInboxCatalog } from "./use-inbox";
-import { locateMention, openMentionTarget } from "./entry-navigation";
+import {
+  useInbox,
+  useInboxTransport,
+  useInboxCatalog,
+  useInboxReader,
+  type InboxContext,
+} from "./use-inbox";
+import { useViewedHandoff } from "./use-viewed-handoff";
 import { RepositoryFilter } from "./repository-filter";
 import { inboxDetailQueryOptions } from "./inbox-query";
 import { InboxCoverageNotice } from "./inbox-coverage";
@@ -46,12 +47,6 @@ import {
   type InboxListRow,
 } from "./inbox-model";
 
-interface InboxContext {
-  identity: ChiMentionContext;
-  queryKey: readonly unknown[];
-  execute(operation: ChiMentionOperation): Promise<ChiMentionResult>;
-  isCurrent(): boolean;
-}
 function rowKey(row: InboxListRow) {
   return row.key;
 }
@@ -101,23 +96,10 @@ function ChoiceButton({
 }
 
 export function ChiInboxScreen() {
-  const transport = useInboxTransport();
+  const transport = useInboxReader();
   const { scope, state, host } = transport;
   const retry = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
-  const context = useMemo(
-    () =>
-      state.context
-        ? {
-            identity: state.context,
-            queryKey: transport.queryKey,
-            execute: (operation: ChiMentionOperation) => scope.run(operation, state.context!),
-            isCurrent: () =>
-              scope.getState().generation === state.generation &&
-              scope.getState().context === state.context,
-          }
-        : null,
-    [scope, state, transport.queryKey],
-  );
+  const { context } = transport;
   return (
     <View style={styles.screen}>
       <MenuHeader title="Mentions" />
@@ -164,7 +146,6 @@ function Inbox({
     selectRepository(repo);
     setSelected(null);
   }, []);
-  const [openSession, setOpenSession] = useState(true);
   const [scrolledDown, setScrolledDown] = useState(false);
   useEffect(() => {
     if (compact && selected) setScrolledDown(false);
@@ -203,11 +184,12 @@ function Inbox({
   }, [hasNextPage, isFetching, fetchNextPage]);
   const back = useCallback(() => setSelected(null), []);
   const choose = useCallback((handoff: ChiHandoff) => {
-    setOpenSession(true);
-    setSelected(handoff);
+    router.push({
+      pathname: "/chi",
+      params: { view: "conversation", repo: handoff.repo, handoff: handoff.id, sourceIndex: "0" },
+    });
   }, []);
   const discuss = useCallback((handoff: ChiHandoff) => {
-    setOpenSession(false);
     setSelected(handoff);
   }, []);
   const renderRow = useCallback(
@@ -284,10 +266,9 @@ function Inbox({
                 </Button>
               </View>
               <HandoffDetail
-                key={`${selected.repo}/${selected.id}/${openSession}`}
+                key={`${selected.repo}/${selected.id}`}
                 context={context}
                 selected={selected}
-                openSession={openSession}
               />
             </View>
           ) : null}
@@ -407,15 +388,7 @@ function InboxRow({
   );
 }
 
-function HandoffDetail({
-  context,
-  selected,
-  openSession,
-}: {
-  context: InboxContext;
-  selected: ChiHandoff;
-  openSession: boolean;
-}) {
+function HandoffDetail({ context, selected }: { context: InboxContext; selected: ChiHandoff }) {
   const query = useFetchQuery(
     inboxDetailQueryOptions({
       queryKey: context.queryKey,
@@ -434,36 +407,14 @@ function HandoffDetail({
       </Alert>
     );
   if (!query.data) return null;
-  return <Discussion context={context} handoff={query.data} autoOpen={openSession} />;
+  return <Discussion context={context} handoff={query.data} />;
 }
 
-function Discussion({
-  context,
-  handoff: h,
-  autoOpen,
-}: {
-  context: InboxContext;
-  handoff: ChiHandoff;
-  autoOpen: boolean;
-}) {
-  const cache = useQueryClient();
+function Discussion({ context, handoff: h }: { context: InboxContext; handoff: ChiHandoff }) {
   const [index, setIndex] = useState(0);
-  const viewed = useMutation({
-    retry: false,
-    mutationFn: () =>
-      context.execute({ action: "viewed", repo: h.repo, id: h.id, revision: h.revision }),
-    onSuccess: (result) => {
-      if (result.kind !== "handoff") return;
-      cache.setQueryData([...context.queryKey, "handoff", h.repo, h.id], result.handoff);
-      void cache.invalidateQueries({ queryKey: [...context.queryKey, "inbox", true, h.repo] });
-    },
-  });
-  const { mutate: markViewed, isIdle } = viewed;
-  const retryRead = useCallback(() => markViewed(), [markViewed]);
+  const viewed = useViewedHandoff(context, h);
+  const retryRead = viewed.retry;
   const chooseIndex = useCallback((value: string) => setIndex(Number(value)), []);
-  useEffect(() => {
-    if (!h.readAt && h.recipient === context.identity.actor && isIdle) markViewed();
-  }, [h.readAt, h.recipient, context.identity.actor, isIdle, markViewed]);
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <Text style={styles.hint}>
@@ -497,7 +448,7 @@ function Discussion({
           ))
         : null}
       {h.sources[index]?.kind === "neutral" ? (
-        <ExactSource key={index} context={context} handoff={h} index={index} autoOpen={autoOpen} />
+        <OpenSharedConversationButton key={index} handoff={h} index={index} />
       ) : (
         <Text style={styles.hint}>Exact in-app context is available for native sessions.</Text>
       )}
@@ -521,171 +472,21 @@ function Discussion({
   );
 }
 
-function ExactSource({
-  context,
-  handoff,
-  index,
-  autoOpen,
-}: {
-  context: InboxContext;
-  handoff: ChiHandoff;
-  index: number;
-  autoOpen: boolean;
-}) {
-  const lifetime = useRef({ generation: 0, active: false });
-  useFocusEffect(
-    useCallback(() => {
-      lifetime.current = { generation: lifetime.current.generation + 1, active: true };
-      return () => {
-        lifetime.current = { generation: lifetime.current.generation + 1, active: false };
-      };
-    }, []),
+function OpenSharedConversationButton({ handoff, index }: { handoff: ChiHandoff; index: number }) {
+  const open = useCallback(
+    () =>
+      router.push({
+        pathname: "/chi",
+        params: {
+          view: "conversation",
+          repo: handoff.repo,
+          handoff: handoff.id,
+          sourceIndex: String(index),
+        },
+      }),
+    [handoff.repo, handoff.id, index],
   );
-  const [selectedSeq, setSelectedSeq] = useState<string | undefined>();
-  const [browse, setBrowse] = useState(false);
-  const [navigated, setNavigated] = useState(!autoOpen);
-  const query = useFetchQuery({
-    dataShape: "value",
-    queryKey: [...context.queryKey, "source", handoff.repo, handoff.id, index, selectedSeq],
-    gcTime: 0,
-    staleTimeMs: 0,
-    retry: false,
-    refetchOnWindowFocus: "always",
-    queryFn: async () => {
-      const result = await context.execute({
-        action: "source",
-        repo: handoff.repo,
-        id: handoff.id,
-        index,
-        seq: selectedSeq === undefined ? undefined : Number(selectedSeq),
-      });
-      if (result.kind !== "source") throw new Error("chi-invalid-response");
-      return result;
-    },
-  });
-  const open = useMutation({
-    retry: false,
-    mutationFn: async () => {
-      if (!query.data) return;
-      const started = lifetime.current.generation;
-      const isCurrent = () =>
-        lifetime.current.active && lifetime.current.generation === started && context.isCurrent();
-      if (!isCurrent()) return;
-      const target = await locateMention(handoff, query.data, context.identity);
-      if (target && isCurrent()) {
-        await context.execute({ action: "read", repo: handoff.repo, id: handoff.id });
-        if (isCurrent()) await openMentionTarget(target, isCurrent);
-      }
-      return target;
-    },
-  });
-  const { mutate } = open;
-  useEffect(() => {
-    if (!navigated && query.data && !query.isFetching) {
-      setNavigated(true);
-      mutate();
-    }
-  }, [navigated, query.data, query.isFetching, mutate]);
-  const next = useCallback(() => setBrowse(true), []);
-  const retry = useCallback(() => void query.refetch(), [query]);
-  if (query.isFetching && !query.data)
-    return <Text style={styles.hint}>Reading exact source…</Text>;
-  if (query.isError)
-    return (
-      <Alert variant="error" title="Source unavailable" description={mentionError(query.error)}>
-        <Button onPress={retry}>Retry source</Button>
-      </Alert>
-    );
-  if (!query.data) return null;
-  return (
-    <View style={[styles.row, styles.exact]} testID="mention-exact-source">
-      <Text style={styles.hint}>Exact entry: {query.data.source.entryId}</Text>
-      <Text selectable style={styles.hint}>
-        Snapshot: {query.data.source.kind === "neutral" ? query.data.source.snapshot : ""}
-      </Text>
-      <Text selectable style={styles.text}>
-        {query.data.payload}
-      </Text>
-      {open.isPending ? <Text style={styles.hint}>Opening source session…</Text> : null}
-      {open.isError ? (
-        <Text style={styles.hint}>
-          Could not open the connected session. The exact read-only source is shown above.
-        </Text>
-      ) : null}
-      <Button size="sm" variant="ghost" onPress={next}>
-        Browse pinned context
-      </Button>
-      {browse ? (
-        <PinnedContext
-          context={context}
-          handoff={handoff}
-          index={index}
-          onSelect={setSelectedSeq}
-        />
-      ) : null}
-    </View>
-  );
-}
-
-function PinnedContext({
-  context,
-  handoff,
-  index,
-  onSelect,
-}: {
-  context: InboxContext;
-  handoff: ChiHandoff;
-  index: number;
-  onSelect(id: string): void;
-}) {
-  const [cursor, setCursor] = useState<string | undefined>();
-  const query = useFetchQuery({
-    dataShape: "value",
-    queryKey: [...context.queryKey, "context", handoff.repo, handoff.id, index, cursor],
-    gcTime: 0,
-    staleTimeMs: 0,
-    retry: false,
-    queryFn: async () => {
-      const result = await context.execute({
-        action: "context",
-        repo: handoff.repo,
-        id: handoff.id,
-        index,
-        cursor,
-      });
-      if (result.kind !== "context") throw new Error("chi-invalid-response");
-      return result;
-    },
-  });
-  const nextCursor = query.data?.nextCursor;
-  const next = useCallback(() => {
-    if (nextCursor) setCursor(nextCursor);
-  }, [nextCursor]);
-  if (query.isFetching && !query.data)
-    return <Text style={styles.hint}>Loading pinned context…</Text>;
-  if (query.isError)
-    return (
-      <Alert variant="error" title="Context unavailable" description={mentionError(query.error)} />
-    );
-  return (
-    <View>
-      {query.data?.entries.map((entry) => (
-        <ChoiceButton
-          key={entry.nativeId}
-          variant="ghost"
-          value={String(entry.seq)}
-          onSelect={onSelect}
-        >
-          {entry.type}: {entry.nativeId}
-        </ChoiceButton>
-      ))}
-      {nextCursor ? (
-        <Button variant="ghost" onPress={next}>
-          Next context page
-        </Button>
-      ) : null}
-    </View>
-  );
+  return <Button onPress={open}>Open shared conversation</Button>;
 }
 
 const styles = StyleSheet.create((theme) => ({

@@ -146,8 +146,11 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
 Chi v3 sync and mentions are capability-gated on `chiAppendV3` and the backend's
 appendLog/handoffs v3 capabilities. Mapped consent, durable append receipts and
 confirmed pin/ordinal references replace snapshot writes. Continue/fork publication
-and reply mutations are deferred; no v2 fallback. This candidate stays off production
-until the coordinated cutover. Admission, queued-send recovery and protected inbox state are specified
+and reply mutations are deferred; no v2 fallback. Pinned shared conversations use
+`chiPinnedTimeline` and the normal supplied-history renderer without agent, file,
+plugin, composer or execution integrations. Local native-route reuse remains
+deferred until a verified pin/identity resolver exists; a source label is not proof.
+Admission, queued-send recovery and protected inbox state are specified
 in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
 regressions and isolated two-account rendered acceptance in
 [testing](docs/testing.md#test-organization); the latter is a separate release gate
