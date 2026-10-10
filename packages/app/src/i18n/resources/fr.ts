@@ -1497,6 +1497,7 @@ export const fr: TranslationResources = {
     body: "Réessayez pour recharger l'application. Si cela continue, joignez les détails ci-dessous au signalement.",
     details: "Détails",
   },
+  hostRegistry: en.hostRegistry,
   startup: {
     errorTitle: "Quelque chose s'est mal passé",
     errorDescription:

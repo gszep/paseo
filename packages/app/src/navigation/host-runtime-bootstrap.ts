@@ -90,7 +90,7 @@ export function shouldRunStartupGiveUpTimer(input: {
   return input.startupBlocker.kind === "none";
 }
 
-export type StartupRegistryStatus = "loading" | "ready";
+export type StartupRegistryStatus = "loading" | "ready" | "error";
 
 export interface IndexStartupRouteTarget {
   kind: "index";
@@ -235,7 +235,7 @@ function isHostStartupRouteInput(
 
 export function resolveStartupRoute(input: ResolveStartupRouteInput): StartupRouteDecision {
   if (isHostStartupRouteInput(input)) {
-    if (input.startupBlocker.kind !== "none" || input.hostRegistryStatus === "loading") {
+    if (input.startupBlocker.kind !== "none" || input.hostRegistryStatus !== "ready") {
       return { kind: "render" };
     }
     return resolveReadyHostStartupRoute(input);
@@ -245,7 +245,7 @@ export function resolveStartupRoute(input: ResolveStartupRouteInput): StartupRou
     return { kind: "splash" };
   }
 
-  if (input.hostRegistryStatus === "loading") {
+  if (input.hostRegistryStatus !== "ready") {
     return { kind: "splash" };
   }
 
