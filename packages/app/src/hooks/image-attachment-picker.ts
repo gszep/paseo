@@ -86,6 +86,62 @@ export async function normalizePickedImageAssets(
   );
 }
 
+/**
+ * Opens the browser file picker for images from inside the current user gesture.
+ *
+ * Mobile browsers only open a file chooser for a trusted activation: the input
+ * must be clicked synchronously, not after awaited work and not through a
+ * dispatched (untrusted) MouseEvent. expo-image-picker's web shim does both the
+ * awaiting and the dispatched click, so "Add image" silently does nothing on
+ * those browsers. This owns the input directly, mirroring the file picker path.
+ */
+export function pickImagesWithWebInput(
+  documentRef: Document = document,
+): Promise<PickedImageAttachmentInput[] | null> {
+  return new Promise((resolve, reject) => {
+    const input = documentRef.createElement("input");
+    input.type = "file";
+    input.accept = "image/*";
+    input.multiple = true;
+    input.style.display = "none";
+
+    const cleanup = () => input.remove();
+    const settle = async (files: File[]) => {
+      try {
+        if (files.length === 0) {
+          cleanup();
+          resolve(null);
+          return;
+        }
+        const assets = await normalizePickedImageAssets(
+          files.map((file) => ({
+            uri: file.name,
+            file,
+            mimeType: file.type,
+            fileName: file.name,
+          })),
+        );
+        cleanup();
+        resolve(assets);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    };
+
+    input.addEventListener("change", () => {
+      void settle(Array.from(input.files ?? []));
+    });
+    input.addEventListener("cancel", () => {
+      cleanup();
+      resolve(null);
+    });
+
+    documentRef.body.appendChild(input);
+    input.click();
+  });
+}
+
 function normalizeDesktopDialogSelection(selection: string | string[] | null): string[] {
   if (!selection) {
     return [];

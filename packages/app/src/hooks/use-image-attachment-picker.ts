@@ -6,6 +6,7 @@ import { getDesktopHost, isElectronRuntime } from "@/desktop/host";
 import {
   normalizePickedImageAssets,
   pickImagesWithDesktopDialog,
+  pickImagesWithWebInput,
   type PickedImageAttachmentInput,
 } from "@/hooks/image-attachment-picker";
 import { isWeb } from "@/constants/platform";
@@ -56,6 +57,13 @@ export function useImageAttachmentPicker(): UseImageAttachmentPickerResult {
           return null;
         }
         return selectedImages;
+      }
+
+      if (isWeb) {
+        // Browser file chooser must open synchronously inside the user gesture;
+        // expo-image-picker's web shim awaits then dispatches an untrusted click,
+        // which mobile browsers ignore (the reported "Add image does nothing").
+        return await pickImagesWithWebInput();
       }
 
       const hasPermission = await ensurePermission();
