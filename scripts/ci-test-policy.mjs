@@ -25,6 +25,7 @@ export const critical = {
     "src/server/chi/human-prompts.test.ts",
     "src/server/chi/provenance.test.ts",
     "src/server/message-receipts/index.test.ts",
+    "src/server/message-receipts/native.test.ts",
   ],
   app: [
     "src/utils/scanned-pairing-offer.test.ts",
