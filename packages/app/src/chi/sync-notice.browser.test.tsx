@@ -10,6 +10,8 @@ beforeEach(() => {
 import {
   SyncNoticeView,
   SyncWarningView,
+  WorkspaceSyncNoticeView,
+  WORKSPACE_NOTICE_TITLE,
   useSyncNoticeDismissal,
   syncNoticeReason,
   OMITTED_CONTENT_WARNING,
@@ -17,6 +19,7 @@ import {
 import { isTerminalSyncError } from "./sync-destination";
 
 const errorRef = { current: null as string | null };
+const subjectRef = { current: "" };
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
 function mount(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -36,7 +39,7 @@ function button(container: HTMLElement, label: string) {
 }
 
 function DismissProbe() {
-  const { visible, dismiss } = useSyncNoticeDismissal(errorRef.current);
+  const { visible, dismiss } = useSyncNoticeDismissal(errorRef.current, subjectRef.current);
   return (
     <div>
       <span data-testid="probe" data-visible={String(visible)} />
@@ -52,6 +55,8 @@ afterEach(() => {
     act(() => entry.root.unmount());
     entry.container.remove();
   }
+  errorRef.current = null;
+  subjectRef.current = "";
   vi.clearAllMocks();
 });
 
@@ -190,6 +195,23 @@ describe("SyncNoticeView", () => {
     expect(container.textContent).not.toContain("A secret was detected");
     expect(button(container, "Retry")).toBeUndefined();
   });
+  it("names the affected session for a workspace-level error instead of claiming this session", () => {
+    const { container } = mount(
+      <WorkspaceSyncNoticeView
+        error="capture-local-cut-scan-limit"
+        affected={[{ id: "b", title: "Opening new session" }]}
+        terminal
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    const element = container.querySelector('[data-testid="chi-sync-notice-workspace"]');
+    expect(element).not.toBeNull();
+    expect(element?.textContent).toContain(WORKSPACE_NOTICE_TITLE);
+    expect(element?.textContent).toContain("Opening new session");
+    expect(element?.textContent).not.toContain("For others to see this session");
+    expect(button(container, "Retry")).toBeUndefined();
+  });
   it("renders the non-blocking omitted-content warning with Dismiss only", () => {
     const { container } = mount(
       <SyncWarningView warning="capture-local-secret-omitted-content" onDismiss={vi.fn()} />,
@@ -219,6 +241,22 @@ describe("useSyncNoticeDismissal", () => {
 
     // A later distinct failure shows again.
     errorRef.current = "evidence-http-503";
+    act(() => root.render(<DismissProbe />));
+    expect(probe.dataset.visible).toBe("true");
+  });
+
+  it("does not carry one session's dismissal onto another with the same error", () => {
+    subjectRef.current = "session:a:s1:h1";
+    errorRef.current = "capture-local-cut-scan-limit";
+    const { root, container } = mount(<DismissProbe />);
+    const probe = container.querySelector('[data-testid="probe"]') as HTMLElement;
+    expect(probe.dataset.visible).toBe("true");
+
+    act(() => (container.querySelector('[data-testid="dismiss"]') as HTMLButtonElement).click());
+    expect(probe.dataset.visible).toBe("false");
+
+    // Switch conversations: the same error code must show again for the new subject.
+    subjectRef.current = "session:b:s2:h2";
     act(() => root.render(<DismissProbe />));
     expect(probe.dataset.visible).toBe("true");
   });
