@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { AppendClient, type AppendScope } from "@henkaku-center/chi-native/append-client";
+import {
+  AppendClient,
+  appendRuntimes,
+  type AppendRuntime,
+  type AppendScope,
+} from "@henkaku-center/chi-native/append-client";
 import {
   canonicalJson,
   encodeEntry,
@@ -46,6 +51,7 @@ export interface AppendCaptureInput {
   cwd: string;
   visibility: "private" | "shared";
   native: unknown;
+  runtime: AppendRuntime;
   expected: Pin | null;
   onConfirmed: (pin: Pin) => Promise<void>;
   request: typeof fetch;
@@ -216,7 +222,7 @@ export async function captureAppend(input: AppendCaptureInput): Promise<AppendCa
         digest: digest(canonicalNative(initial.projected)),
       },
       parent: null,
-      runtime: "2.0.15-chi.1",
+      runtime: input.runtime,
       nativeReducer: "opencode-chi1-r1",
     };
     await publishConversationReceipt(creationPath, creation);
@@ -298,7 +304,7 @@ const creationSchema = z
       })
       .strict(),
     parent: z.null(),
-    runtime: z.literal("2.0.15-chi.1"),
+    runtime: z.enum(appendRuntimes),
     nativeReducer: z.literal("opencode-chi1-r1"),
   })
   .strict();

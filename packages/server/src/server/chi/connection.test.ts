@@ -329,17 +329,21 @@ describe.skipIf(process.platform === "win32")("saved mention admission recovery"
     return { ...f, auth, owner, recoveryInput: input, native };
   }
 
-  it("recovers after reconstruction without changing sync lineage or calling a native mutation", async () => {
-    const f = await recoveryFixture();
-    const before = structuredClone(f.agents);
-    await expect(f.restart().recoverMentionSend(f.recoveryInput)).resolves.toBe(true);
-    expect(f.agents).toEqual(before);
-    expect(f.runtime.import).not.toHaveBeenCalled();
-    expect(f.runtime.fork).not.toHaveBeenCalled();
-    expect(f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(
-      true,
-    );
-  });
+  it.each(["2.0.15-chi.1", "2.0.15-chi.2"])(
+    "%s recovers after reconstruction without changing sync lineage or calling a native mutation",
+    async (version) => {
+      const f = await recoveryFixture();
+      vi.mocked(f.runtime.info).mockResolvedValue({ version });
+      const before = structuredClone(f.agents);
+      await expect(f.restart().recoverMentionSend(f.recoveryInput)).resolves.toBe(true);
+      expect(f.agents).toEqual(before);
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.runtime.fork).not.toHaveBeenCalled();
+      expect(f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(
+        true,
+      );
+    },
+  );
 
   it.each([
     { messageId: "missing" },
@@ -419,7 +423,7 @@ describe.skipIf(process.platform === "win32")("saved mention admission recovery"
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).rejects.toThrow(
       "native export unavailable",
     );
-    vi.mocked(f.runtime.info).mockResolvedValueOnce({ version: "unsupported" });
+    vi.mocked(f.runtime.info).mockResolvedValueOnce({ version: "2.0.15-chi.3" });
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
     f.native.messages = [];
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
@@ -580,6 +584,38 @@ describe.skipIf(process.platform === "win32")(
       const agent = await f.registration.register("ses_fork", {});
       return { ...f, agent, connection: f.restart() };
     }
+    it.each(["2.0.15-chi.1", "2.0.15-chi.2"])(
+      "captures %s with its verified runtime provenance",
+      async (version) => {
+        const f = await mapped();
+        vi.mocked(f.runtime.info).mockResolvedValue({ version });
+        await f.connection.capture(f.agent.id);
+        const creations = f.request.mock.calls.flatMap(([, init]) => {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          return body?.creation ? [body.creation] : [];
+        });
+        expect(creations).toHaveLength(1);
+        expect(creations[0]).toMatchObject({ runtime: version, nativeReducer: "opencode-chi1-r1" });
+        expect(f.runtime.import).not.toHaveBeenCalled();
+        expect(f.runtime.fork).not.toHaveBeenCalled();
+      },
+    );
+    it.each(["2.0.15-chi.3", "v2.0.15-chi.2", "2.0.15", "2.0.15-chi.2-other"])(
+      "rejects unverified runtime %s before export, scanning or publication",
+      async (version) => {
+        const f = await mapped();
+        vi.mocked(f.runtime.info).mockResolvedValue({ version });
+        await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
+          "chi-native-runtime-unsupported",
+        );
+        expect(f.runtime.export).not.toHaveBeenCalled();
+        expect(f.scan).not.toHaveBeenCalled();
+        expect(f.backend.entries).toEqual([]);
+        expect(
+          f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET"),
+        ).toBe(true);
+      },
+    );
     it.each(["capture-local-secret-rejected", "capture-head-diverged", "append-http-503"])(
       "keeps the people directory available when another session has %s",
       async (error) => {

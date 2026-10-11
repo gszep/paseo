@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { confirmsNativeSubmission } from "../message-receipts/native.js";
 import { join } from "node:path";
 import { z } from "zod";
+import { appendRuntimes } from "@henkaku-center/chi-native/append-client";
 import {
   nativeSourceExists,
   scanCaptureVerdict,
@@ -515,7 +516,7 @@ export class ChiConnection {
     const sessionId = target.persistence.nativeHandle ?? target.persistence.sessionId;
     if (!sessionId) return false;
     const confirmed = await this.manager.withNativeRuntime(sessionId, async (runtime) => {
-      const info = z.object({ version: z.literal("2.0.15-chi.1") }).safeParse(await runtime.info());
+      const info = z.object({ version: z.enum(appendRuntimes) }).safeParse(await runtime.info());
       if (!info.success) return false;
       return confirmsNativeSubmission({
         native: await runtime.export(sessionId),
@@ -1297,7 +1298,7 @@ export class ChiConnection {
       if (!sessionId) throw new Error("chi-native-agent-required");
       const captured = await this.manager.withNativeRuntime(sessionId, async (runtime) => {
         const runtimeInfo = z
-          .object({ version: z.literal("2.0.15-chi.1") })
+          .object({ version: z.enum(appendRuntimes) })
           .safeParse(await runtime.info());
         if (!runtimeInfo.success) throw new Error("chi-native-runtime-unsupported");
         const native = await runtime.export(sessionId);
@@ -1324,6 +1325,7 @@ export class ChiConnection {
           hostId: this.options.serverId,
           cwd: target.cwd,
           native,
+          runtime: runtimeInfo.data.version,
           expected: pinned.pin ?? null,
           visibility: pinned.audience ?? "private",
           request: authority.request,

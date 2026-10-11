@@ -9,6 +9,30 @@ const capture = "src/server/chi/append-capture.ts";
 const mentions = "src/server/chi/mentions.ts";
 const posixCases = [
   [
+    "capture runtime admission",
+    connection,
+    'if (!runtimeInfo.success) throw new Error("chi-native-runtime-unsupported");',
+    "",
+    "connection",
+    "rejects unverified runtime",
+  ],
+  [
+    "saved-send runtime admission",
+    connection,
+    "if (!info.success) return false;",
+    "",
+    "connection",
+    "does not infer acceptance",
+  ],
+  [
+    "new creation runtime provenance",
+    capture,
+    "runtime: input.runtime,",
+    'runtime: "2.0.15-chi.1",',
+    "append-capture",
+    "new .* source records actual runtime",
+  ],
+  [
     "native workspace binding",
     capture,
     "location.directory !== input.cwd",
