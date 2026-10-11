@@ -1,4 +1,4 @@
-// Copied from gszep/opencode@58a9fcf386b804c6959a523737e9074bcbb49812:
+// Copied from gszep/opencode@b71ab2687f56a361a386fb2f210b2e19043476fd:
 // packages/core/src/session/runtime-guidance.ts (MIT). See docs/providers.md.
 export const runtimeGuidance = `# Engineering workflow
 - Run independent CI jobs, builds and test suites in parallel by default. Inspect dependencies first; explain concrete dependency, shared-state or resource reasons for serial execution.
