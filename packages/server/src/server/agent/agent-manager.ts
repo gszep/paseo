@@ -85,6 +85,7 @@ import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
+import { runtimeGuidance } from "./runtime-guidance.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
 import {
@@ -5435,7 +5436,15 @@ export class AgentManager {
   }
 
   private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {
-    const daemonAppendSystemPrompt = this.appendSystemPrompt.trim();
+    // OpenCode owns this segment in its request assembly, including native children.
+    const provider =
+      this.providerDefinitions.get(config.provider)?.derivedFromProviderId ?? config.provider;
+    const daemonAppendSystemPrompt = [
+      provider === "opencode" ? "" : runtimeGuidance,
+      this.appendSystemPrompt.trim(),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     const next = { ...config };
     delete next.daemonAppendSystemPrompt;
 
