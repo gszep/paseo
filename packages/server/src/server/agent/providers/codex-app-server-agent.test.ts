@@ -94,6 +94,7 @@ import {
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { asInternals as castInternals, createStub } from "../../test-utils/class-mocks.js";
 import { buildProviderRegistry } from "../provider-registry.js";
+import { runtimeGuidance } from "../runtime-guidance.js";
 
 interface CollaborationModeRecord {
   name: string;
@@ -691,6 +692,37 @@ process.stdin.on("data", (chunk) => {
 }
 
 describe("Codex app-server provider", () => {
+  test.each([null, { sessionId: "thread-1" }])(
+    "sends runtime guidance as developer instructions, not user input (resume=%j)",
+    async (handle) => {
+      const appServer = createFakeCodexAppServer();
+      const session = new CodexAppServerAgentSession(
+        createConfig({
+          systemPrompt: "Agent instructions.",
+          daemonAppendSystemPrompt: runtimeGuidance,
+        }),
+        handle,
+        createTestLogger(),
+        async () => appServer.child,
+      );
+      try {
+        await session.startTurn("Check this change.");
+        const method = handle ? "thread/resume" : "thread/start";
+        expect(
+          appServer.requests().find((request) => request.method === method)?.params,
+        ).toMatchObject({
+          developerInstructions: `Agent instructions.\n\n${runtimeGuidance}`,
+        });
+        const turn = await appServer.waitForTurnStart();
+        expect(JSON.stringify(turn.input)).not.toContain(runtimeGuidance);
+        expect(JSON.stringify(turn.input)).toContain("Check this change.");
+        appServer.assertNoErrors();
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
   test("getAvailableModes includes auto-review when the Codex version supports it", async () => {
     const session = createSession({}, { autoReviewEnabled: true });
 

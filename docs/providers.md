@@ -2,6 +2,35 @@
 
 This guide walks through adding a new agent provider end-to-end. There are two integration patterns, and this doc covers both.
 
+## Shared runtime instructions
+
+Generic engineering-workflow guidance ships with the daemon rather than requiring
+each user to maintain an untracked global instruction file. Repository-specific
+rules stay in tracked project instructions; user preferences and private machine
+configuration remain user-owned.
+
+`agent/runtime-guidance.ts` is a source-attributed copy of
+[OpenCode's shared segment](https://github.com/gszep/opencode/blob/b71ab2687f56a361a386fb2f210b2e19043476fd/packages/core/src/session/runtime-guidance.ts).
+There is no shared runtime dependency between the projects. Update the authoritative
+source first, then copy the text and update the attribution and content-digest test
+together; do not fetch instructions at runtime.
+
+Paseo composes this default with explicit daemon instructions at session launch,
+without persisting the default into agent configuration. OpenCode and profiles
+derived from it are excluded because OpenCode supplies the segment itself, including
+to its native children. Deploy the matching OpenCode change before this daemon:
+older or unpatched OpenCode builds do not receive the default from Paseo. The
+paired fork candidate is `2.0.15-chi.2`, not `2.0.15-chi.1`; its
+[build and compatibility gates](https://github.com/gszep/opencode/blob/b71ab2687f56a361a386fb2f210b2e19043476fd/docs/runtime-guidance-build.md)
+must pass before installation.
+
+The existing Claude, Codex, Pi/OMP and plugin-provider prompt adapters consume the
+daemon segment. ACP currently has no system-instruction transport and does not
+receive it; do not simulate one with user-message injection. Provider-native children
+outside OpenCode depend on that provider's instruction inheritance; manager-created
+children receive fresh launch configuration. Updating source or a hosted client
+does not update a running daemon or native runtime.
+
 ## Provider-native session options
 
 `AgentSessionConfig.providerOptions` carries JSON-safe configuration for the selected provider. The

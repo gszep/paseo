@@ -14,6 +14,7 @@ import {
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { runtimeGuidance } from "./runtime-guidance.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
@@ -2429,6 +2430,12 @@ test("listDraftFeatures uses explicit model config without default model fetchin
   ]);
 });
 
+test("runtime guidance matches its pinned OpenCode source", () => {
+  expect(createHash("sha256").update(runtimeGuidance).digest("hex")).toBe(
+    "9345b016c51821d2ac8404f86474a54f2b5977435daeaa6431a0f2edef625678",
+  );
+});
+
 test("createAgent injects daemon append system prompt at runtime only", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storagePath = join(workdir, "agents");
@@ -2456,7 +2463,9 @@ test("createAgent injects daemon append system prompt at runtime only", async ()
   const record = await storage.get(snapshot.id);
 
   expect(client.createdConfigs[0]?.systemPrompt).toBe("Agent instructions.");
-  expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe("Daemon instructions.");
+  expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe(
+    `${runtimeGuidance}\n\nDaemon instructions.`,
+  );
   expect(snapshot.config).not.toHaveProperty("daemonAppendSystemPrompt");
   expect(record?.config?.systemPrompt).toBe("Agent instructions.");
   expect(record?.config).not.toHaveProperty("daemonAppendSystemPrompt");
@@ -2490,7 +2499,94 @@ test("daemon append system prompt is injected into Pi configs", async () => {
     { workspaceId: undefined },
   );
 
+  expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe(
+    `${runtimeGuidance}\n\nDaemon instructions.`,
+  );
+});
+
+test.each([
+  ["codex", null, runtimeGuidance],
+  ["claude", null, runtimeGuidance],
+  ["custom-codex", "codex", runtimeGuidance],
+  ["opencode", null, undefined],
+  ["custom-opencode", "opencode", undefined],
+] as const)(
+  "runtime guidance for %s covers creation, children, resume and model reload",
+  async (provider, base, expected) => {
+    // No repository, mapping, account or daemon prompt is needed.
+    const workdir = mkdtempSync(join(tmpdir(), "agent-runtime-guidance-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    class ProviderClient extends TestAgentClient {
+      override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+        const session = await super.createSession(config);
+        session.describePersistence = () => ({ provider, sessionId: session.id });
+        return session;
+      }
+
+      override async resumeSession(
+        handle: AgentPersistenceHandle,
+        config?: Partial<AgentSessionConfig>,
+      ): Promise<AgentSession> {
+        const session = await super.resumeSession(handle, config);
+        session.describePersistence = () => ({ provider, sessionId: handle.sessionId });
+        return session;
+      }
+    }
+    const client = new ProviderClient(provider);
+    const manager = new AgentManager({
+      clients: { [provider]: client },
+      providerDefinitions: { [provider]: { enabled: true, derivedFromProviderId: base } },
+      registry: storage,
+      logger,
+    });
+    const parent = await manager.createAgent(
+      { provider, cwd: workdir, systemPrompt: "Custom agent instructions." },
+      undefined,
+      { workspaceId: undefined },
+    );
+    const child = await manager.createAgent({ provider, cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { [PARENT_AGENT_ID_LABEL]: parent.id },
+    });
+    expect(client.createdConfigs.map((config) => config.daemonAppendSystemPrompt)).toEqual([
+      expected,
+      expected,
+    ]);
+    expect(client.createdConfigs[0]?.systemPrompt).toBe("Custom agent instructions.");
+    const resumed = await manager.resumeAgentFromPersistence(
+      { provider, sessionId: "native-existing", metadata: { cwd: workdir } },
+      { cwd: workdir },
+    );
+    await manager.reloadAgentSession(parent.id, { model: "gpt-5.4-mini" });
+    expect(client.resumeOverrides.map((config) => config?.daemonAppendSystemPrompt)).toEqual([
+      expected,
+      expected,
+    ]);
+    expect(client.resumeOverrides[1]?.model).toBe("gpt-5.4-mini");
+    for (const id of [parent.id, child.id, resumed.id]) {
+      expect(manager.getAgent(id)?.config).not.toHaveProperty("daemonAppendSystemPrompt");
+      expect((await storage.get(id))?.config).not.toHaveProperty("daemonAppendSystemPrompt");
+    }
+    await manager.flush();
+    rmSync(workdir, { recursive: true, force: true });
+  },
+);
+
+test("OpenCode retains explicit daemon instructions without duplicating runtime guidance", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-runtime-guidance-"));
+  const client = new TestAgentClient("opencode");
+  const manager = new AgentManager({
+    clients: { opencode: client },
+    registry: new AgentStorage(join(workdir, "agents"), logger),
+    logger,
+    appendSystemPrompt: " Daemon instructions. ",
+  });
+  await manager.createAgent({ provider: "opencode", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
   expect(client.createdConfigs[0]?.daemonAppendSystemPrompt).toBe("Daemon instructions.");
+  await manager.flush();
+  rmSync(workdir, { recursive: true, force: true });
 });
 
 test("setAgentMode persists the selected mode across session reload", async () => {
@@ -3063,6 +3159,7 @@ test("createAgent passes daemon launch env through the provider launch context",
     provider: "codex",
     cwd: workdir,
     model: "gpt-5.4",
+    daemonAppendSystemPrompt: runtimeGuidance,
   });
   expect(client.lastLaunchContext).toEqual({
     agentId: snapshot.id,
