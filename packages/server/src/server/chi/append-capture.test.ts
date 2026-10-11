@@ -92,6 +92,7 @@ async function fixture() {
     instanceId: "host:opencode",
     hostId: "host",
     sessionId: info.id,
+    runtime: "2.0.15-chi.1",
     cwd: "/fixture",
     visibility: "shared",
     native: { info, messages: [message(0)] },
@@ -114,6 +115,58 @@ async function fixture() {
     },
   };
 }
+
+test.each(["2.0.15-chi.1", "2.0.15-chi.2"] as const)(
+  "new %s source records actual runtime without changing the reducer",
+  async (runtime) => {
+    const f = await fixture();
+    await captureAppend({ ...f.input, runtime });
+    expect(f.calls[0]).toMatchObject({ creation: { runtime, nativeReducer: "opencode-chi1-r1" } });
+  },
+);
+
+test("chi.2 resumes a chi.1 source without relabelling any immutable receipt or creation", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const root = join(f.input.home, "chi", "append");
+  const files = (await readdir(root, { recursive: true, withFileTypes: true })).filter((entry) =>
+    entry.isFile(),
+  );
+  const before = await Promise.all(
+    files.map(async (entry) => {
+      const path = join(entry.parentPath, entry.name);
+      return { path, bytes: await readFile(path, "utf8") };
+    }),
+  );
+  const next = await captureAppend({
+    ...f.input,
+    runtime: "2.0.15-chi.2",
+    expected: first.pin,
+    native: { info, messages: [message(0), message(1)] },
+  });
+  expect(next.pin.count).toBe(2);
+  expect(next.pin.sourceId).toBe(first.pin.sourceId);
+  expect(f.calls[0]).toMatchObject({ creation: { runtime: "2.0.15-chi.1" } });
+  expect(f.calls[1]).not.toHaveProperty("creation");
+  for (const file of before) expect(await readFile(file.path, "utf8")).toBe(file.bytes);
+});
+
+test("an unknown saved creation runtime is refused without repair or publication", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const root = join(f.input.home, "chi", "append");
+  const [binding] = await readdir(root);
+  const path = join(root, binding!, "creation.json");
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  const bytes = JSON.stringify({ ...saved, runtime: "2.0.15-chi.3" });
+  await writeFile(path, bytes);
+  const calls = f.calls.length;
+  await expect(
+    captureAppend({ ...f.input, runtime: "2.0.15-chi.2", expected: first.pin }),
+  ).rejects.toThrow();
+  expect(f.calls).toHaveLength(calls);
+  expect(await readFile(path, "utf8")).toBe(bytes);
+});
 
 test("append capture projects and cut-scans only new messages, preserving confirmed coordinates through metadata", async () => {
   const f = await fixture();
