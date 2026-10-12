@@ -73,6 +73,7 @@ export function isTerminalSyncError(code: string | null | undefined): boolean {
     code === "capture-local-secret-rejected" ||
     code === "capture-local-cut-scan-limit" ||
     code === "capture-local-secret-scan-limit" ||
+    code === "native-capture-bounds" ||
     code === "append-recovery-required" ||
     code === "append-local-conflict" ||
     code === "append-local-state-invalid" ||
