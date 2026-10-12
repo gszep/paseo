@@ -36,6 +36,8 @@ describe("brand config", () => {
     expect(PASEO_BRAND.titleMark).toBeNull();
     expect(PASEO_BRAND.workingIndicator).toBeNull();
     expect(PASEO_BRAND.attribution).toBeNull();
+    expect(PASEO_BRAND.agentSetup).toBeNull();
+    expect(PASEO_BRAND.connect).toBeNull();
   });
 
   test("parses a full brand and fills optional fields", () => {
@@ -64,6 +66,21 @@ describe("brand config", () => {
   test("resolves an injected brand", () => {
     (globalThis as { __PASEO_BRAND__?: unknown }).__PASEO_BRAND__ = EXAMPLE_BRAND;
     expect(resolveBrandConfig().name).toBe("Example");
+  });
+
+  test("accepts an explicit HTTPS agent setup guide without changing default pairing", () => {
+    const agentSetup = { label: "Agent setup guide", url: "https://example.com/AGENTS.md" };
+    expect(parseBrandConfig({ ...EXAMPLE_BRAND, agentSetup }).agentSetup).toEqual(agentSetup);
+    expect(parseBrandConfig(EXAMPLE_BRAND).agentSetup).toBeNull();
+    const connect = { label: "Connect with GitHub", url: "https://example.com/connect/" };
+    expect(parseBrandConfig({ ...EXAMPLE_BRAND, connect }).connect).toEqual(connect);
+    expect(parseBrandConfig(EXAMPLE_BRAND).connect).toBeNull();
+    expect(() =>
+      parseBrandConfig({
+        ...EXAMPLE_BRAND,
+        agentSetup: { ...agentSetup, url: "javascript:alert(1)" },
+      }),
+    ).toThrow();
   });
 
   test.each([

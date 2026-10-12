@@ -26,6 +26,8 @@ import { openExternalUrl } from "@/utils/open-external-url";
 import { usePairingCameraAvailable } from "@/hooks/use-pairing-camera-available";
 import { isWeb, isNative } from "@/constants/platform";
 import { isElectronRuntime } from "@/desktop/host";
+import { CollaboratorOnboarding } from "./collaborator-onboarding";
+import { BRAND } from "@/branding/brand";
 
 interface WelcomeAction {
   key: "scan-qr" | "direct-connection" | "remote-ssh" | "paste-pairing-link";
@@ -298,7 +300,9 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           <PaseoLogo size={96} />
           <View style={styles.copyBlock}>
             <Text style={styles.title}>{t("onboarding.title")}</Text>
-            <Text style={styles.subtitle}>{t("onboarding.subtitle")}</Text>
+            <Text style={styles.subtitle}>
+              {BRAND.agentSetup ? "Choose how you want to connect" : t("onboarding.subtitle")}
+            </Text>
             {isNative ? (
               <Pressable style={styles.setupLink} onPress={handleOpenPaseoSite}>
                 <Text style={styles.setupLinkText}>paseo.sh</Text>
@@ -307,6 +311,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
             ) : null}
           </View>
 
+          <CollaboratorOnboarding />
           <View style={styles.actions}>
             {visibleActions.map((action) => (
               <WelcomeActionButton key={action.key} action={action} />

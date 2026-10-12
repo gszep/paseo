@@ -51,7 +51,12 @@ brand — native, Electron and daemon-served builds never set it.
 screens, the working-indicator frames and interval, the window-title mark, the
 icon set (manifest any/maskable, apple-touch, favicon and its status variants),
 and an optional home-screen attribution link that replaces the default community
-links. The app reads the injected value in `packages/app/src/branding`. The mark
+links. An optional `agentSetup` HTTPS link (`label`, `url`) appears on the welcome
+screen before pairing; it links to the deployment's public setup guide without
+changing the root router or requiring a host connection. With `connect` (`label`,
+`url`), the welcome screen also links to participant sign-in, separate from optional
+agent setup and host pairing. These links do not change saved hosts or route restoration.
+The app reads the injected value in `packages/app/src/branding`. The mark
 is authored as SVG paths, so no font is referenced at runtime.
 
 The working indicator is the turn-footer loader (`BrandWorkingIndicator`); a
@@ -65,6 +70,10 @@ mark and animates through the frames while an agent runs.
 The service worker caches only the static app shell and named assets. Navigation
 is network-first, with its version-matched shell as an offline fallback. API,
 cross-origin, non-GET and query-bearing requests pass through without caching.
+The separately hosted `/AGENTS.md`, `/agent-guide.json`, `/docs/` and `/connect/`
+resources also pass through, including navigation: failures must not turn into
+the execution app's cached HTML. A hosting deployment owns these resources;
+reserving them here does not implement authentication.
 Host traffic continues directly through the existing encrypted relay.
 
 Updates are silent. The page revalidates `/sw.js` on launch, on focus/visibility
