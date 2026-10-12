@@ -31,6 +31,7 @@ const syncState = vi.hoisted(() => {
     warning: null as string | null,
     mentionsAvailable: false,
     loading: true,
+    available: false,
     retry: () => {},
   };
   return { byHost: {} as Record<string, typeof base>, base };
@@ -432,7 +433,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
       ],
       "secret",
     );
-    syncState.byHost[SERVER_A] = { ...syncState.base, loading: true };
+    syncState.byHost[SERVER_A] = { ...syncState.base, available: false };
     const { root, container } = renderNotice(SERVER_A);
     // No current destination verdict: cached labels must not assert a failure.
     expect(container.querySelector('[data-testid^="chi-sync-notice"]')).toBeNull();
@@ -440,7 +441,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
     // The sibling's aggregate error must not be shown as the focused session's.
     syncState.byHost[SERVER_A] = {
       ...syncState.base,
-      loading: false,
+      available: true,
       error: "capture-local-cut-scan-limit",
     };
     act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_A} workspaceId={WORKSPACE_ID} />));
@@ -460,7 +461,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
       ],
       "parent",
     );
-    syncState.byHost[SERVER_A] = { ...syncState.base, loading: false, error: null };
+    syncState.byHost[SERVER_A] = { ...syncState.base, available: true, error: null };
     const { root, container } = renderNotice(SERVER_A);
     expect(container.querySelector('[data-testid^="chi-sync-notice"]')).toBeNull();
 
@@ -479,7 +480,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
     });
     syncState.byHost[SERVER_A] = {
       ...syncState.base,
-      loading: false,
+      available: true,
       error: "capture-local-secret-rejected",
     };
     act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_A} workspaceId={WORKSPACE_ID} />));
@@ -499,7 +500,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
     );
     syncState.byHost[SERVER_A] = {
       ...syncState.base,
-      loading: false,
+      available: true,
       error: "capture-local-secret-rejected",
     };
     const { root, container } = renderNotice(SERVER_A);
@@ -526,7 +527,7 @@ describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
     });
     syncState.byHost[SERVER_B] = {
       ...syncState.base,
-      loading: false,
+      available: true,
       error: "capture-local-cut-scan-limit",
     };
     act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_B} workspaceId={WORKSPACE_ID} />));

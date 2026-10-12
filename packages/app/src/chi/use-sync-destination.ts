@@ -76,6 +76,9 @@ export function useSyncDestination(
     // Not resolved (disconnected, unsupported, or first load) renders nothing;
     // only a successful status is a local verdict.
     loading: !query.isSuccess,
+    // TanStack retains a prior success while the query is disabled, so readiness
+    // must also require the live enabled context (connected, supported, client).
+    available: enabled && query.isSuccess,
     retry,
   });
 }

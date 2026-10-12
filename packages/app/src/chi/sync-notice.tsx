@@ -57,10 +57,10 @@ export function WorkspaceSyncNotice({
         focusedAgentId,
         workspaceError: state.error,
         workspaceWarning: state.warning,
-        // Association labels are last-known; only a resolved destination status
-        // is a verdict for this host/workspace. Until then show nothing rather
-        // than presenting cached labels as a current failure.
-        hasCurrentVerdict: !state.loading,
+        // Association labels are last-known; only a current, enabled status
+        // verdict for this host/workspace is readiness. TanStack keeps a prior
+        // success while disconnected/unsupported, so `available` is the gate.
+        hasCurrentVerdict: state.available,
       }),
     [
       serverId,
@@ -69,7 +69,7 @@ export function WorkspaceSyncNotice({
       focusedAgentId,
       state.error,
       state.warning,
-      state.loading,
+      state.available,
     ],
   );
 
