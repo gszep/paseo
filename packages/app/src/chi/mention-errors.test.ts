@@ -45,6 +45,35 @@ test("a transient failure still suggests a retry, not the secret copy", () => {
   expect(isTerminalSyncError("evidence-http-503")).toBe(false);
 });
 
+test("a drained or unready repository explains setup/maintenance instead of a host reconnect", () => {
+  for (const code of [
+    "append-http-503-source-writers-drained",
+    "chi-mentions-http-503-source-writers-drained",
+  ]) {
+    const message = mentionError(new Error(code));
+    expect(message).toContain("setup or maintenance");
+    expect(message).toContain("repository admin or operator");
+    expect(message).not.toContain("Reconnect this host and retry");
+    // Retryable: the bounded auto-retry resumes once the backend state changes.
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
+test("an unknown 503 stays a generic temporary outage, never a reconnect or reset", () => {
+  for (const code of [
+    "append-http-503",
+    "append-http-503-log-commit-unknown",
+    "chi-mentions-http-503",
+    "chi-mentions-http-503-capacity-contention",
+  ]) {
+    const message = mentionError(new Error(code));
+    expect(message).toContain("temporarily unavailable");
+    expect(message).not.toContain("Reconnect this host and retry");
+    expect(message).not.toContain("reset");
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
 test("a cut-scan limit explains capacity without claiming a secret was found", () => {
   const code = "capture-local-cut-scan-limit";
   expect(mentionError(new Error(code))).toBe(

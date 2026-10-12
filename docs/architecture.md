@@ -43,11 +43,11 @@ source admission does not enable held Continue/fork publication or change scanni
 
 Chi sync and human mentions use the append-only v3 client.
 The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
-Chi `5917a05ace93ba7cfa17fb41ed6e27235e99b413`; its integrity is pinned in the lockfile.
-Archive SHA-256: `125175729ba25ae087eca3dbb9853aefbb7bdafb8cbac85357d02700901fea63`.
-This combined source includes the #141 over-cap reasoning-preservation minimiser
-fix and the #164 append-witness classification fix in one helper; the #164 fix
-commit is an ancestor of the merge rather than a second release.
+Chi `360e269b3790a598dd206265224c0bbeba4804f7`; its integrity is pinned in the lockfile.
+Archive SHA-256: `d4e9ac4801bbce0ec07f08512afab27d54633aa8723748693c437d2502111d9c`.
+This head carries the #141 over-cap reasoning-preservation minimiser fix, the
+#164 append-witness classification fix (an ancestor of the merge, not a second
+release) and the #172 bounded fixed HTTP 503 category propagation.
 This identifies the prepared source artifact, not a deployed backend or installed host.
 Repack after shared-helper changes. The server package bundles this dependency so
 installed CLI/Docker builds do not depend on a checkout-relative vendor path.

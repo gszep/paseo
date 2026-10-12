@@ -125,6 +125,24 @@ describe("SyncNoticeView", () => {
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
   });
 
+  it("explains a repository that is not accepting v3 writes without advising reconnect", () => {
+    const error = "append-http-503-source-writers-drained";
+    const { container } = mount(
+      <SyncNoticeView
+        error={error}
+        terminal={isTerminalSyncError(error)}
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain("setup or maintenance");
+    expect(container.textContent).toContain("repository admin or operator");
+    expect(container.textContent).not.toContain("Reconnect this host and retry");
+    // Bounded auto-retry stays possible once the backend state changes.
+    expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).not.toContain(error);
+  });
+
   it("routes dismiss and retry through their callbacks", () => {
     const onDismiss = vi.fn();
     const onRetry = vi.fn();

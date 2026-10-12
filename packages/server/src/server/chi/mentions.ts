@@ -10,6 +10,7 @@ import {
 } from "./pinned-timeline.js";
 import type { SendAgentMessageRequest } from "@getpaseo/protocol/messages";
 import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/http";
+import { isAppendHttp503Reason } from "@henkaku-center/chi-native/append-client";
 import {
   canonicalJson,
   decodeEntry,
@@ -266,8 +267,19 @@ export class ChiMentions {
           .catch(() => null);
         if (error?.reason === "invalid-cursor") throw new Error("chi-inbox-invalid-cursor");
       }
-      await response.body?.cancel();
-      throw new Error(`chi-mentions-http-${response.status}`);
+      let reason: string | null = null;
+      if (response.status === 503) {
+        // Only a bounded fixed category crosses the boundary; a malformed,
+        // oversized or unknown body keeps the status-only code. The raw body is
+        // never surfaced and non-503 statuses stay status-only.
+        const error = await boundedText(response, 1024)
+          .then((text) => JSON.parse(text))
+          .catch(() => null);
+        if (error?.ok === false && isAppendHttp503Reason(error.reason)) reason = error.reason;
+      } else {
+        await response.body?.cancel();
+      }
+      throw new Error(`chi-mentions-http-${response.status}${reason ? `-${reason}` : ""}`);
     }
     try {
       return parseJson(await boundedText(response, 1024 * 1024));

@@ -7,6 +7,22 @@ import {
 
 export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
+  // A repository that is drained or not yet provisioned rejects v3 writes with
+  // the same fixed 503 category. This is a destination-side state, never a host
+  // reconnect or a user credential problem, and repeated retries cannot succeed
+  // until the backend state changes. Keep the copy neutral: the public reason
+  // conflates missing setup with an intentional maintenance drain.
+  if (
+    code === "append-http-503-source-writers-drained" ||
+    code === "chi-mentions-http-503-source-writers-drained"
+  )
+    return "This repository is temporarily unavailable for Chi sync or mentions. It may be in setup or maintenance; check with the repository admin or operator. Reconnecting this host will not help.";
+  // Any other current or future fixed 503 category stays generic: never a
+  // reconnect, reset or an exposed backend body.
+  if (code === "append-http-503" || code.startsWith("append-http-503-"))
+    return "Chi is temporarily unavailable and did not accept this capture. Sync will retry automatically; reconnecting this host will not help.";
+  if (code === "chi-mentions-http-503" || code.startsWith("chi-mentions-http-503-"))
+    return "Chi is temporarily unavailable. Retry the same delivery; reconnecting this host will not help.";
   const copy: Record<string, string> = {
     "capture-head-diverged": CAPTURE_HEAD_DIVERGED_MESSAGE,
     "capture-recovery-invalid": CAPTURE_RECOVERY_INVALID_MESSAGE,
@@ -79,7 +95,6 @@ export function mentionError(error: unknown): string {
       "This discussion or its source is no longer available to your identity.",
     "chi-mentions-http-409": "The discussion changed. Refresh before starting a new reply.",
     "chi-mentions-http-422": "Chi rejected the content. Nothing new was delivered.",
-    "chi-mentions-http-503": "Chi is temporarily unavailable. Retry the same delivery.",
     "chi-mentions-unavailable": "Unable to confirm delivery. Retry the same operation.",
   };
   return copy[code] ?? "Chi could not complete this operation. Reconnect this host and retry.";

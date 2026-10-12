@@ -1819,6 +1819,11 @@ export function safeChiError(error: unknown): string {
   if (error instanceof Error && error.message === "native-projection-invalid")
     return "capture-native-projection-invalid";
   if (error instanceof AppendHttpError && error.status === 409) return "append-recovery-required";
+  // A bounded fixed 503 category keeps its machine-readable reason. This lets the
+  // notice distinguish a repository that is not yet accepting v3 writes from a
+  // generic transport failure, without ever reflecting the protected body.
+  if (error instanceof AppendHttpError && error.status === 503 && error.reason)
+    return `append-http-503-${error.reason}`;
   // A reasoning-bearing capture that cannot fit the shared record cap rejects in
   // the existing bounds category. Keep it fixed so the local notice presents an
   // explicit capacity stop instead of a generic retry or a secret finding.

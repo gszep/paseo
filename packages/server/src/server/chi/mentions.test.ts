@@ -245,6 +245,27 @@ test("inbox invalid cursor has a fixed recovery code and never exposes backend d
   ).rejects.toThrow(/^chi-mentions-http-400$/);
 });
 
+test("a 503 inbox read keeps only a bounded fixed reason and never the raw body", async () => {
+  const f = await fixture();
+  f.authority.request = async () =>
+    Response.json(
+      { ok: false, reason: "source-writers-drained", diagnostics: "private" },
+      { status: 503 },
+    );
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503-source-writers-drained$/);
+  f.authority.request = async () =>
+    Response.json({ ok: false, reason: "a-future-private-diagnostic" }, { status: 503 });
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503$/);
+  f.authority.request = async () => new Response("not json", { status: 503 });
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503$/);
+});
+
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {
   const f = await fixture();
   const sender = f.restart();

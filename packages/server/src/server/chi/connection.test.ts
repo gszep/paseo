@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { appendHead, initialHead } from "@henkaku-center/chi-native/append-codec";
+import { AppendHttpError } from "@henkaku-center/chi-native/append-client";
 import { z } from "zod";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, safeChiError, type ChiAuthority } from "./connection.js";
@@ -1160,6 +1161,11 @@ describe.skipIf(process.platform === "win32")(
         "capture-local-scan-timeout",
       );
       expect(safeChiError(new Error("private payload diagnostic"))).toBe("chi-operation-failed");
+      // A bounded fixed 503 category is preserved; an unknown one stays status-only.
+      expect(safeChiError(new AppendHttpError(503, "source-writers-drained"))).toBe(
+        "append-http-503-source-writers-drained",
+      );
+      expect(safeChiError(new AppendHttpError(503, null))).toBe("append-http-503");
     });
   },
 );
