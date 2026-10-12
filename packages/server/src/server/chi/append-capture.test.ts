@@ -236,6 +236,33 @@ test("native divergence and cut-scan rejection stop before another upload", asyn
   expect(f.calls).toHaveLength(calls);
 });
 
+test("the packed helper rejects an over-cap reasoning record before a new batch receipt or upload", async () => {
+  // Exercises the installed @henkaku-center/chi-native minimiser directly, not
+  // an injected scan error. A first small capture saves the creation and a
+  // confirmed checkpoint, so any later request would be a genuinely new
+  // operation; the prior confirmed replay is unchanged, so this does not claim
+  // the whole call makes zero HTTP requests.
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const calls = f.calls.length;
+  const overCap = {
+    id: "msg_overcap",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "p", id: "m" },
+    time: { created: 2 },
+    content: [{ type: "reasoning", text: "z".repeat(70_000), state: { signature: "sig" } }],
+  };
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), overCap] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
+});
+
 test.each([
   "0ec357693c23c7a3ed01f9d5a2c2ab9d904da694d374cd2c07b776b9082c0cb3",
   "f2fe8357db1f6d7e89769feab7df62159c949d9452b976456741d4382ec8ecb7",
