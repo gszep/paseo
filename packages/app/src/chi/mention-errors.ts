@@ -18,9 +18,11 @@ export function mentionError(error: unknown): string {
   )
     return "This repository is temporarily unavailable for Chi sync or mentions. It may be in setup or maintenance; check with the repository admin or operator. Reconnecting this host will not help.";
   // Any other current or future fixed 503 category stays generic: never a
-  // reconnect, reset or an exposed backend body.
+  // reconnect, reset or an exposed backend body. An unconfirmed 503 (e.g.
+  // log-commit-unknown) may already have committed, so the copy must not claim
+  // the batch was rejected; the saved request is replayed immutably on retry.
   if (code === "append-http-503" || code.startsWith("append-http-503-"))
-    return "Chi is temporarily unavailable and did not accept this capture. Sync will retry automatically; reconnecting this host will not help.";
+    return "Chi could not confirm this capture and is temporarily unavailable. The saved request is retained, so retrying replays the exact same batch rather than duplicating it. Reconnecting this host will not help.";
   if (code === "chi-mentions-http-503" || code.startsWith("chi-mentions-http-503-"))
     return "Chi is temporarily unavailable. Retry the same delivery; reconnecting this host will not help.";
   const copy: Record<string, string> = {

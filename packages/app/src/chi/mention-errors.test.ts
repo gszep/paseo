@@ -74,6 +74,17 @@ test("an unknown 503 stays a generic temporary outage, never a reconnect or rese
   }
 });
 
+test("an unconfirmed commit never claims the capture was rejected", () => {
+  for (const code of ["append-http-503", "append-http-503-log-commit-unknown"]) {
+    const message = mentionError(new Error(code));
+    expect(message).toMatch(/could not confirm/);
+    expect(message).not.toMatch(/did not accept|was rejected|not accepted/);
+    // Immutable replay keeps it retryable and duplicate-safe.
+    expect(message).toContain("replays the exact same batch");
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
 test("a cut-scan limit explains capacity without claiming a secret was found", () => {
   const code = "capture-local-cut-scan-limit";
   expect(mentionError(new Error(code))).toBe(

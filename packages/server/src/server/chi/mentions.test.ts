@@ -264,6 +264,23 @@ test("a 503 inbox read keeps only a bounded fixed reason and never the raw body"
   await expect(
     f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
   ).rejects.toThrow(/^chi-mentions-http-503$/);
+  // Duplicate reason keys and escaped aliases must not smuggle a category past
+  // the strict parser; both fall back to the status-only code.
+  f.authority.request = async () =>
+    new Response('{"ok":false,"reason":"private diagnostic","reason":"source-writers-drained"}', {
+      status: 503,
+    });
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503$/);
+  f.authority.request = async () =>
+    new Response(
+      '{"ok":false,"reason":"private diagnostic","re\\u0061son":"source-writers-drained"}',
+      { status: 503 },
+    );
+  await expect(
+    f.restart().execute(f.input.identity, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503$/);
 });
 
 test("durable delivery pins the persisted native user entry and replays the same handoff after a lost reply and restart", async () => {

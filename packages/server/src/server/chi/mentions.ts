@@ -269,12 +269,17 @@ export class ChiMentions {
       }
       let reason: string | null = null;
       if (response.status === 503) {
-        // Only a bounded fixed category crosses the boundary; a malformed,
-        // oversized or unknown body keeps the status-only code. The raw body is
-        // never surfaced and non-503 statuses stay status-only.
-        const error = await boundedText(response, 1024)
-          .then((text) => JSON.parse(text))
+        // The strict parser rejects duplicate keys, escaped aliases and fatal
+        // UTF-8 before any field is read, so those bodies keep the status-only
+        // code. A malformed, oversized or unknown body is likewise status-only,
+        // and the raw body is never surfaced.
+        const parsed = await boundedText(response, 1024)
+          .then((text) => parseJson(text))
           .catch(() => null);
+        const error =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
         if (error?.ok === false && isAppendHttp503Reason(error.reason)) reason = error.reason;
       } else {
         await response.body?.cancel();
