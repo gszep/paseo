@@ -862,6 +862,18 @@ describe.skipIf(process.platform === "win32")(
       expect(f.backend.entries).toEqual([]);
       expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
     });
+    it("an over-cap reasoning record stops sync with an explicit capacity code, not a retry or secret finding", async () => {
+      const f = await mapped();
+      // The minimiser rejects a reasoning-bearing record that cannot fit the
+      // shared cap in the existing bounds category; the local classifier must
+      // surface it as terminal before any receipt or append.
+      f.scan.mockRejectedValue(new Error("native-capture-bounds"));
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("native-capture-bounds");
+      expect(f.backend.entries).toEqual([]);
+      const association = JSON.parse(f.agents[0]!.labels["chi.native"]!);
+      expect(association.error).toBe("native-capture-bounds");
+      expect(association.capturePending).toBe(false);
+    });
     it("unsupported native numeric values stop sync rather than entering divergence recovery or retry", async () => {
       const f = await mapped();
       f.transfer.info.cost = Infinity;

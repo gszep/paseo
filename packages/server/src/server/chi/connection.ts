@@ -140,14 +140,16 @@ function sameCaptureScope(current: Association, expected: Association): boolean 
     current.audience === expected.audience
   );
 }
-/** Secret rejections, cut-scan limits and divergence require human recovery.
- * A missing local scanner is retryable (install it and the next turn/reconnect retries). */
+/** Secret rejections, cut-scan limits, an over-cap reasoning record and divergence
+ * require human recovery. A missing local scanner is retryable (install it and the
+ * next turn/reconnect retries). */
 const TERMINAL_SYNC_ERRORS = new Set<string>([
   "capture-head-diverged",
   "capture-recovery-invalid",
   "capture-local-secret-rejected",
   "capture-local-cut-scan-limit",
   "capture-local-secret-scan-limit",
+  "native-capture-bounds",
   "evidence-http-422-server-secret-scan-rejected",
   "append-recovery-required",
   "append-local-conflict",
@@ -1817,6 +1819,10 @@ export function safeChiError(error: unknown): string {
   if (error instanceof Error && error.message === "native-projection-invalid")
     return "capture-native-projection-invalid";
   if (error instanceof AppendHttpError && error.status === 409) return "append-recovery-required";
+  // A reasoning-bearing capture that cannot fit the shared record cap rejects in
+  // the existing bounds category. Keep it fixed so the local notice presents an
+  // explicit capacity stop instead of a generic retry or a secret finding.
+  if (error instanceof Error && error.message === "native-capture-bounds") return error.message;
   if (error instanceof Error && /^(?:chi|evidence|capture|append)-[a-z0-9-]+$/.test(error.message))
     return error.message;
   return "chi-operation-failed";

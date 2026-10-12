@@ -190,6 +190,21 @@ describe("SyncNoticeView", () => {
     expect(container.textContent).not.toContain("A secret was detected");
     expect(button(container, "Retry")).toBeUndefined();
   });
+  it("explains a terminal over-cap reasoning record without claiming a secret finding", () => {
+    const { container } = mount(
+      <SyncNoticeView
+        error="native-capture-bounds"
+        terminal
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain(
+      "This session has a record too large to keep its reasoning within the shared evidence limit.",
+    );
+    expect(container.textContent).not.toContain("A secret was detected");
+    expect(button(container, "Retry")).toBeUndefined();
+  });
   it("renders the non-blocking omitted-content warning with Dismiss only", () => {
     const { container } = mount(
       <SyncWarningView warning="capture-local-secret-omitted-content" onDismiss={vi.fn()} />,

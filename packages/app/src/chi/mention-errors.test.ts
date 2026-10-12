@@ -52,6 +52,14 @@ test("a cut-scan limit explains capacity without claiming a secret was found", (
   );
   expect(isTerminalSyncError(code)).toBe(true);
 });
+test("an over-cap reasoning record explains the capacity stop without claiming a secret was found", () => {
+  const code = "native-capture-bounds";
+  expect(mentionError(new Error(code))).toBe(
+    "This session has a record too large to keep its reasoning within the shared evidence limit. Sync stopped; start a shorter session or keep this session local.",
+  );
+  expect(mentionError(new Error(code))).not.toContain("A secret was detected");
+  expect(isTerminalSyncError(code)).toBe(true);
+});
 test.each([
   ["capture-head-diverged", "OpenCode Fork"],
   ["capture-head-diverged", "Removed sources are never recreated automatically"],

@@ -51,6 +51,8 @@ export function mentionError(error: unknown): string {
       "This batch exceeds the local truncation safety-scan limit. Sync stopped. Keep the session local until the oversized record is resolved.",
     "capture-local-secret-scan-limit":
       "This batch exceeds the local secret-scan limit. Sync stopped; keep the session local until the oversized record is resolved.",
+    "native-capture-bounds":
+      "This session has a record too large to keep its reasoning within the shared evidence limit. Sync stopped; start a shorter session or keep this session local.",
     "capture-local-scanner-unavailable":
       "The secret scanner is unavailable on this host. Check the pinned Gitleaks installation, then retry sync.",
     "evidence-http-422-server-secret-scan-rejected":

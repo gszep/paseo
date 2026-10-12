@@ -225,6 +225,15 @@ test("native divergence and cut-scan rejection stop before another upload", asyn
     }),
   ).rejects.toThrow("capture-local-secret-rejected");
   expect(f.calls).toHaveLength(calls);
+  f.scanCapture.mockRejectedValue(new Error("native-capture-bounds"));
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), message(1)] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
 });
 
 test.each([
