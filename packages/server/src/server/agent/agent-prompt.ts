@@ -454,13 +454,16 @@ interface NotifySafelyOptions {
   permissionRequest?: AgentPermissionRequest;
 }
 
-// A caller waits on a child through one armed notification. Arming again for the
-// same child and caller, such as a follow-up or steering prompt while the child
-// still runs, replaces the earlier watch instead of adding another one; the
-// child's next run outcome reaches the caller exactly once rather than once per
-// prompt the caller sent. The identity is the (child, caller) pair owned by this
-// manager instance, so distinct parents keep their own notifications and a new
-// run after a terminal outcome arms a fresh watch.
+// A caller waits on a child through one armed notification per manager. Arming
+// again for the same child and caller, such as a follow-up or steering prompt
+// while the child still runs, replaces the earlier watch instead of adding
+// another one, so a run outcome is not reported once per prompt the caller sent.
+// The identity is the (child, caller) pair owned by this manager instance, so
+// distinct parents keep their own notifications and a new run after a terminal
+// outcome arms a fresh watch. This bounds the subscriptions; it is not
+// exactly-once run-id delivery. A notification already in flight when the watch
+// is replaced still reaches the caller, and arming again while the child is
+// already in a terminal state re-reports that state.
 const armedFinishNotifications = new WeakMap<AgentManager, Map<string, () => void>>();
 
 export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {

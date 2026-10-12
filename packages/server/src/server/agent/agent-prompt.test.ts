@@ -55,7 +55,8 @@ interface FinishNotificationScenarioOptions {
 }
 
 interface FinishNotificationScenario {
-  startWatchingChild(): void;
+  startWatchingChild(): () => void;
+  startWatchingChildAs(callerAgentId: string): () => void;
   activeSubscriptionCount(): number;
   markChildRunning(): void;
   markChildIdle(): void;
@@ -104,7 +105,7 @@ function createFinishNotificationScenario(
     if (agentId === "child-agent") {
       return childAgent;
     }
-    if (agentId === "caller-agent") {
+    if (agentId.startsWith("caller")) {
       return callerAgent;
     }
     return null;
@@ -148,16 +149,23 @@ function createFinishNotificationScenario(
     return null;
   });
 
+  function armWatch(callerAgentId: string): () => void {
+    return setupFinishNotification({
+      agentManager,
+      agentStorage,
+      childAgentId: "child-agent",
+      callerAgentId,
+      requireParentOwnership: options?.requireParentOwnership,
+      logger: options?.logger ?? createTestLogger(),
+    });
+  }
+
   return {
     startWatchingChild() {
-      setupFinishNotification({
-        agentManager,
-        agentStorage,
-        childAgentId: "child-agent",
-        callerAgentId: "caller-agent",
-        requireParentOwnership: options?.requireParentOwnership,
-        logger: options?.logger ?? createTestLogger(),
-      });
+      return armWatch("caller-agent");
+    },
+    startWatchingChildAs(callerAgentId: string) {
+      return armWatch(callerAgentId);
     },
     activeSubscriptionCount() {
       return subscribers.size;
@@ -525,6 +533,37 @@ test("an idle resumed child that never runs does not emit a false finish", async
   await flushFinishNotifications();
 
   expect(scenario.parentPrompts()).toHaveLength(0);
+});
+
+test("distinct callers watching one child each keep their own notification", async () => {
+  const scenario = createFinishNotificationScenario();
+
+  scenario.startWatchingChild();
+  scenario.startWatchingChildAs("caller-two");
+  expect(scenario.activeSubscriptionCount()).toBe(2);
+
+  scenario.finishChild();
+  await flushFinishNotifications();
+
+  expect(scenario.parentPrompts()).toHaveLength(2);
+  expect(scenario.parentPrompts().every((prompt) => prompt.includes("finished."))).toBe(true);
+  expect(scenario.activeSubscriptionCount()).toBe(0);
+});
+
+test("a superseded watch's stale disarm cannot remove the current watch", async () => {
+  const scenario = createFinishNotificationScenario();
+
+  const staleStop = scenario.startWatchingChild();
+  scenario.startWatchingChild();
+  expect(scenario.activeSubscriptionCount()).toBe(1);
+
+  staleStop();
+  expect(scenario.activeSubscriptionCount()).toBe(1);
+
+  scenario.finishChild();
+  await flushFinishNotifications();
+  expect(scenario.parentPrompts()).toHaveLength(1);
+  expect(scenario.activeSubscriptionCount()).toBe(0);
 });
 
 test("detaching a child ends its parent-owned finish notification", async () => {
