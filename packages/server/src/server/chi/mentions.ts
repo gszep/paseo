@@ -10,6 +10,7 @@ import {
 } from "./pinned-timeline.js";
 import type { SendAgentMessageRequest } from "@getpaseo/protocol/messages";
 import { append, boundedText, endpointUrl } from "@henkaku-center/chi-native/http";
+import { isAppendHttp503Reason } from "@henkaku-center/chi-native/append-client";
 import {
   canonicalJson,
   decodeEntry,
@@ -266,8 +267,24 @@ export class ChiMentions {
           .catch(() => null);
         if (error?.reason === "invalid-cursor") throw new Error("chi-inbox-invalid-cursor");
       }
-      await response.body?.cancel();
-      throw new Error(`chi-mentions-http-${response.status}`);
+      let reason: string | null = null;
+      if (response.status === 503) {
+        // The strict parser rejects duplicate keys, escaped aliases and fatal
+        // UTF-8 before any field is read, so those bodies keep the status-only
+        // code. A malformed, oversized or unknown body is likewise status-only,
+        // and the raw body is never surfaced.
+        const parsed = await boundedText(response, 1024)
+          .then((text) => parseJson(text))
+          .catch(() => null);
+        const error =
+          parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
+        if (error?.ok === false && isAppendHttp503Reason(error.reason)) reason = error.reason;
+      } else {
+        await response.body?.cancel();
+      }
+      throw new Error(`chi-mentions-http-${response.status}${reason ? `-${reason}` : ""}`);
     }
     try {
       return parseJson(await boundedText(response, 1024 * 1024));

@@ -19,6 +19,8 @@ const CHI_BRAND = {
   },
   titleMark: "千",
   attribution: { label: "Powered by Paseo", url: "https://paseo.sh" },
+  agentSetup: { label: "Agent setup guide", url: "https://app.example.com/AGENTS.md" },
+  connect: { label: "Connect with GitHub", url: "https://app.example.com/connect/" },
   icons: {
     themeColor: "#181b1a",
     backgroundColor: "#181b1a",
@@ -57,6 +59,8 @@ describe("hosted brand inputs", () => {
     expect(brand.name).toBe("Chi");
     expect(brand.workingIndicator).toEqual(CHI_BRAND.workingIndicator);
     expect(brand.icons!.manifest).toHaveLength(2);
+    expect(brandRuntimeConfig(brand)?.agentSetup).toEqual(CHI_BRAND.agentSetup);
+    expect(brandRuntimeConfig(brand)?.connect).toEqual(CHI_BRAND.connect);
   });
 
   it("rejects path traversal and malformed icons", () => {
@@ -190,6 +194,17 @@ describe("hosted export policy", () => {
     expect(handles("https://app.example.com/assets/abc123.js")).toBe(true);
     expect(handles("https://app.example.com/api/agents", "navigate")).toBe(false);
     expect(handles("https://app.example.com/api", "navigate")).toBe(false);
+    for (const path of [
+      "/AGENTS.md",
+      "/agent-guide.json",
+      "/docs/OPERATIONS.md",
+      "/connect",
+      "/connect/",
+      "/connect/assets/app.js",
+    ]) {
+      expect(handles(`https://app.example.com${path}`, "navigate")).toBe(false);
+      expect(handles(`https://app.example.com${path}`)).toBe(false);
+    }
     expect(handles("https://relay.example.com/traffic")).toBe(false);
     expect(handles("https://app.example.com/unknown.json")).toBe(false);
     expect(handles("https://app.example.com/assets/abc123.js?token=private")).toBe(false);

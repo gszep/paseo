@@ -33,9 +33,22 @@ Your code never leaves your machine. Paseo is local-first.
 
 ## Components at a glance
 
+Native append runtime admission comes from the vendored private client's shared
+backend allowlist. Capture and saved-send native confirmation accept the verified
+`2.0.15-chi.1` and `2.0.15-chi.2` contracts. New creation receipts record the
+verified version; existing creations and immutable receipts retain their original
+runtime across an upgrade. The frozen `opencode-chi1-r1` reducer is unchanged.
+Deploy compatible backend admission before updating the private client and hosts;
+source admission does not enable held Continue/fork publication or change scanning.
+
 Chi sync and human mentions use the append-only v3 client.
 The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
-Chi `94a157c5e6d359f1c5f06fec9a8b746962de3525`; its integrity is pinned in the lockfile.
+Chi `360e269b3790a598dd206265224c0bbeba4804f7`; its integrity is pinned in the lockfile.
+Archive SHA-256: `d4e9ac4801bbce0ec07f08512afab27d54633aa8723748693c437d2502111d9c`.
+This head carries the #141 over-cap reasoning-preservation minimiser fix, the
+#164 append-witness classification fix (an ancestor of the merge, not a second
+release) and the #172 bounded fixed HTTP 503 category propagation.
+This identifies the prepared source artifact, not a deployed backend or installed host.
 Repack after shared-helper changes. The server package bundles this dependency so
 installed CLI/Docker builds do not depend on a checkout-relative vendor path.
 The scanner's bounded private-key labels and credential-identifier comma pairs

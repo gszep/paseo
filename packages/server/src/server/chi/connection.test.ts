@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { appendHead, initialHead } from "@henkaku-center/chi-native/append-codec";
+import { AppendHttpError } from "@henkaku-center/chi-native/append-client";
 import { z } from "zod";
 import type { AgentManager, ManagedAgent } from "../agent/agent-manager.js";
 import { ChiConnection, safeChiError, type ChiAuthority } from "./connection.js";
@@ -329,17 +330,21 @@ describe.skipIf(process.platform === "win32")("saved mention admission recovery"
     return { ...f, auth, owner, recoveryInput: input, native };
   }
 
-  it("recovers after reconstruction without changing sync lineage or calling a native mutation", async () => {
-    const f = await recoveryFixture();
-    const before = structuredClone(f.agents);
-    await expect(f.restart().recoverMentionSend(f.recoveryInput)).resolves.toBe(true);
-    expect(f.agents).toEqual(before);
-    expect(f.runtime.import).not.toHaveBeenCalled();
-    expect(f.runtime.fork).not.toHaveBeenCalled();
-    expect(f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(
-      true,
-    );
-  });
+  it.each(["2.0.15-chi.1", "2.0.15-chi.2"])(
+    "%s recovers after reconstruction without changing sync lineage or calling a native mutation",
+    async (version) => {
+      const f = await recoveryFixture();
+      vi.mocked(f.runtime.info).mockResolvedValue({ version });
+      const before = structuredClone(f.agents);
+      await expect(f.restart().recoverMentionSend(f.recoveryInput)).resolves.toBe(true);
+      expect(f.agents).toEqual(before);
+      expect(f.runtime.import).not.toHaveBeenCalled();
+      expect(f.runtime.fork).not.toHaveBeenCalled();
+      expect(f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(
+        true,
+      );
+    },
+  );
 
   it.each([
     { messageId: "missing" },
@@ -419,7 +424,7 @@ describe.skipIf(process.platform === "win32")("saved mention admission recovery"
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).rejects.toThrow(
       "native export unavailable",
     );
-    vi.mocked(f.runtime.info).mockResolvedValueOnce({ version: "unsupported" });
+    vi.mocked(f.runtime.info).mockResolvedValueOnce({ version: "2.0.15-chi.3" });
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
     f.native.messages = [];
     await expect(f.owner.recoverMentionSend(f.recoveryInput)).resolves.toBe(false);
@@ -580,6 +585,38 @@ describe.skipIf(process.platform === "win32")(
       const agent = await f.registration.register("ses_fork", {});
       return { ...f, agent, connection: f.restart() };
     }
+    it.each(["2.0.15-chi.1", "2.0.15-chi.2"])(
+      "captures %s with its verified runtime provenance",
+      async (version) => {
+        const f = await mapped();
+        vi.mocked(f.runtime.info).mockResolvedValue({ version });
+        await f.connection.capture(f.agent.id);
+        const creations = f.request.mock.calls.flatMap(([, init]) => {
+          const body = init?.body ? JSON.parse(String(init.body)) : null;
+          return body?.creation ? [body.creation] : [];
+        });
+        expect(creations).toHaveLength(1);
+        expect(creations[0]).toMatchObject({ runtime: version, nativeReducer: "opencode-chi1-r1" });
+        expect(f.runtime.import).not.toHaveBeenCalled();
+        expect(f.runtime.fork).not.toHaveBeenCalled();
+      },
+    );
+    it.each(["2.0.15-chi.3", "v2.0.15-chi.2", "2.0.15", "2.0.15-chi.2-other"])(
+      "rejects unverified runtime %s before export, scanning or publication",
+      async (version) => {
+        const f = await mapped();
+        vi.mocked(f.runtime.info).mockResolvedValue({ version });
+        await expect(f.connection.capture(f.agent.id)).rejects.toThrow(
+          "chi-native-runtime-unsupported",
+        );
+        expect(f.runtime.export).not.toHaveBeenCalled();
+        expect(f.scan).not.toHaveBeenCalled();
+        expect(f.backend.entries).toEqual([]);
+        expect(
+          f.request.mock.calls.every(([, init]) => !init?.method || init.method === "GET"),
+        ).toBe(true);
+      },
+    );
     it.each(["capture-local-secret-rejected", "capture-head-diverged", "append-http-503"])(
       "keeps the people directory available when another session has %s",
       async (error) => {
@@ -825,6 +862,18 @@ describe.skipIf(process.platform === "win32")(
       );
       expect(f.backend.entries).toEqual([]);
       expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).capturePending).toBe(false);
+    });
+    it("an over-cap reasoning record stops sync with an explicit capacity code, not a retry or secret finding", async () => {
+      const f = await mapped();
+      // The minimiser rejects a reasoning-bearing record that cannot fit the
+      // shared cap in the existing bounds category; the local classifier must
+      // surface it as terminal before any receipt or append.
+      f.scan.mockRejectedValue(new Error("native-capture-bounds"));
+      await expect(f.connection.capture(f.agent.id)).rejects.toThrow("native-capture-bounds");
+      expect(f.backend.entries).toEqual([]);
+      const association = JSON.parse(f.agents[0]!.labels["chi.native"]!);
+      expect(association.error).toBe("native-capture-bounds");
+      expect(association.capturePending).toBe(false);
     });
     it("unsupported native numeric values stop sync rather than entering divergence recovery or retry", async () => {
       const f = await mapped();
@@ -1112,6 +1161,11 @@ describe.skipIf(process.platform === "win32")(
         "capture-local-scan-timeout",
       );
       expect(safeChiError(new Error("private payload diagnostic"))).toBe("chi-operation-failed");
+      // A bounded fixed 503 category is preserved; an unknown one stays status-only.
+      expect(safeChiError(new AppendHttpError(503, "source-writers-drained"))).toBe(
+        "append-http-503-source-writers-drained",
+      );
+      expect(safeChiError(new AppendHttpError(503, null))).toBe("append-http-503");
     });
   },
 );

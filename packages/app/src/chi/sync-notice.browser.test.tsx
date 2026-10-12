@@ -130,6 +130,24 @@ describe("SyncNoticeView", () => {
     expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
   });
 
+  it("explains a repository that is not accepting v3 writes without advising reconnect", () => {
+    const error = "append-http-503-source-writers-drained";
+    const { container } = mount(
+      <SyncNoticeView
+        error={error}
+        terminal={isTerminalSyncError(error)}
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain("setup or maintenance");
+    expect(container.textContent).toContain("repository admin or operator");
+    expect(container.textContent).not.toContain("Reconnect this host and retry");
+    // Bounded auto-retry stays possible once the backend state changes.
+    expect(button(container, "Retry")).toBeInstanceOf(HTMLElement);
+    expect(container.textContent).not.toContain(error);
+  });
+
   it("routes dismiss and retry through their callbacks", () => {
     const onDismiss = vi.fn();
     const onRetry = vi.fn();
@@ -191,6 +209,21 @@ describe("SyncNoticeView", () => {
     );
     expect(container.textContent).toContain(
       "This batch exceeds the local truncation safety-scan limit. Sync stopped.",
+    );
+    expect(container.textContent).not.toContain("A secret was detected");
+    expect(button(container, "Retry")).toBeUndefined();
+  });
+  it("explains a terminal over-cap reasoning record without claiming a secret finding", () => {
+    const { container } = mount(
+      <SyncNoticeView
+        error="native-capture-bounds"
+        terminal
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain(
+      "This session has a record too large to keep its reasoning within the shared evidence limit.",
     );
     expect(container.textContent).not.toContain("A secret was detected");
     expect(button(container, "Retry")).toBeUndefined();

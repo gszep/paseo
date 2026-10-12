@@ -26,6 +26,8 @@ self.addEventListener("fetch", event => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname === "/api" || url.search) return;
+  // Separate public resources must never receive the execution app's offline shell.
+  if (url.pathname === "/AGENTS.md" || url.pathname === "/agent-guide.json" || url.pathname.startsWith("/docs/") || url.pathname === "/connect" || url.pathname.startsWith("/connect/")) return;
   if (request.mode === "navigate") {
     event.respondWith((async () => {
       try {

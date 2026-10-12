@@ -14,6 +14,11 @@ import { captureAppend, type AppendCaptureInput } from "./append-capture.js";
 // through the real connection before credentials/native access in connection.test.
 const test = platformTest.skipIf(process.platform === "win32");
 
+/** Sorted recursive listing of a fixture home, for no-new-file assertions. */
+async function tree(home: string): Promise<string[]> {
+  return (await readdir(home, { recursive: true })).map(String).sort();
+}
+
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
@@ -92,6 +97,7 @@ async function fixture() {
     instanceId: "host:opencode",
     hostId: "host",
     sessionId: info.id,
+    runtime: "2.0.15-chi.1",
     cwd: "/fixture",
     visibility: "shared",
     native: { info, messages: [message(0)] },
@@ -114,6 +120,58 @@ async function fixture() {
     },
   };
 }
+
+test.each(["2.0.15-chi.1", "2.0.15-chi.2"] as const)(
+  "new %s source records actual runtime without changing the reducer",
+  async (runtime) => {
+    const f = await fixture();
+    await captureAppend({ ...f.input, runtime });
+    expect(f.calls[0]).toMatchObject({ creation: { runtime, nativeReducer: "opencode-chi1-r1" } });
+  },
+);
+
+test("chi.2 resumes a chi.1 source without relabelling any immutable receipt or creation", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const root = join(f.input.home, "chi", "append");
+  const files = (await readdir(root, { recursive: true, withFileTypes: true })).filter((entry) =>
+    entry.isFile(),
+  );
+  const before = await Promise.all(
+    files.map(async (entry) => {
+      const path = join(entry.parentPath, entry.name);
+      return { path, bytes: await readFile(path, "utf8") };
+    }),
+  );
+  const next = await captureAppend({
+    ...f.input,
+    runtime: "2.0.15-chi.2",
+    expected: first.pin,
+    native: { info, messages: [message(0), message(1)] },
+  });
+  expect(next.pin.count).toBe(2);
+  expect(next.pin.sourceId).toBe(first.pin.sourceId);
+  expect(f.calls[0]).toMatchObject({ creation: { runtime: "2.0.15-chi.1" } });
+  expect(f.calls[1]).not.toHaveProperty("creation");
+  for (const file of before) expect(await readFile(file.path, "utf8")).toBe(file.bytes);
+});
+
+test("an unknown saved creation runtime is refused without repair or publication", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const root = join(f.input.home, "chi", "append");
+  const [binding] = await readdir(root);
+  const path = join(root, binding!, "creation.json");
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  const bytes = JSON.stringify({ ...saved, runtime: "2.0.15-chi.3" });
+  await writeFile(path, bytes);
+  const calls = f.calls.length;
+  await expect(
+    captureAppend({ ...f.input, runtime: "2.0.15-chi.2", expected: first.pin }),
+  ).rejects.toThrow();
+  expect(f.calls).toHaveLength(calls);
+  expect(await readFile(path, "utf8")).toBe(bytes);
+});
 
 test("append capture projects and cut-scans only new messages, preserving confirmed coordinates through metadata", async () => {
   const f = await fixture();
@@ -172,6 +230,79 @@ test("native divergence and cut-scan rejection stop before another upload", asyn
     }),
   ).rejects.toThrow("capture-local-secret-rejected");
   expect(f.calls).toHaveLength(calls);
+  f.scanCapture.mockRejectedValue(new Error("native-capture-bounds"));
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), message(1)] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
+});
+
+test("the packed helper rejects an over-cap reasoning record before a new batch receipt or upload", async () => {
+  // Exercises the installed @henkaku-center/chi-native minimiser directly, not
+  // an injected scan error. A first small capture saves the creation and a
+  // confirmed checkpoint, so any later request would be a genuinely new
+  // operation; the saved confirmed replay is unchanged. This does not claim the
+  // whole call makes zero HTTP requests: a saved pending receipt replays before a
+  // new batch is constructed.
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const calls = f.calls.length,
+    before = await tree(f.input.home);
+  const overCap = {
+    id: "msg_overcap",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "p", id: "m" },
+    time: { created: 2 },
+    content: [{ type: "reasoning", text: "z".repeat(70_000), state: { signature: "sig" } }],
+  };
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), overCap] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
+  // No new batch receipt, message row or pending file, and every saved artifact
+  // (including the confirmed replay) is byte-for-byte unchanged.
+  expect(await tree(f.input.home)).toEqual(before);
+});
+
+test("the installed helper classifies an oversized decoded witness as an append scan limit without a new receipt or upload", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const calls = f.calls.length,
+    before = await tree(f.input.home);
+  const witness = {
+    id: "msg_witness",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "p", id: "m" },
+    time: { created: 2, completed: 2 },
+    content: Array.from({ length: 10 }, () => ({
+      type: "reasoning",
+      text: "readable reasoning",
+      state: { encryptedContent: "!".repeat(4935) },
+    })),
+  };
+  // Under the 64,000-char record cap, so projection succeeds; the r2 complete
+  // witness exceeds the 99,999-byte file bound inside the append scan and cannot
+  // be repaired by shrinking the batch.
+  expect(Buffer.byteLength(JSON.stringify(witness))).toBeLessThan(60_000);
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), witness] },
+    }),
+  ).rejects.toThrow("capture-local-secret-scan-limit");
+  expect(f.calls).toHaveLength(calls);
+  expect(await tree(f.input.home)).toEqual(before);
 });
 
 test.each([

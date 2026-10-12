@@ -31,6 +31,7 @@ export function syncNoticeReason(code: string | null): string {
       "chi-operation-timeout",
       "capture-local-cut-scan-limit",
       "capture-local-secret-scan-limit",
+      "native-capture-bounds",
       "capture-local-secret-rejected",
       "evidence-http-422-server-secret-scan-rejected",
       "capture-local-scanner-unavailable",
