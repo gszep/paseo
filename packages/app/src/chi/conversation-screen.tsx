@@ -272,7 +272,7 @@ function ReadError({ error, retry }: { error: unknown; retry(): void }) {
 
 function conversationReadError(error: unknown) {
   const code = error instanceof Error ? error.message : String(error);
-  if (code === "chi-mentions-http-503" || code === "chi-operation-timeout")
+  if (code.startsWith("chi-mentions-http-503") || code === "chi-operation-timeout")
     return "Chi is temporarily unavailable. Retry loading this snapshot.";
   if (code === "chi-mention-native-source-required" || code === "chi-mention-unrenderable-entry")
     return "This referenced entry cannot be displayed as a shared conversation. No local history was substituted.";

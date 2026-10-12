@@ -14,6 +14,11 @@ import { captureAppend, type AppendCaptureInput } from "./append-capture.js";
 // through the real connection before credentials/native access in connection.test.
 const test = platformTest.skipIf(process.platform === "win32");
 
+/** Sorted recursive listing of a fixture home, for no-new-file assertions. */
+async function tree(home: string): Promise<string[]> {
+  return (await readdir(home, { recursive: true })).map(String).sort();
+}
+
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
@@ -225,6 +230,79 @@ test("native divergence and cut-scan rejection stop before another upload", asyn
     }),
   ).rejects.toThrow("capture-local-secret-rejected");
   expect(f.calls).toHaveLength(calls);
+  f.scanCapture.mockRejectedValue(new Error("native-capture-bounds"));
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), message(1)] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
+});
+
+test("the packed helper rejects an over-cap reasoning record before a new batch receipt or upload", async () => {
+  // Exercises the installed @henkaku-center/chi-native minimiser directly, not
+  // an injected scan error. A first small capture saves the creation and a
+  // confirmed checkpoint, so any later request would be a genuinely new
+  // operation; the saved confirmed replay is unchanged. This does not claim the
+  // whole call makes zero HTTP requests: a saved pending receipt replays before a
+  // new batch is constructed.
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const calls = f.calls.length,
+    before = await tree(f.input.home);
+  const overCap = {
+    id: "msg_overcap",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "p", id: "m" },
+    time: { created: 2 },
+    content: [{ type: "reasoning", text: "z".repeat(70_000), state: { signature: "sig" } }],
+  };
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), overCap] },
+    }),
+  ).rejects.toThrow("native-capture-bounds");
+  expect(f.calls).toHaveLength(calls);
+  // No new batch receipt, message row or pending file, and every saved artifact
+  // (including the confirmed replay) is byte-for-byte unchanged.
+  expect(await tree(f.input.home)).toEqual(before);
+});
+
+test("the installed helper classifies an oversized decoded witness as an append scan limit without a new receipt or upload", async () => {
+  const f = await fixture();
+  const first = await captureAppend(f.input);
+  const calls = f.calls.length,
+    before = await tree(f.input.home);
+  const witness = {
+    id: "msg_witness",
+    type: "assistant",
+    agent: "build",
+    model: { providerID: "p", id: "m" },
+    time: { created: 2, completed: 2 },
+    content: Array.from({ length: 10 }, () => ({
+      type: "reasoning",
+      text: "readable reasoning",
+      state: { encryptedContent: "!".repeat(4935) },
+    })),
+  };
+  // Under the 64,000-char record cap, so projection succeeds; the r2 complete
+  // witness exceeds the 99,999-byte file bound inside the append scan and cannot
+  // be repaired by shrinking the batch.
+  expect(Buffer.byteLength(JSON.stringify(witness))).toBeLessThan(60_000);
+  await expect(
+    captureAppend({
+      ...f.input,
+      expected: first.pin,
+      native: { info, messages: [message(0), witness] },
+    }),
+  ).rejects.toThrow("capture-local-secret-scan-limit");
+  expect(f.calls).toHaveLength(calls);
+  expect(await tree(f.input.home)).toEqual(before);
 });
 
 test.each([

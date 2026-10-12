@@ -119,6 +119,7 @@ describe("sync destination state", () => {
   it("classifies terminal secret-scan errors", () => {
     expect(isTerminalSyncError("capture-local-secret-rejected")).toBe(true);
     expect(isTerminalSyncError("capture-local-cut-scan-limit")).toBe(true);
+    expect(isTerminalSyncError("native-capture-bounds")).toBe(true);
     expect(isTerminalSyncError("evidence-http-422-server-secret-scan-rejected")).toBe(true);
     // A missing scanner is retryable once gitleaks is installed.
     expect(isTerminalSyncError("capture-local-scanner-unavailable")).toBe(false);
