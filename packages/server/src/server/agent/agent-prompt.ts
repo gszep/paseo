@@ -454,7 +454,16 @@ interface NotifySafelyOptions {
   permissionRequest?: AgentPermissionRequest;
 }
 
-export function setupFinishNotification(params: SetupFinishNotificationParams): void {
+// A caller waits on a child through one armed notification. Arming again for the
+// same child and caller, such as a follow-up or steering prompt while the child
+// still runs, replaces the earlier watch instead of adding another one; the
+// child's next run outcome reaches the caller exactly once rather than once per
+// prompt the caller sent. The identity is the (child, caller) pair owned by this
+// manager instance, so distinct parents keep their own notifications and a new
+// run after a terminal outcome arms a fresh watch.
+const armedFinishNotifications = new WeakMap<AgentManager, Map<string, () => void>>();
+
+export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {
   const {
     agentManager,
     agentStorage,
@@ -469,10 +478,20 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   let unsubscribe: (() => void) | null = null;
   let notificationQueue = Promise.resolve();
 
+  const armedByManager =
+    armedFinishNotifications.get(agentManager) ?? new Map<string, () => void>();
+  armedFinishNotifications.set(agentManager, armedByManager);
+  const armedKey = JSON.stringify([childAgentId, callerAgentId]);
+  armedByManager.get(armedKey)?.();
+  armedByManager.set(armedKey, stop);
+
   function stop(): void {
     if (stopped) return;
     stopped = true;
     unsubscribe?.();
+    if (armedByManager.get(armedKey) === stop) {
+      armedByManager.delete(armedKey);
+    }
   }
 
   async function notify(
@@ -596,11 +615,12 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   const childSnapshot = agentManager.getAgent(childAgentId);
   if (!childSnapshot || childSnapshot.lifecycle === "closed") {
     stop();
-    return;
+    return stop;
   }
   if (childSnapshot.lifecycle === "running") {
     hasSeenRunning = true;
   } else if (childSnapshot.lifecycle === "error") {
     notifySafely("errored");
   }
+  return stop;
 }

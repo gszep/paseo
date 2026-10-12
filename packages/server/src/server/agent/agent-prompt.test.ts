@@ -56,6 +56,10 @@ interface FinishNotificationScenarioOptions {
 
 interface FinishNotificationScenario {
   startWatchingChild(): void;
+  activeSubscriptionCount(): number;
+  markChildRunning(): void;
+  markChildIdle(): void;
+  markChildError(): void;
   requestChildPermission(requestId?: string): void;
   resolveChildPermission(requestId?: string): void;
   resolveChildPermissionFromState(requestId?: string): void;
@@ -71,7 +75,14 @@ interface FinishNotificationScenario {
 function createFinishNotificationScenario(
   options?: FinishNotificationScenarioOptions,
 ): FinishNotificationScenario {
-  let subscriber: ((event: AgentManagerEvent) => void) | null = null;
+  const subscribers = new Set<(event: AgentManagerEvent) => void>();
+  // Fan a simulated event out to every live subscription the way the real
+  // manager does, so repeated registrations are observable in tests.
+  const subscriber = (event: AgentManagerEvent): void => {
+    for (const callback of subscribers) {
+      callback(event);
+    }
+  };
   let resolveParentPrompt: ((prompt: string) => void) | null = null;
   let parentPrompted = false;
   let steerAttemptCount = 0;
@@ -99,9 +110,9 @@ function createFinishNotificationScenario(
     return null;
   });
   Reflect.set(agentManager, "subscribe", (callback: (event: AgentManagerEvent) => void) => {
-    subscriber = callback;
+    subscribers.add(callback);
     return () => {
-      subscriber = null;
+      subscribers.delete(callback);
     };
   });
   Reflect.set(agentManager, "getLastAssistantMessage", async () => {
@@ -146,6 +157,30 @@ function createFinishNotificationScenario(
         callerAgentId: "caller-agent",
         requireParentOwnership: options?.requireParentOwnership,
         logger: options?.logger ?? createTestLogger(),
+      });
+    },
+    activeSubscriptionCount() {
+      return subscribers.size;
+    },
+    markChildRunning() {
+      childAgent.lifecycle = "running";
+      subscriber({
+        type: "agent_state",
+        agent: childAgent,
+      });
+    },
+    markChildIdle() {
+      childAgent.lifecycle = "idle";
+      subscriber({
+        type: "agent_state",
+        agent: childAgent,
+      });
+    },
+    markChildError() {
+      childAgent.lifecycle = "error";
+      subscriber({
+        type: "agent_state",
+        agent: childAgent,
       });
     },
     requestChildPermission(requestId = "permission-1") {
@@ -407,6 +442,89 @@ test("finish notifications survive repeated permission cycles", async () => {
   expect(
     scenario.parentPrompts().map((prompt) => prompt.match(/(needs permission|finished)\./)?.[1]),
   ).toEqual(["needs permission", "needs permission", "finished"]);
+});
+
+// The notification queue drains on microtasks; one timer tick lets an enqueued
+// prompt reach the caller without waiting on a vi.waitFor timeout.
+const flushFinishNotifications = (): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+test("re-arming one child and caller keeps a single finish notification", async () => {
+  const scenario = createFinishNotificationScenario({
+    childLastAssistantMessage: "identical response",
+  });
+
+  // The caller steers the still-running child repeatedly; every call re-arms.
+  for (let arm = 0; arm < 7; arm += 1) {
+    scenario.startWatchingChild();
+  }
+  expect(scenario.activeSubscriptionCount()).toBe(1);
+
+  scenario.finishChild();
+  await flushFinishNotifications();
+  await flushFinishNotifications();
+
+  expect(scenario.parentPrompts()).toHaveLength(1);
+  expect(scenario.parentPrompts()[0]).toContain("Agent child-agent (Child Agent) finished.");
+  // The terminal outcome disarms the watch so a later re-arm starts clean.
+  expect(scenario.activeSubscriptionCount()).toBe(0);
+});
+
+test("each later run of the same child notifies once, even with an identical response", async () => {
+  const scenario = createFinishNotificationScenario({
+    childLastAssistantMessage: "identical response",
+  });
+
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+  await flushFinishNotifications();
+
+  expect(scenario.parentPrompts()).toHaveLength(2);
+  expect(scenario.parentPrompts().every((prompt) => prompt.includes("finished."))).toBe(true);
+  expect(scenario.activeSubscriptionCount()).toBe(0);
+});
+
+test("re-arming does not lose a pending permission or a later error", async () => {
+  const scenario = createFinishNotificationScenario();
+
+  scenario.startWatchingChild();
+  scenario.startWatchingChild();
+  scenario.requestChildPermission();
+  await vi.waitFor(() => expect(scenario.parentPrompts()).toHaveLength(1));
+  expect(scenario.parentPrompts()[0]).toContain("needs permission.");
+
+  scenario.startWatchingChild();
+  scenario.markChildError();
+  await vi.waitFor(() => expect(scenario.parentPrompts()).toHaveLength(2));
+  expect(scenario.parentPrompts()[1]).toContain("errored.");
+  expect(scenario.parentPrompts()).toHaveLength(2);
+  expect(scenario.activeSubscriptionCount()).toBe(0);
+});
+
+test("re-arming while the child runs still reports the pending idle outcome once", async () => {
+  const scenario = createFinishNotificationScenario();
+
+  scenario.startWatchingChild();
+  scenario.markChildRunning();
+  scenario.startWatchingChild();
+  scenario.markChildIdle();
+  await flushFinishNotifications();
+
+  expect(scenario.parentPrompts()).toHaveLength(1);
+  expect(scenario.parentPrompts()[0]).toContain("finished.");
+});
+
+test("an idle resumed child that never runs does not emit a false finish", async () => {
+  const scenario = createFinishNotificationScenario();
+
+  scenario.startWatchingChild();
+  scenario.markChildIdle();
+  scenario.markChildIdle();
+  await flushFinishNotifications();
+
+  expect(scenario.parentPrompts()).toHaveLength(0);
 });
 
 test("detaching a child ends its parent-owned finish notification", async () => {
