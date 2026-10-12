@@ -10,6 +10,8 @@ const NOTICE_TITLE =
 
 export const WORKSPACE_NOTICE_TITLE = "Sync needs attention for another session in this workspace.";
 
+export const WORKSPACE_DESTINATION_NOTICE_TITLE = "Sync needs attention for this workspace.";
+
 export const OMITTED_CONTENT_WARNING =
   "A secret was found in content that was left out of the upload. Rotate it or clean the session history.";
 
@@ -108,7 +110,7 @@ export function WorkspaceSyncNoticeView({
     <View style={styles.container} testID="chi-sync-notice-workspace">
       <Alert
         variant="error"
-        title={WORKSPACE_NOTICE_TITLE}
+        title={affected.length > 0 ? WORKSPACE_NOTICE_TITLE : WORKSPACE_DESTINATION_NOTICE_TITLE}
         description={`${describeAffectedConversations(affected)} ${syncNoticeReason(error)}`}
       >
         <Button size="sm" variant="ghost" onPress={onDismiss}>
@@ -127,7 +129,9 @@ export function WorkspaceSyncNoticeView({
 function describeAffectedConversations(
   affected: ReadonlyArray<{ id: string; title: string | null }>,
 ): string {
-  if (affected.length === 0) return "A session in this workspace did not sync.";
+  if (affected.length === 0) {
+    return "This workspace's destination did not complete the last sync.";
+  }
   const titles = affected.map((agent) => agent.title?.trim()).filter(Boolean) as string[];
   if (titles.length === affected.length) {
     const shown = titles.slice(0, 2);

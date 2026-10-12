@@ -51,12 +51,26 @@ export function WorkspaceSyncNotice({
   const scope = useMemo(
     () =>
       deriveSyncNoticeScope({
+        hostId: serverId,
+        workspaceId,
         agents: workspaceAgents,
         focusedAgentId,
         workspaceError: state.error,
         workspaceWarning: state.warning,
+        // Association labels are last-known; only a resolved destination status
+        // is a verdict for this host/workspace. Until then show nothing rather
+        // than presenting cached labels as a current failure.
+        hasCurrentVerdict: !state.loading,
       }),
-    [workspaceAgents, focusedAgentId, state.error, state.warning],
+    [
+      serverId,
+      workspaceId,
+      workspaceAgents,
+      focusedAgentId,
+      state.error,
+      state.warning,
+      state.loading,
+    ],
   );
 
   const subject = scope?.subjectKey ?? "";

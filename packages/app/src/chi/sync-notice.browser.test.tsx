@@ -12,11 +12,104 @@ import {
   SyncWarningView,
   WorkspaceSyncNoticeView,
   WORKSPACE_NOTICE_TITLE,
+  WORKSPACE_DESTINATION_NOTICE_TITLE,
   useSyncNoticeDismissal,
   syncNoticeReason,
   OMITTED_CONTENT_WARNING,
 } from "./sync-notice-view";
 import { isTerminalSyncError } from "./sync-destination";
+import { WorkspaceSyncNotice } from "./sync-notice";
+import { useSessionStore, type Agent } from "@/stores/session-store";
+
+// The destination verdict is injected so the assembled notice can be driven
+// through cold/current/late states; the session store below stays real.
+const syncState = vi.hoisted(() => {
+  const base = {
+    destination: null as null,
+    pending: false,
+    error: null as string | null,
+    warning: null as string | null,
+    mentionsAvailable: false,
+    loading: true,
+    retry: () => {},
+  };
+  return { byHost: {} as Record<string, typeof base>, base };
+});
+vi.mock("./use-sync-destination", () => ({
+  useSyncDestination: (serverId: string) => syncState.byHost[serverId] ?? syncState.base,
+}));
+
+const SERVER_A = "server-a";
+const SERVER_B = "server-b";
+const WORKSPACE_ID = "ws-1";
+const AGENT_TIMESTAMP = new Date("2026-10-13T00:00:00.000Z");
+
+function makeAgent(input: {
+  id: string;
+  serverId: string;
+  title?: string;
+  workspaceId?: string;
+  association?: string | null;
+}): Agent {
+  return {
+    serverId: input.serverId,
+    id: input.id,
+    provider: "codex",
+    status: "idle",
+    turn: { phase: "idle", cancellationRequestId: null },
+    createdAt: AGENT_TIMESTAMP,
+    updatedAt: AGENT_TIMESTAMP,
+    lastUserMessageAt: null,
+    lastActivityAt: AGENT_TIMESTAMP,
+    capabilities: {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: true,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    },
+    currentModeId: null,
+    availableModes: [],
+    pendingPermissions: [],
+    persistence: null,
+    runtimeInfo: undefined,
+    lastUsage: undefined,
+    lastError: null,
+    title: input.title ?? `Session ${input.id}`,
+    cwd: "/repo/worktree",
+    workspaceId: input.workspaceId ?? WORKSPACE_ID,
+    model: null,
+    features: undefined,
+    thinkingOptionId: undefined,
+    requiresAttention: false,
+    attentionReason: null,
+    attentionTimestamp: null,
+    archivedAt: null,
+    parentAgentId: null,
+    labels: input.association ? { "chi.native": input.association } : {},
+    projectPlacement: null,
+  };
+}
+
+function seedSession(serverId: string, agents: Agent[], focusedAgentId: string | null): void {
+  const store = useSessionStore.getState();
+  store.initializeSession(serverId, null);
+  store.setAgents(serverId, new Map(agents.map((agent) => [agent.id, agent])));
+  store.setFocusedAgentId(serverId, focusedAgentId);
+}
+
+function chiAssociation(overrides: Record<string, unknown>): string {
+  return JSON.stringify({
+    repo: "github:owner/repo",
+    actor: "github:user",
+    sourceId: "source-a",
+    head: "head-1",
+    error: null,
+    warning: null,
+    ...overrides,
+  });
+}
 
 const errorRef = { current: null as string | null };
 const subjectRef = { current: "" };
@@ -57,6 +150,10 @@ afterEach(() => {
   }
   errorRef.current = null;
   subjectRef.current = "";
+  syncState.byHost = {};
+  for (const serverId of [SERVER_A, SERVER_B]) {
+    useSessionStore.getState().clearSession(serverId);
+  }
   vi.clearAllMocks();
 });
 
@@ -292,5 +389,149 @@ describe("useSyncNoticeDismissal", () => {
     subjectRef.current = "session:b:s2:h2";
     act(() => root.render(<DismissProbe />));
     expect(probe.dataset.visible).toBe("true");
+  });
+});
+
+describe("WorkspaceSyncNoticeView destination scope", () => {
+  it("states workspace/destination scope when no session is attributable", () => {
+    const { container } = mount(
+      <WorkspaceSyncNoticeView
+        error="chi-destination-unmapped"
+        affected={[]}
+        onDismiss={vi.fn()}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(container.textContent).toContain(WORKSPACE_DESTINATION_NOTICE_TITLE);
+    expect(container.textContent).toContain(
+      "This workspace's destination did not complete the last sync.",
+    );
+    expect(container.textContent).not.toContain("did not sync.");
+  });
+});
+
+describe("WorkspaceSyncNotice (assembled with the real session store)", () => {
+  function renderNotice(serverId: string) {
+    return mount(<WorkspaceSyncNotice serverId={serverId} workspaceId={WORKSPACE_ID} />);
+  }
+
+  it("stays silent on cold cached labels, then shows the focused session's own error once the verdict resolves", () => {
+    seedSession(
+      SERVER_A,
+      [
+        makeAgent({
+          id: "secret",
+          serverId: SERVER_A,
+          association: chiAssociation({ error: "capture-local-secret-rejected" }),
+        }),
+        makeAgent({
+          id: "cut",
+          serverId: SERVER_A,
+          association: chiAssociation({ error: "capture-local-cut-scan-limit" }),
+        }),
+      ],
+      "secret",
+    );
+    syncState.byHost[SERVER_A] = { ...syncState.base, loading: true };
+    const { root, container } = renderNotice(SERVER_A);
+    // No current destination verdict: cached labels must not assert a failure.
+    expect(container.querySelector('[data-testid^="chi-sync-notice"]')).toBeNull();
+
+    // The sibling's aggregate error must not be shown as the focused session's.
+    syncState.byHost[SERVER_A] = {
+      ...syncState.base,
+      loading: false,
+      error: "capture-local-cut-scan-limit",
+    };
+    act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_A} workspaceId={WORKSPACE_ID} />));
+    expect(container.textContent).toContain("A secret was detected in this batch");
+    expect(container.textContent).not.toContain("truncation safety-scan limit");
+  });
+
+  it("surfaces a late failure for the focused session after a clean verdict", () => {
+    seedSession(
+      SERVER_A,
+      [
+        makeAgent({
+          id: "parent",
+          serverId: SERVER_A,
+          association: chiAssociation({ error: null }),
+        }),
+      ],
+      "parent",
+    );
+    syncState.byHost[SERVER_A] = { ...syncState.base, loading: false, error: null };
+    const { root, container } = renderNotice(SERVER_A);
+    expect(container.querySelector('[data-testid^="chi-sync-notice"]')).toBeNull();
+
+    act(() => {
+      seedSession(
+        SERVER_A,
+        [
+          makeAgent({
+            id: "parent",
+            serverId: SERVER_A,
+            association: chiAssociation({ error: "capture-local-secret-rejected" }),
+          }),
+        ],
+        "parent",
+      );
+    });
+    syncState.byHost[SERVER_A] = {
+      ...syncState.base,
+      loading: false,
+      error: "capture-local-secret-rejected",
+    };
+    act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_A} workspaceId={WORKSPACE_ID} />));
+    expect(container.textContent).toContain("A secret was detected in this batch");
+  });
+  it("rescopes to another host context instead of carrying the first host's status", () => {
+    seedSession(
+      SERVER_A,
+      [
+        makeAgent({
+          id: "secret",
+          serverId: SERVER_A,
+          association: chiAssociation({ error: "capture-local-secret-rejected" }),
+        }),
+      ],
+      "secret",
+    );
+    syncState.byHost[SERVER_A] = {
+      ...syncState.base,
+      loading: false,
+      error: "capture-local-secret-rejected",
+    };
+    const { root, container } = renderNotice(SERVER_A);
+    expect(container.textContent).toContain("A secret was detected in this batch");
+
+    act(() => {
+      seedSession(
+        SERVER_B,
+        [
+          makeAgent({
+            id: "healthy",
+            serverId: SERVER_B,
+            association: chiAssociation({ error: null }),
+          }),
+          makeAgent({
+            id: "cut",
+            serverId: SERVER_B,
+            title: "Opening new session",
+            association: chiAssociation({ error: "capture-local-cut-scan-limit" }),
+          }),
+        ],
+        "healthy",
+      );
+    });
+    syncState.byHost[SERVER_B] = {
+      ...syncState.base,
+      loading: false,
+      error: "capture-local-cut-scan-limit",
+    };
+    act(() => root.render(<WorkspaceSyncNotice serverId={SERVER_B} workspaceId={WORKSPACE_ID} />));
+    expect(container.textContent).toContain(WORKSPACE_NOTICE_TITLE);
+    expect(container.textContent).toContain("Opening new session");
+    expect(container.textContent).not.toContain("A secret was detected in this batch");
   });
 });
