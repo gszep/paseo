@@ -38,14 +38,7 @@ import { features } from "./configuration.js";
 import { commands } from "./commands.js";
 import { messages } from "./history.js";
 import { SessionPermissions } from "./permissions.js";
-
-function inheritedEnvironment(): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
+import { createProviderEnv } from "../../../provider-launch-config.js";
 
 export class OpenCodeV2Session implements AgentSession {
   readonly provider = "opencode";
@@ -124,7 +117,7 @@ export class OpenCodeV2Session implements AgentSession {
       await awaitPaseoPlugin({ client: this.client, location, signal: this.abort.signal });
     // OpenCode runs session shells with these variables as the whole environment, not
     // an overlay on its own, so they must carry the daemon's inherited environment.
-    this.environment = launch?.env ? { ...inheritedEnvironment(), ...launch.env } : undefined;
+    this.environment = launch?.env ? createProviderEnv({ overlays: [launch.env] }) : undefined;
     for (const [server, config] of Object.entries(this.config.mcpServers ?? {})) {
       await this.client.mcp.add({
         server,

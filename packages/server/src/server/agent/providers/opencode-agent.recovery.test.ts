@@ -1040,15 +1040,10 @@ describe("OpenCode v2 lifecycle", () => {
     );
     try {
       expect(acquires).toEqual([{}]);
-      expect(harness.environments).toEqual([
+      expect(harness.environments).toMatchObject([
         {
           sessionID: "session",
           variables: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(
-                (entry): entry is [string, string] => entry[1] !== undefined,
-              ),
-            ),
             PASEO_AGENT_ID: "agent",
             PASEO_AGENT_CWD: "/tmp/project",
           },
