@@ -267,25 +267,51 @@ describe("OpenCode v2 resume configuration", () => {
     second.api.session.environment = bind;
     const clients = [first, second].map(
       (harness) =>
-        new OpenCodeV2AgentClient({ logger: createTestLogger(), runtime: harness.runtime }),
+        new OpenCodeV2AgentClient({
+          logger: createTestLogger(),
+          runtime: harness.runtime,
+          settings: {
+            env: {
+              PASEO_ENV_TEST: "configured",
+              PASEO_AGENT_ID: "configured",
+              ELECTRON_RUN_AS_NODE: "1",
+              PASEO_SUPERVISED: "1",
+              CLAUDECODE: "1",
+            },
+          },
+        }),
     );
     const config = { provider: "opencode" as const, cwd: "/tmp/project" };
     const launches = ["first", "second"].map((id) => ({
       env: { PASEO_AGENT_ID: id, PASEO_AGENT_CWD: config.cwd },
     }));
+    const assertEnvironment = (index: number) => {
+      const env = environments.get([first, second][index].info.id);
+      expect(env).toMatchObject({ ...launches[index].env, PASEO_ENV_TEST: "configured" });
+      expect(env?.PATH).toBe(process.env.PATH);
+      expect(env?.USER).toBe(process.env.USER);
+      for (const key of [
+        "ELECTRON_RUN_AS_NODE",
+        "PASEO_SUPERVISED",
+        "CLAUDECODE",
+        "ESBUILD_BINARY_PATH",
+        "PASEO_NODE_ENV",
+      ]) {
+        expect(env).not.toHaveProperty(key);
+      }
+    };
     const sessions = await Promise.all(
       clients.map((client, i) => client.createSession(config, launches[i])),
     );
     try {
-      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
-      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
-      expect(environments.get(first.info.id)?.PATH).toBe(process.env.PATH);
+      assertEnvironment(0);
+      assertEnvironment(1);
       environments.clear(); // A replacement server has no process-local bindings.
       first.push({ id: "reconnected-first", created: 2, type: "server.connected", data: {} });
       second.push({ id: "reconnected-second", created: 2, type: "server.connected", data: {} });
       await vi.waitFor(() => expect(bind).toHaveBeenCalledTimes(4));
-      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
-      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
+      assertEnvironment(0);
+      assertEnvironment(1);
     } finally {
       await Promise.all(sessions.map((session) => session.close()));
     }
@@ -296,8 +322,8 @@ describe("OpenCode v2 resume configuration", () => {
       ),
     );
     try {
-      expect(environments.get(first.info.id)).toMatchObject(launches[0].env);
-      expect(environments.get(second.info.id)).toMatchObject(launches[1].env);
+      assertEnvironment(0);
+      assertEnvironment(1);
       expect(first.prompts).toEqual([]);
       expect(second.prompts).toEqual([]);
     } finally {
