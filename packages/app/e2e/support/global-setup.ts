@@ -131,7 +131,7 @@ function startMetro(port: number, buffer: ReturnType<typeof createLineBuffer>): 
   // Spawns Node directly to bypass Windows .cmd shim execution restrictions without shell: true.
   const child = spawn(
     process.execPath,
-    [expoCli, "start", "--web", "--port", String(port), "--max-workers", "1"],
+    [expoCli, "start", "--web", "--port", String(port), "--max-workers", "2"],
     {
       cwd: appDir,
       env: {

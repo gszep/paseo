@@ -298,8 +298,10 @@ adds the real Metro/router/daemon path with a synthetic activated-backend adapte
 Its capability response must track the protocol it implements; omitting
 `deploymentInbox` intentionally selects the upgrade-required UI, not an empty feed.
 The fixture asserts repository-free inbox headers, scoped exact reads and no
-catalog discovery or read-marker writes. Metro uses one transform worker, leaving
-one worker slot for this browser run.
+catalog discovery or read-marker writes. Metro warmup bounds transformation to two
+workers and completes before Playwright starts; the local spec uses one browser
+worker. Keep the existing warmup deadline rather than serializing independent
+transforms or increasing the timeout.
 
 ## Running tests locally
 
