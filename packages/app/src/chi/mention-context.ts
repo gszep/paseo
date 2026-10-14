@@ -30,6 +30,7 @@ export function sameMentionContext(a: ChiMentionContext, b: ChiMentionContext) {
     a.actor === b.actor &&
     a.repo === b.repo &&
     a.generation === b.generation &&
+    a.deploymentInbox === b.deploymentInbox &&
     a.deployment === b.deployment
   );
 }

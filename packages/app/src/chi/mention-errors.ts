@@ -7,6 +7,8 @@ import {
 
 export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
+  if (code === "chi-mentions-http-503-deployment-inbox-not-ready")
+    return "Deployment-wide Mentions is not ready yet. The operator must complete the inbox migration before mentions can load. Reconnecting this host will not help.";
   // A repository that is drained or not yet provisioned rejects v3 writes with
   // the same fixed 503 category. This is a destination-side state, never a host
   // reconnect or a user credential problem, and repeated retries cannot succeed
@@ -47,6 +49,8 @@ export function mentionError(error: unknown): string {
     "chi-operation-unsupported":
       "This operation is not available in the v3 sync and mentions release.",
     "chi-mention-repository-required": "Choose a repository to read its mentions.",
+    "chi-deployment-inbox-backend-upgrade-required":
+      "Deployment-wide Mentions requires a backend update. No repository selection is needed; ask the operator to update the Chi backend.",
     "append-http-404":
       "This source is no longer available to the host identity. Sync stopped; the source will not be recreated.",
     "chi-operation-timeout": CHI_OPERATION_TIMEOUT_MESSAGE,

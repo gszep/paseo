@@ -20,7 +20,7 @@ export function useViewedHandoff(context: InboxContext, handoff: ChiHandoff) {
         result.handoff,
       );
       void cache.invalidateQueries({
-        queryKey: [...context.queryKey, "inbox", true, handoff.repo],
+        queryKey: [...context.queryKey, "inbox", true],
       });
     },
   });

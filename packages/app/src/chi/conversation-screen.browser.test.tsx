@@ -12,6 +12,8 @@ import {
 import { queryClient } from "@/data/query-client";
 import { ChiConversationScreen } from "./conversation-screen";
 import { loseHostMentionScopes } from "./use-mention-scope";
+import ChiRoute from "@/app/chi";
+import { SidebarMentionsRow } from "@/components/sidebar/sidebar-mentions-row";
 
 const fixture = vi.hoisted(() => ({
   supported: true,
@@ -19,9 +21,27 @@ const fixture = vi.hoisted(() => ({
   client: { chiMentions: vi.fn() },
   localCandidate: false,
   navigate: vi.fn(),
+  deploymentInbox: true,
+  params: { view: "inbox", repo: "", handoff: "", sourceIndex: "0" },
 }));
 vi.mock("expo-router", () => ({
-  router: { replace: fixture.navigate, back: fixture.navigate, canGoBack: () => false },
+  router: {
+    push: fixture.navigate,
+    replace: fixture.navigate,
+    back: fixture.navigate,
+    canGoBack: () => false,
+  },
+  useLocalSearchParams: () => fixture.params,
+  usePathname: () => "/chi",
+  useFocusEffect: () => {},
+}));
+vi.mock("@/components/host-route-bootstrap-boundary", () => ({
+  HostRouteBootstrapBoundary: ({ children }: { children: React.ReactNode }) => children,
+}));
+vi.mock("./continue-screen", () => ({ ChiContinueScreen: () => null }));
+vi.mock("@/constants/layout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/constants/layout")>()),
+  useIsCompactFormFactor: () => window.innerWidth < 500,
 }));
 vi.mock("@/components/headers/menu-header", () => ({ MenuHeader: () => null }));
 vi.mock("@/runtime/host-runtime", () => ({
@@ -43,7 +63,13 @@ function store() {
   return {
     sessions: {
       "shared-host": {
-        serverInfo: { features: { chiInboxActivity: true, chiPinnedTimeline: fixture.supported } },
+        serverInfo: {
+          features: {
+            chiInboxActivity: true,
+            chiDeploymentInbox: fixture.deploymentInbox,
+            chiPinnedTimeline: fixture.supported,
+          },
+        },
         agents: new Map(
           fixture.localCandidate
             ? [
@@ -85,6 +111,7 @@ const identity: ChiMentionContext = {
   deployment: "https://chi.invalid",
   generation: "a".repeat(64),
   evidenceVersion: 3,
+  deploymentInbox: true,
 };
 const pin = {
   v: 3 as const,
@@ -122,6 +149,9 @@ let delayed: Promise<void> | undefined;
 let currentIdentity: ChiMentionContext;
 let currentHandoff: ChiHandoff;
 let viewedDelay: Promise<void> | undefined;
+let selectedPin = pin;
+let inboxRows: ChiHandoff[] = [];
+let inboxError: string | undefined;
 
 beforeEach(() => {
   vi.stubGlobal("React", React);
@@ -129,7 +159,9 @@ beforeEach(() => {
   fixture.supported = true;
   fixture.connected = true;
   fixture.localCandidate = false;
-  fixture.navigate.mockClear();
+  fixture.deploymentInbox = true;
+  fixture.params = { view: "inbox", repo: "", handoff: "", sourceIndex: "0" };
+  fixture.navigate.mockReset();
   fixture.client = { chiMentions: vi.fn() };
   denied = undefined;
   transient = undefined;
@@ -137,6 +169,9 @@ beforeEach(() => {
   currentIdentity = identity;
   currentHandoff = handoff;
   viewedDelay = undefined;
+  selectedPin = pin;
+  inboxRows = [];
+  inboxError = undefined;
   fixture.client.chiMentions.mockImplementation(
     async ({ operation }: { operation: ChiMentionOperation }) => {
       const context = currentIdentity;
@@ -146,6 +181,19 @@ beforeEach(() => {
           accessLost: true,
           outcome: "unknown",
         });
+      if (operation.action === "inbox") {
+        expect(operation.repo).toBeUndefined();
+        if (inboxError) throw new Error(inboxError);
+        return {
+          kind: "inbox",
+          actor: context.actor,
+          context,
+          handoffs: inboxRows,
+          nextCursor: null,
+          unreadCount: inboxRows.filter((row) => !row.readAt).length,
+          unreadCountIsLowerBound: false,
+        };
+      }
       if (operation.action === "read")
         return { kind: "handoff", actor: context.actor, context, handoff: currentHandoff };
       if (operation.action === "viewed") {
@@ -160,11 +208,11 @@ beforeEach(() => {
       }
       if (operation.action !== "context")
         throw new Error(`Unexpected mutation or native operation: ${operation.action}`);
-      expect(operation.repo).toBe(pin.repo);
+      expect(operation.repo).toBe(selectedPin.repo);
       expect(operation.id).toBe(handoff.id);
-      expect(operation.cursor?.startsWith(`${pin.head}:`)).toBe(true);
+      expect(operation.cursor?.startsWith(`${selectedPin.head}:`)).toBe(true);
       const start = Number(operation.cursor!.split(":")[1]);
-      const end = Math.min(start + 8, pin.count);
+      const end = Math.min(start + 8, selectedPin.count);
       if (delayed) await delayed;
       if (transient)
         throw new ChiOperationError(transient, {
@@ -175,7 +223,7 @@ beforeEach(() => {
         kind: "context",
         actor: context.actor,
         context,
-        source: handoff.sources[0],
+        source: currentHandoff.sources[0],
         entries: Array.from({ length: end - start }, (_, n) => {
           const seq = start + n;
           return {
@@ -195,7 +243,7 @@ beforeEach(() => {
             ],
           };
         }),
-        nextCursor: end < pin.count ? `${pin.head}:${end}` : null,
+        nextCursor: end < selectedPin.count ? `${selectedPin.head}:${end}` : null,
       };
     },
   );
@@ -223,6 +271,154 @@ function render() {
 function target() {
   return container.querySelector<HTMLElement>('[data-testid="referenced-history-item"]');
 }
+
+function renderRoute() {
+  root.render(
+    <QueryClientProvider client={queryClient}>
+      <ChiRoute />
+    </QueryClientProvider>,
+  );
+}
+
+test.each([390, 1280])(
+  "sidebar to cross-repository mentions to exact conversation and back at %spx",
+  async (width) => {
+    await page.viewport(width, 900);
+    expect(window.innerWidth).toBe(width);
+    const secondPin = { ...pin, repo: "github:fixture/second", head: "c".repeat(64) };
+    const second: ChiHandoff = {
+      ...handoff,
+      repo: secondPin.repo,
+      text: "Second repository mention",
+      workspaceName: "Second workspace",
+      sources: [
+        {
+          kind: "neutral",
+          id: secondPin.sourceId,
+          snapshot: secondPin.head,
+          entryId: "27",
+          appendRef: { pin: secondPin, seq: 27 },
+        },
+      ],
+    };
+    inboxRows = [handoff, second];
+    fixture.navigate.mockImplementation(({ params }) => {
+      fixture.params = params;
+      if (params.view === "conversation") {
+        currentHandoff = inboxRows.find(
+          (row) => row.repo === params.repo && row.id === params.handoff,
+        )!;
+        selectedPin = params.repo === pin.repo ? pin : secondPin;
+      }
+      renderRoute();
+    });
+    act(() => root.render(<SidebarMentionsRow />));
+    await click("Mentions");
+    await expect
+      .poll(() => container.querySelectorAll('[data-testid^="mention-row-"]').length)
+      .toBe(2);
+    await page.screenshot({ path: `../../.vitest-screenshots/flat-mentions-${width}.png` });
+    for (const row of inboxRows) {
+      await expect
+        .poll(() => container.querySelectorAll('[data-testid^="mention-row-"]').length)
+        .toBe(2);
+      expect(container.textContent).not.toContain("Choose repository");
+      expect(container.textContent).not.toContain("Choose a repository");
+      const open = container.querySelector<HTMLElement>(`[aria-label="Open mention ${row.text}"]`)!;
+      await act(async () => {
+        await userEvent.click(open);
+      });
+      expect(fixture.navigate).toHaveBeenLastCalledWith({
+        pathname: "/chi",
+        params: { view: "conversation", repo: row.repo, handoff: row.id, sourceIndex: "0" },
+      });
+      await expect.poll(() => target()?.textContent).toContain("Exact target mention");
+      await expect
+        .poll(() => {
+          const rect = target()!.getBoundingClientRect();
+          const viewport = container
+            .querySelector('[data-testid="agent-chat-scroll"]')!
+            .getBoundingClientRect();
+          return rect.top >= viewport.top - 1 && rect.bottom <= viewport.bottom + 1;
+        })
+        .toBe(true);
+      expect(container.textContent).toContain("Read-only shared snapshot");
+      await page.screenshot({
+        path: `../../.vitest-screenshots/flat-mentions-conversation-${width}-${row.repo.split("/").at(-1)}.png`,
+      });
+      await click("Back to mentions");
+    }
+    await expect
+      .poll(() => container.querySelectorAll('[data-testid^="mention-row-"]').length)
+      .toBe(2);
+    expect(new Set(fixture.client.chiMentions.mock.calls.map(([r]) => r.operation.action))).toEqual(
+      new Set(["scope", "inbox", "read", "context"]),
+    );
+    expect(
+      fixture.client.chiMentions.mock.calls
+        .filter(([r]) => r.operation.action === "scope")
+        .every(([r]) => r.operation.includeRepositories === false),
+    ).toBe(true);
+  },
+);
+
+test.each(["old-host", "old-backend", "unready"] as const)(
+  "flat route fails explicitly without repository fallback: %s",
+  async (mode) => {
+    fixture.deploymentInbox = mode !== "old-host";
+    currentIdentity = { ...identity, deploymentInbox: mode !== "old-backend" };
+    if (mode === "unready") inboxError = "chi-mentions-http-503-deployment-inbox-not-ready";
+    act(renderRoute);
+    const expected = {
+      "old-host": "Connect or update a host",
+      "old-backend": "backend update",
+      unready: "complete the inbox migration",
+    };
+    await expect.poll(() => container.textContent).toContain(expected[mode]);
+    expect(container.querySelector('[data-testid="inbox-repo-filter-trigger"]')).toBeNull();
+    expect(container.textContent).not.toContain("Choose a repository");
+    expect(
+      fixture.client.chiMentions.mock.calls.filter(([r]) => r.operation.action === "inbox"),
+    ).toHaveLength(mode === "unready" ? 1 : 0);
+  },
+);
+
+test("first-view CAS invalidates the deployment feed, not only the selected repository", async () => {
+  currentHandoff = { ...handoff, readAt: undefined };
+  inboxRows = [currentHandoff];
+  fixture.navigate.mockImplementation(({ params }) => {
+    fixture.params = params;
+    renderRoute();
+  });
+  act(renderRoute);
+  await expect
+    .poll(() => container.querySelectorAll('[data-testid^="mention-row-"]').length)
+    .toBe(1);
+  const feed = queryClient
+    .getQueryCache()
+    .getAll()
+    .find((query) => query.queryKey.includes("inbox") && !query.queryKey.includes("older"))!;
+  expect(feed.queryKey.at(-1)).toBeUndefined();
+  expect(
+    fixture.client.chiMentions.mock.calls.filter(([r]) => r.operation.action === "viewed"),
+  ).toHaveLength(0);
+  await act(async () => {
+    await userEvent.click(
+      container.querySelector<HTMLElement>(`[aria-label="Open mention ${handoff.text}"]`)!,
+    );
+  });
+  await expect.poll(() => feed.state.isInvalidated).toBe(true);
+  const viewed = fixture.client.chiMentions.mock.calls.filter(
+    ([r]) => r.operation.action === "viewed",
+  );
+  expect(viewed).toHaveLength(1);
+  expect(viewed[0]![0].operation).toEqual({
+    action: "viewed",
+    repo: handoff.repo,
+    id: handoff.id,
+    revision: handoff.revision,
+  });
+});
 function protectedData() {
   return queryClient
     .getQueryCache()

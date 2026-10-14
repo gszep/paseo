@@ -1,4 +1,4 @@
-import type { ChiHandoff, ChiMentionContext } from "@getpaseo/protocol/chi-mentions";
+import type { ChiHandoff } from "@getpaseo/protocol/chi-mentions";
 
 /** Sentinel for "no repository narrowing"; never a real repository id. */
 export const ALL_REPOSITORIES_OPTION_ID = "__all_repositories__";
@@ -65,19 +65,4 @@ export function buildInboxRows(handoffs: readonly ChiHandoff[]): InboxListRow[] 
 /** Historical mentions may predate workspace labels. Keep their repository identifiable. */
 export function inboxWorkspaceName(handoff: ChiHandoff): string {
   return handoff.workspaceName || repositoryLabel(handoff.repo).split("/").at(-1)!;
-}
-
-export function inboxRepositoryOptions(context: ChiMentionContext, catalog?: string[]): string[] {
-  return (
-    catalog ??
-    context.repositories ??
-    (context.defaultRepository ? [context.defaultRepository] : [])
-  );
-}
-
-export function defaultInboxRepository(
-  context: ChiMentionContext,
-  repositories: string[],
-): string | undefined {
-  return context.defaultRepository ?? (repositories.length === 1 ? repositories[0] : undefined);
 }

@@ -7,6 +7,15 @@ const SECRET_COPY =
 const SCANNER_COPY =
   "The secret scanner is unavailable on this host. Check the pinned Gitleaks installation, then retry sync.";
 
+test("deployment inbox readiness is distinct from host or backend capability", () => {
+  expect(mentionError(new Error("chi-mentions-http-503-deployment-inbox-not-ready"))).toBe(
+    "Deployment-wide Mentions is not ready yet. The operator must complete the inbox migration before mentions can load. Reconnecting this host will not help.",
+  );
+  expect(mentionError(new Error("chi-deployment-inbox-backend-upgrade-required"))).toContain(
+    "backend update",
+  );
+});
+
 test("an uncertain saved send explains retained proof rather than suggesting reconnect", () => {
   expect(mentionError(new Error("agent_request_outcome_unknown"))).toBe(
     "The host could not verify whether this saved message was accepted. Its receipt is retained to prevent a duplicate. Reconnecting alone will not resolve it; recovery requires the original message in the provider's history.",
