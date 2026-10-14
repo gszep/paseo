@@ -29,19 +29,36 @@ interface Mounted {
 
 const mounted: Mounted[] = [];
 
-function mountFilter(): HTMLDivElement {
+function ControlledFilter() {
+  const [selected, select] = React.useState(ALL_REPOSITORIES_OPTION_ID);
+  return (
+    <RepositoryFilter
+      repositories={["github:acme/one", "github:acme/two"]}
+      selected={selected}
+      onSelect={select}
+      triggerTestID="inbox-repo-filter-trigger"
+      optionTestID={repoOptionTestID}
+    />
+  );
+}
+
+function mountFilter(controlled = false): HTMLDivElement {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() =>
     root.render(
-      <RepositoryFilter
-        repositories={["github:acme/one", "github:acme/two"]}
-        selected={ALL_REPOSITORIES_OPTION_ID}
-        onSelect={noopSelect}
-        triggerTestID="inbox-repo-filter-trigger"
-        optionTestID={repoOptionTestID}
-      />,
+      controlled ? (
+        <ControlledFilter />
+      ) : (
+        <RepositoryFilter
+          repositories={["github:acme/one", "github:acme/two"]}
+          selected={ALL_REPOSITORIES_OPTION_ID}
+          onSelect={noopSelect}
+          triggerTestID="inbox-repo-filter-trigger"
+          optionTestID={repoOptionTestID}
+        />
+      ),
     ),
   );
   mounted.push({ root, container });
@@ -69,7 +86,7 @@ describe("RepositoryFilter", () => {
       const container = mountFilter();
       const trigger = container.querySelector('[data-testid="inbox-repo-filter-trigger"]');
       expect(trigger).toBeInstanceOf(HTMLElement);
-      expect(trigger?.textContent).toContain("Choose repository");
+      expect(trigger?.textContent).toContain("All repositories");
       expect(document.querySelector('[data-testid="combobox-desktop-container"]')).toBeNull();
     },
   );
@@ -85,5 +102,35 @@ describe("RepositoryFilter", () => {
     expect(
       document.querySelector('[data-testid="inbox-repo-filter-item-github:acme/one"]'),
     ).not.toBeNull();
+    expect(
+      document.querySelector(
+        `[data-testid="inbox-repo-filter-item-${ALL_REPOSITORIES_OPTION_ID}"]`,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("selects a loaded repository and returns to all repositories", async () => {
+    compact.value = false;
+    const container = mountFilter(true);
+    const trigger = () =>
+      container.querySelector<HTMLElement>('[data-testid="inbox-repo-filter-trigger"]')!;
+    act(() => trigger().click());
+    await nextFrame();
+    act(() =>
+      document
+        .querySelector<HTMLElement>('[data-testid="inbox-repo-filter-item-github:acme/two"]')!
+        .click(),
+    );
+    expect(trigger().textContent).toContain("acme/two");
+    act(() => trigger().click());
+    await nextFrame();
+    act(() =>
+      document
+        .querySelector<HTMLElement>(
+          `[data-testid="inbox-repo-filter-item-${ALL_REPOSITORIES_OPTION_ID}"]`,
+        )!
+        .click(),
+    );
+    expect(trigger().textContent).toContain("All repositories");
   });
 });

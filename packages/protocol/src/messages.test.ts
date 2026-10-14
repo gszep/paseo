@@ -330,6 +330,23 @@ describe("agent detach RPC", () => {
     expect(parsed.features?.agentDetach).toBe(true);
   });
 
+  test("deployment inbox capability is additive for new and old hosts", () => {
+    expect(
+      parseServerInfoStatusPayload({
+        status: "server_info",
+        serverId: "srv-test",
+        features: { chiDeploymentInbox: true },
+      })?.features?.chiDeploymentInbox,
+    ).toBe(true);
+    expect(
+      parseServerInfoStatusPayload({
+        status: "server_info",
+        serverId: "srv-test",
+        features: { chiInboxActivity: true },
+      })?.features?.chiDeploymentInbox,
+    ).toBeUndefined();
+  });
+
   test("parses the workspace-targeted session import feature gate", () => {
     const parsed = parseServerInfoStatusPayload({
       status: "server_info",

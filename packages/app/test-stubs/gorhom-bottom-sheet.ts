@@ -11,6 +11,10 @@ export const BottomSheetBackdrop = Stub;
 export const BottomSheetScrollView = PassThrough;
 export const BottomSheetView = PassThrough;
 export const BottomSheetTextInput = Stub;
+export const BottomSheetFlatList = Stub;
+export function useBottomSheetModalInternal() {
+  throw new Error("Browser component fixtures do not own a native bottom sheet");
+}
 
 // The app imports the internal layout values to compute the visible sheet body. Browser unit tests
 // never render the native sheet, but Vite still validates this module's export surface.

@@ -30,7 +30,26 @@ export function sameMentionContext(a: ChiMentionContext, b: ChiMentionContext) {
     a.actor === b.actor &&
     a.repo === b.repo &&
     a.generation === b.generation &&
+    a.deploymentInbox === b.deploymentInbox &&
     a.deployment === b.deployment
+  );
+}
+
+/** Refresh matching recipient feeds across transports, without sharing their
+ * credential generations or scope lifetimes. Every observer reauthorizes itself. */
+export function isDeploymentInboxQuery(key: readonly unknown[], context: ChiMentionContext) {
+  const [kind, , workspace, actor, repo, , deployment, , resource, received, filter] = key;
+  return (
+    Boolean(context.deployment) &&
+    key.length >= 11 &&
+    kind === "chi-mentions" &&
+    workspace === "" &&
+    actor === context.actor &&
+    repo === "*" &&
+    deployment === context.deployment &&
+    resource === "inbox" &&
+    received === true &&
+    filter === undefined
   );
 }
 

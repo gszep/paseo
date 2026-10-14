@@ -83,6 +83,14 @@ test("keeps one flat chronological list and drops page overlaps", () => {
   expect(rows[0]).toMatchObject({ handoff: newer });
 });
 
+test("keeps identical handoff IDs in different repositories as separate rows", () => {
+  const otherRepository = { ...newer, repo: older.repo };
+  expect(buildInboxRows([newer, otherRepository, newer]).map((row) => row.key)).toEqual([
+    `${newer.repo}/${newer.id}`,
+    `${otherRepository.repo}/${newer.id}`,
+  ]);
+});
+
 test("uses the workspace name and keeps historical rows identifiable", () => {
   const named = { ...newer, workspaceName: "Release planning" };
   expect(inboxWorkspaceName(named)).toBe("Release planning");

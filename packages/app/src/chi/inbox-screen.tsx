@@ -25,13 +25,7 @@ import { findHighlightRanges } from "@/components/ui/highlighted-text-segments";
 import { formatTimeAgo } from "@/utils/time";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { mentionError } from "./mention-errors";
-import {
-  useInbox,
-  useInboxTransport,
-  useInboxCatalog,
-  useInboxReader,
-  type InboxContext,
-} from "./use-inbox";
+import { useInbox, useInboxTransport, useInboxReader, type InboxContext } from "./use-inbox";
 import { useViewedHandoff } from "./use-viewed-handoff";
 import { RepositoryFilter } from "./repository-filter";
 import { inboxDetailQueryOptions } from "./inbox-query";
@@ -42,8 +36,7 @@ import {
   filterInboxHandoffs,
   repositoryLabel,
   inboxWorkspaceName,
-  inboxRepositoryOptions,
-  defaultInboxRepository,
+  inboxRepositories,
   type InboxListRow,
 } from "./inbox-model";
 
@@ -58,14 +51,11 @@ function LoadingMore() {
 }
 function InboxReadStatus({
   query,
-  repo,
   refresh,
 }: {
   query: ReturnType<typeof useInbox>;
-  repo: string | undefined;
   refresh(): void;
 }) {
-  if (!repo) return <Text style={styles.empty}>Choose a repository to read its mentions.</Text>;
   if (query.isError)
     return (
       <Alert
@@ -96,7 +86,7 @@ function ChoiceButton({
 }
 
 export function ChiInboxScreen() {
-  const transport = useInboxReader();
+  const transport = useInboxReader({ deploymentInbox: true });
   const { scope, state, host } = transport;
   const retry = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   const { context } = transport;
@@ -123,7 +113,14 @@ export function ChiInboxScreen() {
           <Button onPress={retry}>Verify mention context</Button>
         </Alert>
       ) : null}
-      {host && context && !state.loading ? (
+      {host && context && !state.loading && !context.identity.deploymentInbox ? (
+        <Alert
+          variant="info"
+          title="Mentions unavailable"
+          description={mentionError(new Error("chi-deployment-inbox-backend-upgrade-required"))}
+        />
+      ) : null}
+      {host && context?.identity.deploymentInbox && !state.loading ? (
         <Inbox key={`${host}/${state.generation}`} transport={transport} context={context} />
       ) : null}
     </View>
@@ -155,15 +152,10 @@ function Inbox({
       setScrolledDown(event.nativeEvent.contentOffset.y > 0),
     [],
   );
-  const catalog = useInboxCatalog(transport);
-  const repositories = inboxRepositoryOptions(context.identity, catalog.data);
-  const defaultRepo = defaultInboxRepository(context.identity, repositories);
-  const selectedRepo = repository === ALL_REPOSITORIES_OPTION_ID ? defaultRepo : repository;
   // The recipient inbox shares its first page with the sidebar badge.
   const query = useInbox(transport, {
     paused: scrolledDown,
     autoContinue: true,
-    repo: selectedRepo,
   });
   const loaded = useMemo(
     () => (query.data?.pages ?? []).flatMap((page) => page.handoffs),
@@ -173,6 +165,7 @@ function Inbox({
     () => filterInboxHandoffs(loaded, { search: searchInput, repository }),
     [loaded, searchInput, repository],
   );
+  const repositories = useMemo(() => inboxRepositories(loaded), [loaded]);
   const rows = useMemo(() => buildInboxRows(filtered), [filtered]);
   const { fetchNextPage, hasNextPage, isFetching } = query;
   const refresh = useCallback(
@@ -198,12 +191,12 @@ function Inbox({
         handoff={item.handoff}
         search={searchInput}
         unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
-        selected={selected?.id === item.handoff.id}
+        selected={selected?.id === item.handoff.id && selected?.repo === item.handoff.repo}
         onSelect={choose}
         onDiscuss={discuss}
       />
     ),
-    [searchInput, selected?.id, choose, discuss, context.identity.actor],
+    [searchInput, selected?.id, selected?.repo, choose, discuss, context.identity.actor],
   );
   const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
   const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
@@ -220,24 +213,22 @@ function Inbox({
             testID="inbox-search-input"
             clearTestID="inbox-search-clear"
           />
-          <RepositoryFilter
-            repositories={repositories}
-            selected={selectedRepo ?? ALL_REPOSITORIES_OPTION_ID}
-            onSelect={setRepository}
-            triggerTestID="inbox-repo-filter-trigger"
-            optionTestID={repositoryOptionTestID}
-          />
+          {repositories.length > 1 || repository !== ALL_REPOSITORIES_OPTION_ID ? (
+            <RepositoryFilter
+              repositories={repositories}
+              selected={repository}
+              onSelect={setRepository}
+              triggerTestID="inbox-repo-filter-trigger"
+              optionTestID={repositoryOptionTestID}
+            />
+          ) : null}
         </View>
         <Text style={styles.identity} testID="inbox-identity">
           Signed in as @{context.identity.actor.slice(7)}
         </Text>
-        {catalog.isError ? (
-          <Text accessibilityRole="alert" style={styles.hint}>
-            Repository filter unavailable. {mentionError(catalog.error)}
-          </Text>
-        ) : null}
+        {isFiltered ? <Text style={styles.hint}>Filtering loaded mentions</Text> : null}
       </View>
-      <InboxReadStatus query={query} repo={selectedRepo} refresh={refresh} />
+      <InboxReadStatus query={query} refresh={refresh} />
       {query.data && !query.isError ? (
         <View style={compact ? styles.screen : styles.split}>
           {!compact || !selected ? (
@@ -281,7 +272,7 @@ function Inbox({
   );
 }
 
-/** A workspace-led activity row, with the same readable preview on every screen size. */
+/** Context stays secondary to the sender and message; opening never requires a local workspace. */
 function InboxRow({
   handoff,
   search,
@@ -339,8 +330,8 @@ function InboxRow({
         <View style={styles.rowContent}>
           <View style={styles.rowTitleRow}>
             <HighlightedText
-              text={workspace}
-              ranges={ranges.workspace}
+              text={handle}
+              ranges={ranges.handle}
               style={styles.rowHandle}
               numberOfLines={1}
             />
@@ -355,8 +346,8 @@ function InboxRow({
           </View>
           <View style={styles.rowMetaRow}>
             <HighlightedText
-              text={handle}
-              ranges={ranges.handle}
+              text={workspace}
+              ranges={ranges.workspace}
               style={styles.rowMetaText}
               numberOfLines={1}
             />

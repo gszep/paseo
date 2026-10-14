@@ -1112,13 +1112,70 @@ describe.skipIf(process.platform === "win32")(
       await rejection;
     });
 
-    it("deployment inbox requires a repository and authorizes even candidates absent from the catalog", async () => {
+    it("deployment capability permits a header-free bounded inbox without catalog discovery", async () => {
+      const f = await mapped();
+      f.backend.capabilities = {
+        appendLog: { v: 3, deployment: "fixture" },
+        handoffs: { v: 3, references: "pin-seq" },
+        deploymentInbox: { v: 3 },
+      };
+      const scope = await f.connection.inboxOperation({
+        action: "scope",
+        includeRepositories: false,
+      });
+      expect(scope.context.deploymentInbox).toBe(true);
+      f.request.mockClear();
+      f.request.mockImplementation(async (url, init) => {
+        const target = new URL(String(url));
+        if (target.pathname === "/repos") throw new Error("unexpected catalog read");
+        if (target.pathname === "/handoffs/inbox") {
+          expect(new Headers(init?.headers).has("x-chi-repo")).toBe(false);
+          expect(target.searchParams.get("cursor")).toBe("opaque-cursor");
+          expect(target.searchParams.get("inbox")).toBe("received");
+          return Response.json({
+            handoffs: [],
+            nextCursor: "next",
+            unreadCount: 0,
+            unreadCountLowerBound: true,
+          });
+        }
+        return f.serve(url, init);
+      });
+      const result = await f.connection.inboxOperation(
+        { action: "inbox", inbox: true, cursor: "opaque-cursor" },
+        scope.context,
+      );
+      expect(result.result).toMatchObject({
+        kind: "inbox",
+        handoffs: [],
+        nextCursor: "next",
+        unreadCountIsLowerBound: true,
+      });
+      expect(f.request.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/auth/session",
+        "/handoffs/inbox",
+        "/auth/session",
+      ]);
+      f.request.mockImplementation(async (url, init) => {
+        if (new URL(String(url)).pathname === "/handoffs/inbox")
+          return Response.json(
+            { ok: false, reason: "deployment-inbox-not-ready" },
+            { status: 503 },
+          );
+        return f.serve(url, init);
+      });
+      await expect(
+        f.connection.inboxOperation({ action: "inbox", inbox: true }, scope.context),
+      ).rejects.toThrow("chi-mentions-http-503-deployment-inbox-not-ready");
+    });
+
+    it("old backends require an upgrade for deployment inbox and still authorize scoped reads", async () => {
       const f = await mapped();
       const scope = await f.connection.inboxOperation({ action: "scope" });
       expect(scope.context.repositories).toEqual([f.input.repo]);
       await expect(
         f.connection.inboxOperation({ action: "inbox", inbox: true }, scope.context),
-      ).rejects.toThrow("chi-mention-repository-required");
+      ).rejects.toThrow("chi-deployment-inbox-backend-upgrade-required");
       f.request.mockImplementation(async (url, init) => {
         if (new URL(String(url)).pathname === "/handoffs/inbox") {
           expect(new Headers(init?.headers).get("x-chi-repo")).toBe("github:foreign/repo");

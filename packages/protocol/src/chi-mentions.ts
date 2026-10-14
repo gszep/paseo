@@ -13,6 +13,7 @@ export const ChiMentionContextSchema = z.object({
   evidenceVersion: z.literal(3).optional(),
   repositories: z.array(id).optional(),
   defaultRepository: id.optional(),
+  deploymentInbox: z.boolean().optional(),
 });
 export type ChiMentionContext = z.infer<typeof ChiMentionContextSchema>;
 export const ChiFailureSchema = z.object({

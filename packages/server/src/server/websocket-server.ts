@@ -1695,6 +1695,7 @@ export class VoiceAssistantWebSocketServer {
         chiAppendV3: this.agentManager.chi !== null && supportsAppendCapture(),
         chiPinnedTimeline: this.agentManager.chi !== null && supportsAppendCapture(),
         chiInboxActivity: this.agentManager.chi !== null && supportsAppendCapture(),
+        chiDeploymentInbox: this.agentManager.chi !== null && supportsAppendCapture(),
         chiMentions: false,
         chiInbox: false,
         chiCanonical: false,
