@@ -225,8 +225,11 @@ fields and adds an optional `appendRef`; those display strings never reconstruct
 backend authority. V3 requests send the actual `{pin,seq}` reference.
 
 Recipient first view saves `readAt` without acknowledging work. The affected
-deployment inbox then refreshes from the server rather than patching unread counts
-locally. This existing first-view receipt is the only write
+deployment inbox then refreshes across matching actor/deployment host transports,
+including when the preferred conversation host differs from the inbox-capable host.
+Invalidation never merges credential-generation or scope keys: every observer
+reauthorizes through its own scope rather than receiving copied unread counts.
+This existing first-view receipt is the only write
 associated with opening an unread recipient item; evidence and runtime access are
 read-only. Already-read opening performs no marker mutation. Context browsing
 retains the full frozen pin; Continue and reply controls are absent in this MVP.

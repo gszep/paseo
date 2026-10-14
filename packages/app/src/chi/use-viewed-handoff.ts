@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ChiHandoff } from "@getpaseo/protocol/chi-mentions";
 import type { InboxContext } from "./use-inbox";
+import { isDeploymentInboxQuery } from "./mention-context";
 
 export function useViewedHandoff(context: InboxContext, handoff: ChiHandoff) {
   const cache = useQueryClient();
@@ -20,7 +21,7 @@ export function useViewedHandoff(context: InboxContext, handoff: ChiHandoff) {
         result.handoff,
       );
       void cache.invalidateQueries({
-        queryKey: [...context.queryKey, "inbox", true],
+        predicate: ({ queryKey }) => isDeploymentInboxQuery(queryKey, context.identity),
       });
     },
   });

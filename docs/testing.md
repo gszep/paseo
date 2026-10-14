@@ -268,6 +268,39 @@ Codex MultiAgentV2 real tests use local Codex authentication rather than the Ope
 - Server: `packages/server/src/test-utils/vitest-setup.ts` loads `.env.test`, sets `PASEO_SUPERVISED=0`, and disables Git/SSH prompts. Add new global env shims here, not in individual tests.
 - App: `packages/app/vitest.setup.ts` provides `expo`/`__DEV__` shims and stubs a few native-only modules (`react-native-unistyles`, `react-native-svg`, `expo-linking`, `@xterm/addon-ligatures`). Stubbing here is for modules that have no meaningful Node behavior — not a license to mock app code.
 
+Browser dependency scanning runs before Vitest's per-file mocks. Keep the named
+exports in `packages/app/test-stubs/` complete for the static import graph, including
+mocked route dependencies. Missing exports abort the cold scan and cause late
+optimization/reloads during tests; a warmed `.vite` cache can conceal that failure.
+Do not suppress scan errors, disable discovery or increase timeouts to cover it.
+React and React DOM must resolve through the checkout-local aliases in
+`packages/app/vitest.config.ts`, not another checkout's installed dependencies.
+
+For a clean Mentions browser reproduction, use a fresh isolated checkout with
+its own frozen install, then run the existing commands from its root:
+
+```sh
+npm ci --no-audit --no-fund
+GOMAXPROCS=1 npm run build:app-deps
+GOMAXPROCS=1 npm run test:browser --workspace=@getpaseo/app -- \
+  src/chi/conversation-screen.browser.test.tsx \
+  src/chi/inbox-coverage.browser.test.tsx \
+  src/chi/repository-filter.browser.test.tsx --maxWorkers=1
+```
+
+Preserve failing logs and cache metadata before any repeat. A cold-cache pass
+must show neither failed scanning nor unexpected test reloads; warm-only success
+does not establish clean-install acceptance. These synthetic browser tests do not
+authenticate to live Chi or replace the separate native-device/real-account gate.
+
+`npm run test:e2e --workspace=@getpaseo/app -- e2e/browser/chi-inbox.spec.ts --workers=1`
+adds the real Metro/router/daemon path with a synthetic activated-backend adapter.
+Its capability response must track the protocol it implements; omitting
+`deploymentInbox` intentionally selects the upgrade-required UI, not an empty feed.
+The fixture asserts repository-free inbox headers, scoped exact reads and no
+catalog discovery or read-marker writes. Metro uses one transform worker, leaving
+one worker slot for this browser run.
+
 ## Running tests locally
 
 Test suites in this repo are heavy. Running them in bulk freezes the machine, especially with multiple agents in parallel.

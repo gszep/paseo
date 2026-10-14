@@ -14,6 +14,7 @@ import { ChiConversationScreen } from "./conversation-screen";
 import { loseHostMentionScopes } from "./use-mention-scope";
 import ChiRoute from "@/app/chi";
 import { SidebarMentionsRow } from "@/components/sidebar/sidebar-mentions-row";
+import { mentionQueryKey } from "./mention-context";
 
 const fixture = vi.hoisted(() => ({
   supported: true,
@@ -22,6 +23,7 @@ const fixture = vi.hoisted(() => ({
   localCandidate: false,
   navigate: vi.fn(),
   deploymentInbox: true,
+  mixedHosts: false,
   params: { view: "inbox", repo: "", handoff: "", sourceIndex: "0" },
 }));
 vi.mock("expo-router", () => ({
@@ -44,14 +46,32 @@ vi.mock("@/constants/layout", async (importOriginal) => ({
   useIsCompactFormFactor: () => window.innerWidth < 500,
 }));
 vi.mock("@/components/headers/menu-header", () => ({ MenuHeader: () => null }));
+const feedClient = {
+  async chiMentions(request: { operation: ChiMentionOperation }) {
+    const result = await fixture.client.chiMentions(request);
+    return {
+      ...result,
+      context: { ...result.context, generation: "b".repeat(64), deploymentInbox: true },
+    };
+  },
+};
 vi.mock("@/runtime/host-runtime", () => ({
-  useHosts: () => [{ serverId: "shared-host" }],
+  useHosts: () =>
+    fixture.mixedHosts
+      ? [{ serverId: "shared-host" }, { serverId: "feed-host" }]
+      : [{ serverId: "shared-host" }],
   useHostRuntimeConnectionStatuses: () =>
-    new Map([["shared-host", fixture.connected ? "online" : "offline"]]),
-  useHostRuntimeClient: (id: string) => (id ? fixture.client : null),
+    new Map([
+      ["shared-host", fixture.connected ? "online" : "offline"],
+      ["feed-host", "online"],
+    ]),
+  useHostRuntimeClient: (id: string) => {
+    if (id === "feed-host") return feedClient;
+    return id ? fixture.client : null;
+  },
   getHostRuntimeStore: () => ({
-    getSnapshot: () => ({
-      client: fixture.client,
+    getSnapshot: (id: string) => ({
+      client: id === "feed-host" ? feedClient : fixture.client,
       connectionStatus: fixture.connected ? "online" : "offline",
     }),
   }),
@@ -87,6 +107,12 @@ function store() {
               ]
             : [],
         ),
+      },
+      "feed-host": {
+        serverInfo: {
+          features: { chiInboxActivity: true, chiDeploymentInbox: true, chiPinnedTimeline: true },
+        },
+        agents: new Map(),
       },
     },
   };
@@ -160,6 +186,7 @@ beforeEach(() => {
   fixture.connected = true;
   fixture.localCandidate = false;
   fixture.deploymentInbox = true;
+  fixture.mixedHosts = false;
   fixture.params = { view: "inbox", repo: "", handoff: "", sourceIndex: "0" };
   fixture.navigate.mockReset();
   fixture.client = { chiMentions: vi.fn() };
@@ -255,6 +282,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   loseHostMentionScopes("shared-host");
+  loseHostMentionScopes("feed-host");
   queryClient.clear();
   focusManager.setFocused(undefined);
   container.remove();
@@ -383,7 +411,10 @@ test.each(["old-host", "old-backend", "unready"] as const)(
   },
 );
 
-test("first-view CAS invalidates the deployment feed, not only the selected repository", async () => {
+test("first-view through a preferred older host invalidates only matching deployment feeds on the newer host", async () => {
+  fixture.mixedHosts = true;
+  fixture.deploymentInbox = false;
+  currentIdentity = { ...identity, deploymentInbox: false };
   currentHandoff = { ...handoff, readAt: undefined };
   inboxRows = [currentHandoff];
   fixture.navigate.mockImplementation(({ params }) => {
@@ -398,6 +429,43 @@ test("first-view CAS invalidates the deployment feed, not only the selected repo
     .getQueryCache()
     .getAll()
     .find((query) => query.queryKey.includes("inbox") && !query.queryKey.includes("older"))!;
+  expect(feed.queryKey[1]).toBe("feed-host");
+  expect(feed.queryKey[5]).toBe("b".repeat(64));
+  const unrelated = [
+    [
+      ...mentionQueryKey("other-actor", "", {
+        error: null,
+        generation: 1,
+        context: { ...identity, actor: "github:other" },
+      }),
+      "inbox",
+      true,
+      undefined,
+    ],
+    [
+      ...mentionQueryKey("other-deployment", "", {
+        error: null,
+        generation: 1,
+        context: { ...identity, deployment: "https://other.invalid" },
+      }),
+      "inbox",
+      true,
+      undefined,
+    ],
+    [
+      ...mentionQueryKey("workspace", "local", { generation: 1, context: identity, error: null }),
+      "inbox",
+      true,
+      undefined,
+    ],
+    [
+      ...mentionQueryKey("scoped", "", { generation: 1, context: identity, error: null }),
+      "inbox",
+      true,
+      pin.repo,
+    ],
+  ];
+  for (const key of unrelated) queryClient.setQueryData(key, { protected: "unrelated" });
   expect(feed.queryKey.at(-1)).toBeUndefined();
   expect(
     fixture.client.chiMentions.mock.calls.filter(([r]) => r.operation.action === "viewed"),
@@ -418,6 +486,17 @@ test("first-view CAS invalidates the deployment feed, not only the selected repo
     id: handoff.id,
     revision: handoff.revision,
   });
+  expect(viewed[0]![0].expectedContext.generation).toBe(identity.generation);
+  expect(
+    queryClient
+      .getQueryCache()
+      .getAll()
+      .find((query) => query.queryKey.includes("handoff"))?.queryKey[1],
+  ).toBe("shared-host");
+  for (const key of unrelated) {
+    expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+    expect(queryClient.getQueryData(key)).toEqual({ protected: "unrelated" });
+  }
 });
 function protectedData() {
   return queryClient

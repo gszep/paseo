@@ -4,7 +4,7 @@ import { z } from "zod";
 import { buildSeededHost } from "../support/helpers/daemon-registry";
 import { spawnTsx, killProcessTree } from "../support/helpers/spawn-node";
 
-test("workspace activity previews load before the catalog on desktop and mobile web", async ({
+test("deployment activity previews load without repository selection or catalog on desktop and mobile web", async ({
   browser,
 }, testInfo) => {
   test.setTimeout(180_000);
@@ -60,6 +60,11 @@ test("workspace activity previews load before the catalog on desktop and mobile 
         await expect(
           page.getByTestId("chi-flat-inbox").locator('[data-testid^="mention-row-"]'),
         ).toHaveCount(3);
+        await expect(page.getByText("fixture/activity-1", { exact: true })).toBeVisible();
+        await expect(page.getByText("fixture/activity-2", { exact: true })).toBeVisible();
+        await expect(
+          page.getByText("Choose a repository to read its mentions.", { exact: true }),
+        ).toHaveCount(0);
         const preview = page.getByTestId("mention-preview-00000000-0000-4000-8000-000000000000");
         await expect(preview).toBeVisible();
         const geometry = await preview.evaluate((element) => ({
@@ -79,7 +84,7 @@ test("workspace activity previews load before the catalog on desktop and mobile 
     }
     const stopped = new Promise<unknown>((resolve) => child.once("message", resolve));
     child.send("close");
-    expect(await stopped).toEqual({ mutations: [] });
+    expect(await stopped).toEqual({ mutations: [], catalogReads: 0 });
   } finally {
     await killProcessTree(child);
   }
@@ -105,25 +110,30 @@ test("a shared mention opens a pinned normal conversation without a checkout, an
     diagnostics = (diagnostics + String(chunk)).slice(-8000);
   });
   const control = (action: string) =>
-    new Promise<{ action: string; mutations: string[]; pageStarts: number[]; agents: number }>(
-      (resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`Fixture ${action} timed out`)), 10000);
-        child.once("message", (value) => {
-          clearTimeout(timer);
-          resolve(
-            z
-              .object({
-                action: z.string(),
-                mutations: z.array(z.string()),
-                pageStarts: z.array(z.number()),
-                agents: z.number(),
-              })
-              .parse(value),
-          );
-        });
-        child.send({ action });
-      },
-    );
+    new Promise<{
+      action: string;
+      mutations: string[];
+      pageStarts: number[];
+      agents: number;
+      catalogReads: number;
+    }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Fixture ${action} timed out`)), 10000);
+      child.once("message", (value) => {
+        clearTimeout(timer);
+        resolve(
+          z
+            .object({
+              action: z.string(),
+              mutations: z.array(z.string()),
+              pageStarts: z.array(z.number()),
+              agents: z.number(),
+              catalogReads: z.number(),
+            })
+            .parse(value),
+        );
+      });
+      child.send({ action });
+    });
   try {
     const host = await new Promise<{ serverId: string; port: number }>((resolve, reject) => {
       const timer = setTimeout(
@@ -184,6 +194,7 @@ test("a shared mention opens a pinned normal conversation without a checkout, an
         expect(loaded.pageStarts[previous.pageStarts.length]).toBe(24);
         expect(loaded.agents).toBe(0);
         expect(loaded.mutations).toEqual([]);
+        expect(loaded.catalogReads).toBe(0);
         await page.screenshot({
           path: testInfo.outputPath(`shared-conversation-${viewport.width}.png`),
           fullPage: true,

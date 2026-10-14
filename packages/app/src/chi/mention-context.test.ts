@@ -4,11 +4,56 @@ import {
   createMentionScope,
   mentionQueryKey,
   reconcileMentionScope,
+  isDeploymentInboxQuery,
   type ScopedMentionResult,
 } from "./mention-context";
 import type { ChiMentionContext, ChiMentionOperation } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
 import { createInboxAuthority, inboxHostsSettled } from "./inbox-authority";
+
+test("recipient invalidation crosses host generations without coalescing keys or other scopes", async () => {
+  const cache = new QueryClient();
+  const identity: ChiMentionContext = {
+    actor: "github:reader",
+    deployment: "https://chi.invalid",
+    repo: "*",
+    generation: "a".repeat(64),
+  };
+  const first = [
+    ...mentionQueryKey("first", "", { context: identity, generation: 1, error: null }),
+    "inbox",
+    true,
+    undefined,
+  ];
+  const rotated = [
+    ...mentionQueryKey("second", "", {
+      error: null,
+      context: { ...identity, generation: "b".repeat(64) },
+      generation: 9,
+    }),
+    "inbox",
+    true,
+    undefined,
+  ];
+  const older = [...rotated, "older", 2];
+  const sent = [
+    ...mentionQueryKey("first", "", { context: identity, generation: 1, error: null }),
+    "inbox",
+    false,
+    undefined,
+  ];
+  for (const key of [first, rotated, older, sent]) cache.setQueryData(key, { saved: key[1] });
+  await cache.invalidateQueries({
+    predicate: (query) => isDeploymentInboxQuery(query.queryKey, identity),
+  });
+  for (const key of [first, rotated, older]) {
+    expect(cache.getQueryState(key)?.isInvalidated).toBe(true);
+    expect(cache.getQueryData(key)).toEqual({ saved: key[1] });
+  }
+  expect(cache.getQueryState(sent)?.isInvalidated).toBe(false);
+  expect(isDeploymentInboxQuery(first, { ...identity, deployment: undefined })).toBe(false);
+  cache.clear();
+});
 
 test("inbox transport stays bound to Alice across disconnect, credential rotation and reload", async () => {
   const values = new Map<string, string>();

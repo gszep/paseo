@@ -10,39 +10,49 @@ const conversation = process.argv[3] === "conversation";
 let denied = false;
 let unavailable = false;
 const pageStarts: number[] = [];
-let releaseCatalog!: () => void;
-const catalog = new Promise<void>((resolve) => {
-  releaseCatalog = resolve;
-});
+let catalogReads = 0;
 const mutations: string[] = [];
+function requireRepositoryHeader({
+  init,
+  expectedRepo,
+}: {
+  init: RequestInit | undefined;
+  expectedRepo: string | null;
+}) {
+  if (new Headers(init?.headers).get("x-chi-repo") !== expectedRepo)
+    throw new Error("Unexpected fixture repository header");
+}
 const handoffs = ["Release planning", "Mobile composer", "Research notes"].map(
-  (workspaceName, index) => ({
-    v: 3,
-    id: `00000000-0000-4000-8000-00000000000${index}`,
-    repo,
-    author: "github:teammate",
-    recipient: "github:reader",
-    text: "Please review the deployment plan and confirm the next steps before we release the updated application. The remaining details are available in the discussion.",
-    workspaceName,
-    sources: [
-      {
-        pin: {
-          v: 3,
-          deployment: "fixture",
-          repo,
-          sourceId: "a".repeat(64),
-          count: conversation ? 40 : 1,
-          head: "b".repeat(64),
+  (workspaceName, index) => {
+    const rowRepo = index === 0 ? repo : `${repo}-${index}`;
+    return {
+      v: 3,
+      id: `00000000-0000-4000-8000-00000000000${index}`,
+      repo: rowRepo,
+      author: "github:teammate",
+      recipient: "github:reader",
+      text: "Please review the deployment plan and confirm the next steps before we release the updated application. The remaining details are available in the discussion.",
+      workspaceName,
+      sources: [
+        {
+          pin: {
+            v: 3,
+            deployment: "fixture",
+            repo: rowRepo,
+            sourceId: "a".repeat(64),
+            count: conversation ? 40 : 1,
+            head: "b".repeat(64),
+          },
+          seq: conversation ? 27 : 0,
         },
-        seq: conversation ? 27 : 0,
-      },
-    ],
-    state: "open",
-    revision: 1,
-    readAt: conversation && index === 0 ? "2020-01-01T00:00:00Z" : undefined,
-    createdAt: new Date(Date.now() - (index + 1) * 3_600_000).toISOString(),
-    updatedAt: new Date(Date.now() - (index + 1) * 3_600_000).toISOString(),
-  }),
+      ],
+      state: "open",
+      revision: 1,
+      readAt: conversation && index === 0 ? "2020-01-01T00:00:00Z" : undefined,
+      createdAt: new Date(Date.now() - (index + 1) * 3_600_000).toISOString(),
+      updatedAt: new Date(Date.now() - (index + 1) * 3_600_000).toISOString(),
+    };
+  },
 );
 const host = await createTestPaseoDaemon({
   mcpEnabled: false,
@@ -50,7 +60,7 @@ const host = await createTestPaseoDaemon({
   corsAllowedOrigins: [origin],
   chi: {
     destinations: { fixture: { name: "Fixture", endpoint: "https://chi.invalid" } },
-    mappings: [{ repo, destination: "fixture", audience: "shared" }],
+    mappings: [],
   },
   chiAuthority: {
     endpoint: "https://chi.invalid",
@@ -71,25 +81,32 @@ const host = await createTestPaseoDaemon({
           capabilities: {
             appendLog: { v: 3, deployment: "fixture" },
             handoffs: { v: 3, references: "pin-seq" },
+            deploymentInbox: { v: 3 },
           },
         });
       if (pathname === "/repos") {
-        if (!conversation) await catalog;
+        catalogReads++;
         return Response.json({ ok: true, repos: [{ repo }] });
       }
       if (conversation && denied) return Response.json({ reason: "forbidden" }, { status: 403 });
-      if (pathname === "/handoffs/inbox")
+      if (pathname === "/handoffs/inbox") {
+        requireRepositoryHeader({ init, expectedRepo: null });
         return Response.json({
           handoffs,
           nextCursor: null,
           unreadCount: conversation ? 2 : 3,
           unreadCountLowerBound: false,
         });
-      if (conversation && pathname === "/handoffs")
+      }
+      if (conversation && pathname === "/handoffs") {
+        const handoff = handoffs.find((entry) => entry.id === target.searchParams.get("id"));
+        if (!handoff) throw new Error("Fixture expected a repository-bound exact read");
+        requireRepositoryHeader({ init, expectedRepo: handoff.repo });
         return Response.json({
           ok: true,
-          handoff: handoffs.find((entry) => entry.id === target.searchParams.get("id")),
+          handoff,
         });
+      }
       if (conversation && pathname === "/evidence/entries") {
         if (unavailable)
           return Response.json({ reason: "temporarily-unavailable" }, { status: 503 });
@@ -144,11 +161,11 @@ process.on("message", async (message) => {
       mutations,
       pageStarts,
       agents: host.daemon.agentManager.listAgents().length,
+      catalogReads,
     });
     return;
   }
-  releaseCatalog();
   await host.close();
-  process.send?.({ mutations });
+  process.send?.({ mutations, catalogReads });
   process.disconnect?.();
 });
