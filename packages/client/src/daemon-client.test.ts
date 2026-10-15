@@ -85,6 +85,46 @@ test("Chi continuation rejects bare pins even on a transfer-capable host", async
   expect(send).not.toHaveBeenCalled();
 });
 
+test("explicit pinned Fork uses the existing transfer RPC only on a Fork-capable host", async () => {
+  const client = new DaemonClient({
+    url: "ws://fixture.invalid",
+    clientId: "fork-fixture",
+    clientType: "cli",
+    logger: createMockLogger(),
+  });
+  const pin = {
+    v: 3 as const,
+    deployment: "fixture",
+    repo: "github:fixture/repo",
+    sourceId: "a".repeat(64),
+    head: "b".repeat(64),
+    count: 1,
+  };
+  const input = {
+    workspaceId: "workspace",
+    repo: pin.repo,
+    sourceId: pin.sourceId,
+    snapshotId: pin.head,
+    fork: { pin },
+  };
+  const send = vi.spyOn(client, "sendRequest").mockResolvedValue(null);
+  await expect(client.continueChi(input)).rejects.toThrow("Pinned Fork is not available");
+  expect(send).not.toHaveBeenCalled();
+  vi.spyOn(client, "getLastServerInfoMessage").mockReturnValue({
+    features: { chiPinnedFork: true, chiCanonical: false },
+  } as NonNullable<ReturnType<DaemonClient["getLastServerInfoMessage"]>>);
+  await client.continueChi(input);
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      message: expect.objectContaining({
+        type: "chi.native.continue.request",
+        fork: { pin },
+        workspaceId: "workspace",
+      }),
+    }),
+  );
+});
+
 interface TraceRecord {
   phase: "begin" | "end";
   name?: string;

@@ -145,8 +145,10 @@ and updating `next`, integrating it after a release, and releasing a hotfix from
 
 Chi v3 sync and mentions are capability-gated on `chiAppendV3` and the backend's
 appendLog/handoffs v3 capabilities. Mapped consent, durable append receipts and
-confirmed pin/ordinal references replace snapshot writes. Continue/fork publication
-and reply mutations are deferred; no v2 fallback. Pinned shared conversations use
+confirmed pin/ordinal references replace snapshot writes. Resume and reply mutations
+are deferred; no v2 fallback. The explicit pinned-Fork source candidate uses the
+existing transfer/registration path but advertises `chiPinnedFork:false` until
+the server publisher mount and end-to-end gate pass. Pinned shared conversations use
 `chiPinnedTimeline` and the normal supplied-history renderer without agent, file,
 plugin, composer or execution integrations. Local native-route reuse remains
 deferred until a verified pin/identity resolver exists; a source label is not proof.

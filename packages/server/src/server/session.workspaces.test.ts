@@ -4421,6 +4421,26 @@ test("Chi continuation dispatch registers in the selected workspace and returns 
     outcome: "failed",
     error: "chi-transfer-preparation-required",
   });
+  await session.handleMessage({
+    ...message,
+    canonical: undefined,
+    fork: {
+      pin: {
+        v: 3,
+        deployment: "fixture",
+        repo: message.repo,
+        sourceId: message.sourceId,
+        head: message.snapshotId,
+        count: 1,
+      },
+    },
+  });
+  expect(continuation).toHaveBeenCalledTimes(2);
+  expect(imported).toHaveBeenCalledTimes(1);
+  expect(filterByType(emitted, "chi.native.continue.response").at(-1)?.payload).toMatchObject({
+    outcome: "failed",
+    error: "chi-operation-unsupported",
+  });
 });
 
 test("import_agent_request registers a workspace for a never-seen cwd", async () => {

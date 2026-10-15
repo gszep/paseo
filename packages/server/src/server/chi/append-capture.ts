@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import type { ForkPublication } from "@henkaku-center/chi-native/fork";
 import {
   AppendClient,
   appendRuntimes,
@@ -12,6 +13,7 @@ import {
   canonicalJson,
   encodeEntry,
   sourceId,
+  parsePin,
   type Pin,
 } from "@henkaku-center/chi-native/append-codec";
 import {
@@ -106,7 +108,8 @@ async function captureExport(
 ): Promise<NativeExport> {
   const native = nativeExport(input.native);
   if (native.info.id !== input.sessionId) throw new Error("capture-head-diverged");
-  if (native.info.fork || native.info.parentID) throw new Error("chi-native-fork-unsupported");
+  if (native.info.parentID || (native.info.fork && !input.expected))
+    throw new Error("chi-native-fork-unsupported");
   if (native.messages.length === 0 && input.expected === null) throw new Error("chi-session-busy");
   const location = z.object({ directory: z.string() }).parse(native.info.location);
   if (location.directory !== input.cwd) {
@@ -229,7 +232,7 @@ export async function captureAppend(input: AppendCaptureInput): Promise<AppendCa
     saved = await readConversationReceipt(creationPath);
   }
   // open validates every creation field against the authenticated source scope.
-  const creation = creationSchema.parse(saved);
+  const creation = captureCreation(saved, native);
   await syncConversationReceiptDirectory(creationPath);
   const client = await AppendClient.open(
     { directory: root, scope, creation },
@@ -303,8 +306,78 @@ const creationSchema = z
         digest: z.string(),
       })
       .strict(),
-    parent: z.null(),
+    parent: z.custom<Pin | null>((value) => {
+      if (value === null) return true;
+      try {
+        parsePin(value);
+        return true;
+      } catch {
+        return false;
+      }
+    }),
     runtime: z.enum(appendRuntimes),
     nativeReducer: z.literal("opencode-chi1-r1"),
   })
   .strict();
+
+function captureCreation(saved: unknown, native: NativeExport): Creation {
+  const creation = creationSchema.parse(saved);
+  if (
+    native.info.fork &&
+    (!creation.parent ||
+      canonicalNative(native.info.fork) !==
+        canonicalNative(record.parse(JSON.parse(creation.header)).fork))
+  )
+    throw new Error("chi-native-fork-unsupported");
+  return creation;
+}
+
+/** A published child is seeded through the existing append client's exact
+ * replay path. Missing state never turns a lineage child into root capture. */
+export async function prepareForkCapture(input: {
+  home: string;
+  endpoint: string;
+  actor: string;
+  token: string;
+  publication: ForkPublication;
+  native: unknown;
+  request: typeof fetch;
+  scanner?: ScanOptions;
+}): Promise<(pin: Pin) => Promise<void>> {
+  const { creation } = input.publication;
+  if (!creation.parent) throw new Error("fork-proof-invalid");
+  const scope: AppendScope = {
+    endpoint: input.endpoint,
+    actor: input.actor,
+    deployment: creation.parent.deployment,
+    repo: creation.parent.repo,
+    sourceId: input.publication.sourceId,
+    instanceId: creation.instanceId,
+    nativeSessionId: creation.nativeSessionId,
+    bindingRevision: 1,
+  };
+  const root = join(input.home, "chi", "append", digest(canonicalJson(scope)));
+  for (const directory of [join(input.home, "chi"), join(input.home, "chi", "append"), root]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await syncConversationReceiptDirectory(directory);
+  }
+  const path = join(root, "creation.json");
+  await publishConversationReceipt(path, creation);
+  if (canonicalJson(await readConversationReceipt(path)) !== canonicalJson(creation))
+    throw new Error("append-local-conflict");
+  const client = await AppendClient.open(
+    { directory: root, scope, creation },
+    { fetch: input.request, scan: input.scanner },
+  );
+  const native = nativeExport(input.native);
+  const receipt = await client.prepare({
+    expected: client.initialPin,
+    entries: input.publication.entries,
+    nativeRecords: rawRecords(native.messages),
+  });
+  return async (expected) => {
+    const pin = await client.submit(receipt, input.token);
+    if (canonicalJson(pin) !== canonicalJson(expected))
+      throw new Error("fork-publication-proof-invalid");
+  };
+}

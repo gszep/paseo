@@ -3,6 +3,7 @@ import { lstat, open, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { z } from "zod";
+import { forkQuarantine } from "@henkaku-center/chi-native/fork";
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const sessionId = z.string().regex(/^ses[a-zA-Z0-9_-]{1,200}$/);
@@ -81,6 +82,16 @@ async function privateJson(path: string): Promise<unknown | null> {
  * Incomplete/corrupt private state fails closed; only the continuation owner can
  * recover a ready fork through a separately issued registration capability. */
 export async function readQuarantinedSessions(
+  home: string,
+  serverId: string,
+): Promise<QuarantinedSession[]> {
+  return [
+    ...(await readLegacyQuarantinedSessions(home, serverId)),
+    ...(await forkQuarantine(join(home, "chi", "forks"), `${serverId}:opencode`)),
+  ];
+}
+
+async function readLegacyQuarantinedSessions(
   home: string,
   serverId: string,
 ): Promise<QuarantinedSession[]> {

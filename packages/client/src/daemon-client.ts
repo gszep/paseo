@@ -1,5 +1,5 @@
 import { subscribeTimeline, type TimelineMessage } from "./timeline-subscription/index.js";
-import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import { ChiOperationError, type ChiEntryRef } from "@getpaseo/protocol/chi-mentions";
 import { ProviderSnapshotUpdates } from "./provider-snapshots/index.js";
 import {
   ConnectionSubscriptions,
@@ -3224,10 +3224,17 @@ export class DaemonClient {
     sourceId: string;
     snapshotId: string;
     requestId?: string;
-    canonical: { conversationId: string; transferId: string };
+    canonical?: { conversationId: string; transferId: string };
+    fork?: {
+      pin: ChiEntryRef["pin"];
+      recoverySessionId?: string;
+    };
   }) {
-    this.requireChiCanonical();
-    if (!input.canonical?.conversationId || !input.canonical.transferId)
+    if (input.fork) {
+      if (this.getLastServerInfoMessage()?.features?.chiPinnedFork !== true)
+        throw new Error("Pinned Fork is not available on this host.");
+    } else this.requireChiCanonical();
+    if (!input.fork && (!input.canonical?.conversationId || !input.canonical.transferId))
       throw new Error("Prepare the transfer from the source agent before continuing.");
     const requestId = this.createRequestId(input.requestId);
     return this.sendRequest({

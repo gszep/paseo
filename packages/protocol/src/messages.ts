@@ -23,6 +23,7 @@ import {
   ChiMentionResponseSchema,
   ChiMentionRecipientsSchema,
   ChiMentionContextSchema,
+  ChiPinSchema,
 } from "./chi-mentions.js";
 import { TerminalActivitySchema } from "./terminal-activity.js";
 import { CLIENT_CAPS } from "./client-capabilities.js";
@@ -1596,6 +1597,7 @@ export const ChiContinueRequestSchema = z.object({
   // Parse old wire requests; handlers reject missing transfer coordinates rather
   // than executing the retired bare-pin fork path.
   canonical: z.object({ conversationId: z.string(), transferId: z.string() }).optional(),
+  fork: z.object({ pin: ChiPinSchema, recoverySessionId: z.string().optional() }).optional(),
 });
 export const ChiConversationRequestSchema = z.object({
   type: z.literal("chi.conversation.manage.request"),
@@ -1671,6 +1673,7 @@ export const ChiContinueResponseSchema = z.object({
       agent: AgentSnapshotPayloadSchema,
       nativeSessionId: z.string(),
       turnStarted: z.literal(false),
+      forkPin: ChiPinSchema.optional(),
       canonicalCurrent: z
         .object({
           conversationId: z.string(),
@@ -3462,6 +3465,7 @@ export const ServerInfoStatusPayloadSchema = z
         chiNative: z.boolean().optional(),
         chiAppendV3: z.boolean().optional(),
         chiPinnedTimeline: z.boolean().optional(),
+        chiPinnedFork: z.boolean().optional(),
         chiInboxActivity: z.boolean().optional(),
         chiDeploymentInbox: z.boolean().optional(),
         chiMentions: z.boolean().optional(),

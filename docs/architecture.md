@@ -43,11 +43,10 @@ source admission does not enable held Continue/fork publication or change scanni
 
 Chi sync and human mentions use the append-only v3 client.
 The private helper in `vendor/henkaku-center-chi-native-0.0.0.tgz` is built from
-Chi `360e269b3790a598dd206265224c0bbeba4804f7`; its integrity is pinned in the lockfile.
-Archive SHA-256: `d4e9ac4801bbce0ec07f08512afab27d54633aa8723748693c437d2502111d9c`.
-This head carries the #141 over-cap reasoning-preservation minimiser fix, the
-#164 append-witness classification fix (an ancestor of the merge, not a second
-release) and the #172 bounded fixed HTTP 503 category propagation.
+Chi `ff022fc5bf0d7db2f10a0420654292a9cfc29529`; its integrity is pinned in the lockfile.
+Archive SHA-256: `2c144086193a398be3a12b92f63c5fedde32beaf8d7801dace0b2fd28791bc2c`.
+This candidate adds the managed pinned-Fork coordinator while retaining the
+existing minimiser, scanner policy and bounded HTTP failure classification.
 This identifies the prepared source artifact, not a deployed backend or installed host.
 Repack after shared-helper changes. The server package bundles this dependency so
 installed CLI/Docker builds do not depend on a checkout-relative vendor path.
@@ -71,10 +70,27 @@ memory and redirects are errors. No snapshot-format writer or recovery fallback.
 Repository mappings provide capture consent and pin the destination and audience.
 Unmapped work stays local; changing a mapping never retargets an existing source.
 Snapshot-format associations require operator cutover rather than guessed pins.
-Continue/fork publication, replies, acknowledgement/resolution and agent-initiated
-human-prompt dispatch are deferred. Their old mutation paths are refused. Existing
+Resume, replies, acknowledgement/resolution and agent-initiated human-prompt
+dispatch remain deferred. Their old mutation paths are refused. Existing
 receipt-owned native imports remain quarantined; disabling Continue does not grant
 ordinary import or execution permission.
+
+The explicit pinned-Fork source candidate uses `chi.native.continue` with optional
+`fork.pin`, keeping canonical Resume separate. The host advertises
+`chiPinnedFork:false`; the server must separately advertise authenticated
+`forkPublication:{v:3}` and mount `POST /evidence/fork` before activation. No UI
+action or production Fork is enabled by this source change.
+
+The coordinator verifies `2.0.15-chi.2` and its complete frozen transfer contract,
+checks capacity before native mutation, and preserves one immutable intent across
+import, native Fork, re-export verification and lineage publication. A lost native
+reply requires receipt recovery, not another import/Fork. Known IDs remain
+quarantined; an unknown fork ID blocks ordinary intake. Native state contains no
+initial prompt. Local scanning and durable append preparation precede publication;
+child publication precedes append-ledger confirmation by exact replay
+and registration through the existing workspace import path. Registration retries
+reuse the exact agent. Later prompt admission verifies inherited authorization;
+capture can extend a proved child but cannot recreate it as a root.
 
 `packages/server/src/server/chi/append-capture.ts` compares the confirmed full-native
 prefix against the binding ledger before projecting new records. New message and

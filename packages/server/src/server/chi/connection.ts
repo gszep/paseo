@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import { createHash } from "node:crypto";
@@ -56,8 +56,12 @@ import { removeProvenance, type ProvenanceRemover, type ProvenanceWriter } from 
 import { captureAppend, supportsAppendCapture, type AppendCaptureInput } from "./append-capture.js";
 import { parsePin, type Pin } from "@henkaku-center/chi-native/append-codec";
 import { AppendHttpError } from "@henkaku-center/chi-native/append-client";
+import { managedFork, type ForkPublication } from "@henkaku-center/chi-native/fork";
+import { prepareForkCapture } from "./append-capture.js";
 
 const label = "chi.native";
+// Source-only until publisher mounting and managed end-to-end acceptance.
+export const pinnedForkEnabled = false;
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const associationSchema = z.object({
   repo: z.string(),
@@ -120,11 +124,13 @@ interface ContinueSelection {
   requestId: string;
   workspaceId: string;
   canonical?: { conversationId: string; transferId: string };
+  fork?: { pin: Pin; recoverySessionId?: string };
 }
 interface ContinueResult {
   sessionId: string;
   snapshot: ManagedAgent;
-  canonicalCurrent: Conversation["current"] & { conversationId: string };
+  canonicalCurrent?: Conversation["current"] & { conversationId: string };
+  forkPin?: Pin;
 }
 function sameActor(a: string, b: string): boolean {
   // A GitHub login is case-insensitive to the backend; the label may hold the
@@ -267,9 +273,10 @@ export class ChiConnection {
       permit.labels === JSON.stringify(input.labels)
     )
       return;
+    const canonicalCwd = await realpath(input.cwd);
     if (
       (await this.quarantinedSessions()).some(
-        (session) => session.sessionId === input.providerHandleId && session.cwd === input.cwd,
+        (session) => session.sessionId === input.providerHandleId && session.cwd === canonicalCwd,
       )
     )
       throw new Error("chi-conversation-recovery-required");
@@ -282,6 +289,45 @@ export class ChiConnection {
     if (!encoded) return;
     const stored = associationSchema.parse(JSON.parse(encoded));
     if (stored.conversationId || stored.blocked) throw new Error("chi-native-reset-required");
+    if (agent.labels["chi.fork"]) {
+      const association = this.resolveAssociation(stored);
+      if (!association.pin || association.paused || !association.endpoint)
+        throw new Error("chi-conversation-recovery-required");
+      const authority = this.authorityFor(association.endpoint);
+      const auth = await this.authorize(association.repo, agent.cwd, authority);
+      if (
+        !sameActor(auth.chiUserId, association.actor) ||
+        auth.appendDeployment !== association.pin.deployment
+      )
+        throw new Error("chi-identity-mismatch");
+      // An empty append verifies current writer and inherited ACL/tombstone
+      // authority without changing the source. No stale local prompt fallback.
+      const response = await authority.request(
+        append(endpointUrl(association.endpoint), "evidence"),
+        {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(30000),
+          headers: {
+            authorization: `Bearer ${auth.sessionToken}`,
+            "x-chi-repo": association.repo,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            v: 3,
+            sourceId: association.pin.sourceId,
+            expected: { count: association.pin.count, head: association.pin.head },
+            bindingRevision: 1,
+            entries: [],
+          }),
+        },
+      );
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`chi-http-${response.status}`);
+      }
+      await response.body?.cancel();
+    }
   }
   withPromptAdmission<T>(agentId: string, start: () => Promise<T>): Promise<T> {
     return this.exclusive(agentId, async () => {
@@ -1119,6 +1165,9 @@ export class ChiConnection {
       ...session,
       appendDeployment: capabilities.data.appendLog.deployment,
       deploymentInbox: deploymentInboxCapabilitySchema.safeParse(identity.capabilities).success,
+      forkPublication: z
+        .object({ forkPublication: z.object({ v: z.literal(3) }) })
+        .safeParse(identity.capabilities).success,
       humanPrompts: false,
     };
   }
@@ -1805,8 +1854,8 @@ export class ChiConnection {
     };
   }
   async continue(
-    _input: ContinueSelection,
-    _registration: {
+    input: ContinueSelection,
+    registration: {
       find(sessionId: string): Promise<ManagedAgent | null>;
       register(
         sessionId: string,
@@ -1815,11 +1864,172 @@ export class ChiConnection {
       ): Promise<ManagedAgent>;
     },
   ): Promise<ContinueResult> {
-    throw new Error("chi-operation-unsupported");
+    input = structuredClone(input);
+    if (!input.fork || input.canonical) throw new Error("chi-operation-unsupported");
+    const workspaceDirectory = await realpath(input.cwd);
+    const pin = parsePin(input.fork.pin);
+    if (pin.repo !== input.repo || pin.sourceId !== input.sourceId || pin.head !== input.snapshotId)
+      throw new Error("fork-proof-invalid");
+    const resolved = resolveChiDestinationForRepo(this.chiConfig(), input.repo);
+    if (!resolved) throw new Error("chi-destination-required");
+    const authority = this.authorityFor(resolved.endpoint);
+    const initial = await this.authorize(input.repo, input.cwd, authority);
+    if (!initial.forkPublication || initial.appendDeployment !== pin.deployment)
+      throw new Error("chi-operation-unsupported");
+    const actor = initial.chiUserId.toLowerCase();
+    const current = async () => {
+      if ((await realpath(input.cwd)) !== workspaceDirectory)
+        throw new Error("fork-workspace-changed");
+      const destination = resolveChiDestinationForRepo(this.chiConfig(), input.repo);
+      if (
+        destination?.endpoint !== resolved.endpoint ||
+        destination.destinationId !== resolved.destinationId
+      )
+        throw new Error("chi-destination-changed");
+      const auth = await this.authorize(input.repo, input.cwd, authority);
+      if (
+        !auth.forkPublication ||
+        auth.appendDeployment !== pin.deployment ||
+        !sameActor(actor, auth.chiUserId) ||
+        auth.credentialGeneration !== initial.credentialGeneration
+      )
+        throw new Error("chi-identity-mismatch");
+      return auth;
+    };
+    return this.exclusive("chi-pinned-fork", () =>
+      this.manager.withNativeRuntime(null, async (runtime) => {
+        // Existing unresolved native outcomes block unrelated new operations. A
+        // recovery of this exact receipt is handled without calling native fork.
+        const request = async (path: string, body?: unknown) => {
+          const auth = await current(),
+            url = append(endpointUrl(resolved.endpoint), path);
+          if (!body) url.searchParams.set("pin", JSON.stringify(pin));
+          const response = await authority.request(url, {
+            method: body ? "POST" : "GET",
+            redirect: "error",
+            signal: AbortSignal.timeout(30000),
+            headers: {
+              authorization: `Bearer ${auth.sessionToken}`,
+              "x-chi-repo": input.repo,
+              "content-type": "application/json",
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          });
+          if (!response.ok) {
+            await response.body?.cancel();
+            throw new Error(`chi-http-${response.status}`);
+          }
+          return JSON.parse(await boundedText(response, body ? 65536 : 8 * 1024 * 1024));
+        };
+        const labelsFor = (publication: ForkPublication, child: Pin) => ({
+          "chi.native": JSON.stringify({
+            repo: input.repo,
+            actor,
+            sourceId: child.sourceId,
+            head: child.head,
+            pin: child,
+            error: null,
+            destination: resolved.destinationId,
+            endpoint: resolved.endpoint,
+            audience: "private",
+            explicit: true,
+          }),
+          "chi.fork": JSON.stringify({
+            operationId: input.requestId,
+            parent: publication.creation.parent,
+          }),
+        });
+        const result = await managedFork({
+          root: join(this.options.home, "chi", "forks"),
+          selection: {
+            operationId: input.requestId,
+            endpoint: resolved.endpoint,
+            actor,
+            parent: pin,
+            instanceId: `${this.options.serverId}:opencode`,
+            workspaceId: input.workspaceId,
+            directory: input.cwd,
+          },
+          runtime,
+          recoverySessionId: input.fork?.recoverySessionId,
+          boundary: {
+            acquire: () => request("evidence/native"),
+            publish: (publication) => request("evidence/fork", publication),
+          },
+          registration: {
+            find: registration.find,
+            prepare: async (publication, native) => {
+              const auth = await current();
+              return prepareForkCapture({
+                home: this.options.home,
+                endpoint: resolved.endpoint,
+                actor,
+                token: auth.sessionToken,
+                publication,
+                native,
+                request: authority.request,
+                scanner: this.options.appendScanner,
+              });
+            },
+            register: async (sessionId, publication, child) => {
+              await request("evidence/native");
+              const labels = labelsFor(publication, child),
+                permit = {};
+              this.registrationPermits.set(permit, {
+                sessionId,
+                cwd: input.cwd,
+                workspaceId: input.workspaceId,
+                labels: JSON.stringify(labels),
+              });
+              try {
+                return await registration.register(sessionId, labels, permit);
+              } finally {
+                this.registrationPermits.delete(permit);
+              }
+            },
+            validate: (agent, sessionId, publication, child) => {
+              const labels = labelsFor(publication, child);
+              if (
+                agent.provider !== "opencode" ||
+                agent.cwd !== input.cwd ||
+                agent.workspaceId !== input.workspaceId ||
+                (agent.persistence?.nativeHandle ?? agent.persistence?.sessionId) !== sessionId ||
+                Object.entries(labels).some(([key, value]) => agent.labels[key] !== value)
+              )
+                throw new Error("fork-registration-recovery-required");
+            },
+          },
+        });
+        return { sessionId: result.sessionId, snapshot: result.agent, forkPin: result.pin };
+      }),
+    );
   }
 }
 
 export function safeChiError(error: unknown): string {
+  if (
+    error instanceof Error &&
+    new Set([
+      "fork-proof-invalid",
+      "fork-import-proof-invalid",
+      "fork-publication-limit",
+      "fork-receipt-capacity",
+      "fork-native-recovery-required",
+      "fork-native-import-rejected",
+      "fork-native-session-exists",
+      "fork-runtime-unsupported",
+      "fork-runtime-schema-unsupported",
+      "fork-registration-recovery-required",
+      "fork-publication-proof-invalid",
+      "fork-publication-conflict",
+      "fork-source-changed",
+      "fork-quarantine-unavailable",
+      "fork-import-replica-required",
+      "fork-mutation-already-claimed",
+      "fork-workspace-changed",
+    ]).has(error.message)
+  )
+    return error.message;
   if (error instanceof Error && error.name === "TimeoutError") return "chi-operation-timeout";
   if (error instanceof EvidenceHttpError && error.reason) return `${error.message}-${error.reason}`;
   if (error instanceof AppendHttpError && error.status === 422)

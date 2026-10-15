@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { supportsAppendCapture } from "./chi/append-capture.js";
+import { pinnedForkEnabled } from "./chi/connection.js";
 import type { CreationSnapshot } from "@getpaseo/protocol/messages";
 import { CreationService } from "./creation/index.js";
 import { MessageReceipts } from "./message-receipts/index.js";
@@ -1694,6 +1695,8 @@ export class VoiceAssistantWebSocketServer {
         chiNative: false,
         chiAppendV3: this.agentManager.chi !== null && supportsAppendCapture(),
         chiPinnedTimeline: this.agentManager.chi !== null && supportsAppendCapture(),
+        // Held until the backend publisher mount and managed end-to-end gate pass.
+        chiPinnedFork: pinnedForkEnabled,
         chiInboxActivity: this.agentManager.chi !== null && supportsAppendCapture(),
         chiDeploymentInbox: this.agentManager.chi !== null && supportsAppendCapture(),
         chiMentions: false,

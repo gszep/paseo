@@ -267,7 +267,7 @@ import {
 import { archiveByScope, type ActiveWorkspaceRef } from "./workspace-archive-service.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { SessionAuthorization, type DaemonPermission } from "./authorization/index.js";
-import { safeChiError } from "./chi/connection.js";
+import { safeChiError, pinnedForkEnabled } from "./chi/connection.js";
 
 function resolveWorkspaceSetupRuntime(
   runtime: WorkspaceSetupRuntime | undefined,
@@ -4944,8 +4944,9 @@ export class Session {
     msg: Extract<SessionInboundMessage, { type: "chi.native.continue.request" }>,
   ): Promise<void> {
     try {
+      if (msg.fork && !pinnedForkEnabled) throw new Error("chi-operation-unsupported");
       if (!this.agentManager.chi) throw new Error("chi-unavailable");
-      if (!msg.canonical?.conversationId || !msg.canonical.transferId)
+      if (!msg.fork && (!msg.canonical?.conversationId || !msg.canonical.transferId))
         throw new Error("chi-transfer-preparation-required");
       const workspace = await this.workspaceRegistry.get(msg.workspaceId);
       if (!workspace || workspace.archivedAt) throw new Error("chi-workspace-unavailable");
@@ -4993,6 +4994,7 @@ export class Session {
           nativeSessionId: fork.sessionId,
           turnStarted: false,
           canonicalCurrent: fork.canonicalCurrent,
+          forkPin: fork.forkPin,
         },
       });
     } catch (error) {

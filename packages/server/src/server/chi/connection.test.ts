@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, realpath, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
 import type { NativeRuntime } from "@henkaku-center/chi-native/continuation";
 import { appendHead, initialHead } from "@henkaku-center/chi-native/append-codec";
@@ -23,6 +25,58 @@ interface BackendState {
   heads: string[];
 }
 const LEGACY_ENDPOINT = "https://chi-backend-vadmp23swa-an.a.run.app";
+
+async function forkContract() {
+  const codec = createRequire(import.meta.url).resolve("@henkaku-center/chi-native/append-codec");
+  const { runtimeContract } = await import(
+    new URL("./append-runtime-contract.js", pathToFileURL(codec)).href
+  );
+  const body = (schema: unknown) => ({
+    requestBody: { content: { "application/json": { schema } } },
+  });
+  return {
+    components: { schemas: runtimeContract },
+    paths: {
+      "/api/info": { get: { operationId: "server.info" } },
+      "/api/session/{sessionID}": { get: { operationId: "session.get" } },
+      "/api/experimental/session/{sessionID}/export": {
+        get: { operationId: "experimental.session.export" },
+      },
+      "/api/experimental/session/import": {
+        post: {
+          operationId: "experimental.session.import",
+          ...body({
+            type: "object",
+            properties: {
+              info: { $ref: "#/components/schemas/Session.Info" },
+              messages: {
+                type: "array",
+                items: { $ref: "#/components/schemas/Session.Message.Info" },
+              },
+              location: {
+                anyOf: [{ $ref: "#/components/schemas/Location.PublicRef" }, { type: "null" }],
+              },
+            },
+            required: ["info", "messages"],
+            additionalProperties: false,
+          }),
+        },
+      },
+      "/api/session/{sessionID}/fork": {
+        post: {
+          operationId: "session.fork",
+          ...body({
+            type: "object",
+            properties: {
+              before: { anyOf: [{ type: "string", pattern: "^msg_" }, { type: "null" }] },
+            },
+            additionalProperties: false,
+          }),
+        },
+      },
+    },
+  };
+}
 function fixtureConfig(endpoint = LEGACY_ENDPOINT) {
   return {
     destinations: { fixture: { name: "Fixture", endpoint } },
@@ -248,6 +302,206 @@ async function fixture() {
     scanner,
   };
 }
+
+describe.skipIf(process.platform === "win32")("managed pinned Fork", () => {
+  async function ready() {
+    const f = await fixture(),
+      connection = f.restart();
+    const pin = {
+      v: 3 as const,
+      deployment: "fixture",
+      repo: f.input.repo,
+      sourceId: f.input.sourceId,
+      head: f.input.snapshotId,
+      count: 1,
+    };
+    const source = {
+      ...structuredClone(f.transfer),
+      info: { ...f.transfer.info, id: "ses_source" },
+      messages: f.transfer.messages.map((m) => ({ ...m, id: "msg_source" })),
+    };
+    const nativeSchema = z.object({
+      info: z.record(z.string(), z.unknown()),
+      messages: z.array(z.record(z.string(), z.unknown())),
+    });
+    const native = new Map<string, z.infer<typeof nativeSchema>>();
+    const contract = await forkContract();
+    f.backend.capabilities = {
+      ...z.record(z.string(), z.unknown()).parse(f.backend.capabilities),
+      forkPublication: { v: 3 },
+    };
+    f.runtime.info = vi.fn(async () => ({ version: "2.0.15-chi.2" }));
+    f.runtime.schema = vi.fn(async () => contract);
+    f.runtime.get = vi.fn(async (id) => native.get(id)?.info ?? null);
+    f.runtime.export = vi.fn(async (id) => structuredClone(native.get(id)));
+    f.runtime.import = vi.fn(async (data, directory) => {
+      await expect(
+        connection.assertImportAllowed({
+          provider: "opencode",
+          providerHandleId: "ses_source",
+          cwd: directory,
+          workspaceId: f.input.workspaceId,
+        }),
+      ).rejects.toThrow();
+      const imported = nativeSchema.parse(structuredClone(data));
+      imported.info.location = { directory };
+      native.set("ses_source", imported);
+      return imported.info;
+    });
+    f.runtime.fork = vi.fn(async (id) => {
+      await expect(
+        connection.assertImportAllowed({
+          provider: "opencode",
+          providerHandleId: "ses_unknown",
+          cwd: f.home,
+          workspaceId: f.input.workspaceId,
+        }),
+      ).rejects.toThrow("fork-native-recovery-required");
+      const child = nativeSchema.parse(structuredClone(native.get(id)));
+      child.info = {
+        ...child.info,
+        id: "ses_child",
+        fork: { sessionID: id, boundary: { type: "through", messageID: "msg_source" } },
+      };
+      child.messages = child.messages.map((m) => ({ ...m, id: "msg_child" }));
+      native.set("ses_child", child);
+      return child.info;
+    });
+    f.request.mockImplementation(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/evidence/native") {
+        if (!f.backend.allowed) return new Response(null, { status: 404 });
+        expect(JSON.parse(new URL(String(url)).searchParams.get("pin")!)).toEqual(pin);
+        const bytes = JSON.stringify(source);
+        return Response.json({
+          pin,
+          native: bytes,
+          digest: createHash("sha256").update(bytes).digest("hex"),
+          format: "opencode-chi1-r1",
+          coverage: {
+            kind: "minimised",
+            minimiser: "min-v1",
+            initialCount: 1,
+            digest: "c".repeat(64),
+            initialComplete: true,
+          },
+        });
+      }
+      if (path === "/evidence/fork") {
+        const body = z
+          .object({
+            sourceId: z.string(),
+            creation: z.record(z.string(), z.unknown()),
+            entries: z.array(z.string()),
+          })
+          .parse(JSON.parse(String(init?.body)));
+        expect(body.creation.parent).toEqual(pin);
+        f.backend.entries = body.entries;
+        f.backend.heads = [initialHead(body.creation)];
+        for (const [seq, bytes] of body.entries.entries())
+          f.backend.heads.push(appendHead(f.backend.heads.at(-1)!, seq, bytes));
+        return Response.json({
+          pin: {
+            ...pin,
+            sourceId: body.sourceId,
+            count: body.entries.length,
+            head: f.backend.heads.at(-1),
+          },
+          replay: false,
+        });
+      }
+      return f.serve(url, init);
+    });
+    const original = f.registration.register.getMockImplementation()!;
+    const registration = {
+      find: f.registration.find,
+      register: vi.fn(
+        async (sessionId: string, labels: Record<string, string>, permit?: object) => {
+          await connection.assertImportAllowed({
+            provider: "opencode",
+            providerHandleId: sessionId,
+            cwd: f.home,
+            workspaceId: f.input.workspaceId,
+            labels,
+            chiRegistration: permit,
+          });
+          return original(sessionId, labels);
+        },
+      ),
+    };
+    const input = { ...f.input, requestId: randomUUID(), fork: { pin } };
+    return { ...f, input, pin, connection, registration, native };
+  }
+
+  it("imports and quarantines, seeds append by replay, then registers exactly once without a prompt", async () => {
+    const f = await ready();
+    const result = await f.connection.continue(f.input, f.registration);
+    expect(result.sessionId).toBe("ses_child");
+    expect(result.forkPin?.sourceId).not.toBe(f.pin.sourceId);
+    expect(f.runtime.import).toHaveBeenCalledTimes(1);
+    expect(f.runtime.fork).toHaveBeenCalledTimes(1);
+    expect(f.registration.register).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(f.agents[0]!.labels["chi.native"]!).pin).toEqual(result.forkPin);
+    expect(JSON.parse(f.agents[0]!.labels["chi.fork"]!).parent).toEqual(f.pin);
+    await f.connection.continue(f.input, f.registration);
+    expect(f.runtime.fork).toHaveBeenCalledTimes(1);
+    expect(f.registration.register).toHaveBeenCalledTimes(1);
+    await expect(
+      f.connection.assertImportAllowed({
+        provider: "opencode",
+        providerHandleId: "ses_child",
+        cwd: f.home,
+        workspaceId: f.input.workspaceId,
+      }),
+    ).rejects.toThrow();
+    await f.connection.assertCurrent(f.agents[0]!);
+    const alias = join(f.home, "workspace-alias");
+    await symlink(f.home, alias);
+    await expect(
+      f.connection.assertImportAllowed({
+        provider: "opencode",
+        providerHandleId: "ses_child",
+        cwd: alias,
+        workspaceId: f.input.workspaceId,
+      }),
+    ).rejects.toThrow();
+    f.backend.allowed = false;
+    await expect(f.connection.assertCurrent(f.agents[0]!)).rejects.toThrow("chi-http-404");
+  });
+
+  it("refuses an unmounted backend capability or revoked source before any native mutation", async () => {
+    const f = await ready();
+    f.backend.allowed = false;
+    await expect(f.connection.continue(f.input, f.registration)).rejects.toThrow("chi-http-404");
+    expect(f.runtime.import).not.toHaveBeenCalled();
+    expect(f.runtime.fork).not.toHaveBeenCalled();
+    f.backend.capabilities = {};
+    await expect(f.connection.continue(f.input, f.registration)).rejects.toThrow(
+      "chi-native-v3-required",
+    );
+    expect(f.registration.register).not.toHaveBeenCalled();
+  });
+
+  it("local scanner failure leaves the native fork quarantined without publication", async () => {
+    const f = await ready();
+    await writeFile(
+      f.scanner,
+      `#!${process.execPath}\nif(process.argv.includes('version'))console.log('8.30.1');else process.exit(1);`,
+      { mode: 0o700 },
+    );
+    await expect(f.connection.continue(f.input, f.registration)).rejects.toThrow();
+    expect(f.runtime.fork).toHaveBeenCalledTimes(1);
+    expect(
+      f.request.mock.calls.some(([url]) => new URL(String(url)).pathname === "/evidence/fork"),
+    ).toBe(false);
+    expect(f.registration.register).not.toHaveBeenCalled();
+    expect(await f.connection.quarantinedSessions()).toContainEqual({
+      sessionId: "ses_child",
+      cwd: f.home,
+      kind: "fork",
+    });
+  });
+});
 
 describe.skipIf(process.platform === "win32")("saved mention admission recovery", () => {
   async function recoveryFixture() {
