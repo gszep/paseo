@@ -172,6 +172,9 @@ const appendCapabilitiesSchema = z.object({
   appendLog: z.object({ v: z.literal(3), deployment: z.string().min(1) }),
   handoffs: z.object({ v: z.literal(3), references: z.literal("pin-seq") }),
 });
+const deploymentInboxCapabilitySchema = z.object({
+  deploymentInbox: z.object({ v: z.literal(3) }),
+});
 const reposSchema = z.object({
   ok: z.literal(true),
   repos: z.array(z.object({ repo: z.string() })),
@@ -880,6 +883,7 @@ export class ChiConnection {
           credentialGeneration: auth.credentialGeneration,
           repo: "*",
           deployment: auth.appendDeployment,
+          deploymentInbox: auth.deploymentInbox,
         };
       } catch (error) {
         throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
@@ -888,6 +892,7 @@ export class ChiConnection {
     try {
       const current = await identity();
       const context = this.mentionContext(current);
+      context.deploymentInbox = current.deploymentInbox;
       const config = this.chiConfig();
       const mapped = (config?.mappings ?? []).filter(
         (mapping) =>
@@ -924,12 +929,17 @@ export class ChiConnection {
         operation.action === "list"
       )
         throw new Error("chi-mention-workspace-required");
-      const repo = operation.repo;
-      if (!repo) throw new Error("chi-mention-repository-required");
+      let repo = operation.repo;
+      if (!repo) {
+        if (operation.action !== "inbox") throw new Error("chi-mention-repository-required");
+        if (!current.deploymentInbox)
+          throw new Error("chi-deployment-inbox-backend-upgrade-required");
+        repo = "*";
+      }
       // Backend authorizes the supplied repository; inbox transport needs no local checkout.
       // Catalog loading is independent discovery, never an authorization verdict.
       const result = await this.mentions.execute({ ...current, repo }, operation);
-      if (result.kind === "inbox") await this.nameInboxWorkspaces(repo, result.handoffs);
+      if (result.kind === "inbox") await this.nameInboxWorkspaces(result.handoffs);
       this.requireMentionContext(await identity(), context);
       return { context: { ...context, repositories: expected?.repositories }, result };
     } catch (error) {
@@ -938,7 +948,7 @@ export class ChiConnection {
     }
   }
 
-  private async nameInboxWorkspaces(repo: string, handoffs: ChiHandoff[]) {
+  private async nameInboxWorkspaces(handoffs: ChiHandoff[]) {
     const getName = this.options.getWorkspaceName;
     if (!getName) return;
     const workspaces = new Map<string, string>();
@@ -950,18 +960,15 @@ export class ChiConnection {
       } catch {
         continue;
       }
-      if (
-        association.repo === repo &&
-        association.sourceId &&
-        association.endpoint === this.authority.endpoint
-      )
-        workspaces.set(association.sourceId, agent.workspaceId);
+      if (association.sourceId && association.endpoint === this.authority.endpoint)
+        workspaces.set(`${association.repo}/${association.sourceId}`, agent.workspaceId);
     }
     const names = new Map<string, Promise<string | undefined>>();
     for (const handoff of handoffs) {
       if (handoff.workspaceName) continue;
       const source = handoff.sources[0];
-      const workspace = source?.kind === "neutral" ? workspaces.get(source.id) : undefined;
+      const workspace =
+        source?.kind === "neutral" ? workspaces.get(`${handoff.repo}/${source.id}`) : undefined;
       if (!workspace) continue;
       let name = names.get(workspace);
       if (!name) {
@@ -1109,6 +1116,7 @@ export class ChiConnection {
     return {
       ...session,
       appendDeployment: capabilities.data.appendLog.deployment,
+      deploymentInbox: deploymentInboxCapabilitySchema.safeParse(identity.capabilities).success,
       humanPrompts: false,
     };
   }

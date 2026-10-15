@@ -43,6 +43,7 @@ export interface MentionIdentity {
   deployment: string;
   credentialGeneration?: string;
   humanPrompts?: boolean;
+  deploymentInbox?: boolean;
 }
 export interface MentionAuthority {
   endpoint: string;
@@ -138,6 +139,47 @@ function handoffView(input: unknown, identity: MentionIdentity): ChiHandoff {
 export function mentionFailure(error: unknown): string {
   if (error instanceof Error && /^chi-[a-z0-9-]+$/.test(error.message)) return error.message;
   return "chi-mentions-unavailable";
+}
+
+async function responseError({
+  response,
+  path,
+  cursor,
+}: {
+  response: Response;
+  path: string;
+  cursor?: string;
+}): Promise<Error> {
+  if (path === "handoffs/inbox" && response.status === 400) {
+    const parsed = await boundedText(response, 4096)
+      .then((text) => parseJson(text))
+      .catch(() => null);
+    const error = z.object({ reason: z.string() }).safeParse(parsed);
+    if (
+      error.success &&
+      (error.data.reason === "invalid-cursor" ||
+        (cursor && error.data.reason === "invalid-handoff-request"))
+    )
+      return new Error("chi-inbox-invalid-cursor");
+  }
+  let reason: string | null = null;
+  if (response.status === 503) {
+    // Only fixed codes cross the boundary. Strict parsing rejects duplicate keys
+    // and malformed UTF-8; protected diagnostics never become UI copy.
+    const parsed = await boundedText(response, 1024)
+      .then((text) => parseJson(text))
+      .catch(() => null);
+    const error = z.object({ ok: z.literal(false), reason: z.string() }).safeParse(parsed);
+    if (
+      error.success &&
+      path === "handoffs/inbox" &&
+      error.data.reason === "deployment-inbox-not-ready"
+    )
+      reason = error.data.reason;
+  } else {
+    await response.body?.cancel();
+  }
+  return new Error(`chi-mentions-http-${response.status}${reason ? `-${reason}` : ""}`);
 }
 
 export function assertMentionSend(msg: SendAgentMessageRequest) {
@@ -254,20 +296,15 @@ export class ChiMentions {
       signal: AbortSignal.timeout(30000),
       headers: {
         authorization: `Bearer ${identity.token}`,
-        "x-chi-repo": identity.repo,
+        ...(path === "handoffs/inbox" && identity.repo === "*"
+          ? {}
+          : { "x-chi-repo": identity.repo }),
         "content-type": "application/json",
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) {
-      if (path === "handoffs/inbox" && response.status === 400) {
-        const error = await boundedText(response, 4096)
-          .then((text) => JSON.parse(text))
-          .catch(() => null);
-        if (error?.reason === "invalid-cursor") throw new Error("chi-inbox-invalid-cursor");
-      }
-      await response.body?.cancel();
-      throw new Error(`chi-mentions-http-${response.status}`);
+      throw await responseError({ response, path, cursor: query?.cursor });
     }
     try {
       return parseJson(await boundedText(response, 1024 * 1024));
@@ -647,14 +684,20 @@ export class ChiMentions {
         }),
       );
     if (
-      operation.inbox &&
-      result.handoffs.some((h) => h.recipient.toLowerCase() !== identity.actor)
+      result.handoffs.some(
+        (h) => (operation.inbox ? h.recipient : h.author).toLowerCase() !== identity.actor,
+      )
     )
       throw new Error("chi-mention-invalid-response");
     return {
       kind: "inbox",
       actor: identity.actor,
-      handoffs: result.handoffs.map((handoff) => handoffView(handoff, identity)),
+      handoffs: result.handoffs.map((handoff) =>
+        handoffView(
+          handoff,
+          identity.repo === "*" ? { ...identity, repo: handoff.repo } : identity,
+        ),
+      ),
       nextCursor: result.nextCursor,
       unreadCount: result.unreadCount,
       unreadCountIsLowerBound: result.unreadCountLowerBound,

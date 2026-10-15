@@ -129,16 +129,20 @@ function startMetro(port: number, buffer: ReturnType<typeof createLineBuffer>): 
   const appDir = path.resolve(__dirname, "../..");
   const expoCli = require.resolve("expo/bin/cli");
   // Spawns Node directly to bypass Windows .cmd shim execution restrictions without shell: true.
-  const child = spawn(process.execPath, [expoCli, "start", "--web", "--port", String(port)], {
-    cwd: appDir,
-    env: {
-      ...process.env,
-      BROWSER: "none",
-      ...(process.env.E2E_DESKTOP_RUNTIME === "1" ? { PASEO_WEB_PLATFORM: "electron" } : {}),
+  const child = spawn(
+    process.execPath,
+    [expoCli, "start", "--web", "--port", String(port), "--max-workers", "2"],
+    {
+      cwd: appDir,
+      env: {
+        ...process.env,
+        BROWSER: "none",
+        ...(process.env.E2E_DESKTOP_RUNTIME === "1" ? { PASEO_WEB_PLATFORM: "electron" } : {}),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
     },
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
-  });
+  );
   const log = (chunk: Buffer, stream: "stdout" | "stderr") => {
     for (const line of chunk.toString().split("\n").filter(Boolean)) {
       buffer.add(`[${stream}] ${line}`);

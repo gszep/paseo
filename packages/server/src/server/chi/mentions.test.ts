@@ -231,6 +231,70 @@ test("per-repository inbox carries the v3 unread lower bound through the daemon 
   }
 });
 
+test.each([true, false])(
+  "deployment inbox preserves cross-repository pins and same-ID rows and rejects misbound sources (received=%s)",
+  async (inbox) => {
+    const f = await fixture();
+    const identity = { ...f.input.identity, repo: "*" };
+    const handoffs: WireHandoff[] = ["github:fixture/one", "github:fixture/two"].map((repo) => ({
+      v: 3,
+      id: "00000000-0000-4000-8000-000000000194",
+      repo,
+      author: inbox ? "github:other" : identity.actor,
+      recipient: inbox ? identity.actor : "github:other",
+      text: "Synthetic inbox row",
+      state: "open",
+      revision: 1,
+      createdAt: "2026-10-14T00:00:00Z",
+      updatedAt: "2026-10-14T00:00:00Z",
+      sources: [{ pin: { ...f.capture.pin, repo }, seq: 0 }],
+    }));
+    f.authority.request = async (url, init) => {
+      expect(new Headers(init?.headers).has("x-chi-repo")).toBe(false);
+      expect(new URL(String(url)).searchParams.get("inbox")).toBe(inbox ? "received" : "sent");
+      return Response.json({
+        handoffs,
+        nextCursor: "opaque-next",
+        unreadCount: 2,
+        unreadCountLowerBound: true,
+      });
+    };
+    const result = await f.restart().execute(identity, { action: "inbox", inbox });
+    expect(result).toMatchObject({
+      kind: "inbox",
+      nextCursor: "opaque-next",
+      unreadCountIsLowerBound: true,
+      handoffs: handoffs.map((h) => ({
+        id: h.id,
+        repo: h.repo,
+        sources: [{ appendRef: h.sources[0] }],
+      })),
+    });
+    handoffs[1]!.sources[0]!.pin.repo = handoffs[0]!.repo;
+    await expect(f.restart().execute(identity, { action: "inbox", inbox })).rejects.toThrow(
+      "chi-mention-invalid-response",
+    );
+    handoffs[1]!.sources[0]!.pin.repo = handoffs[1]!.repo;
+    if (inbox) handoffs[1]!.recipient = "github:unrelated";
+    else handoffs[1]!.author = "github:unrelated";
+    await expect(f.restart().execute(identity, { action: "inbox", inbox })).rejects.toThrow(
+      "chi-mention-invalid-response",
+    );
+  },
+);
+
+test("deployment inbox readiness errors are fixed and bounded", async () => {
+  const f = await fixture();
+  f.authority.request = async () =>
+    Response.json(
+      { ok: false, reason: "deployment-inbox-not-ready", diagnostics: "private" },
+      { status: 503 },
+    );
+  await expect(
+    f.restart().execute({ ...f.input.identity, repo: "*" }, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-503-deployment-inbox-not-ready$/);
+});
+
 test("inbox invalid cursor has a fixed recovery code and never exposes backend diagnostics", async () => {
   const f = await fixture();
   f.authority.request = async () =>
@@ -238,6 +302,16 @@ test("inbox invalid cursor has a fixed recovery code and never exposes backend d
   await expect(
     f.restart().execute(f.input.identity, { action: "inbox", inbox: true, cursor: "old" }),
   ).rejects.toThrow(/^chi-inbox-invalid-cursor$/);
+  f.authority.request = async () =>
+    Response.json({ ok: false, reason: "invalid-handoff-request" }, { status: 400 });
+  await expect(
+    f
+      .restart()
+      .execute({ ...f.input.identity, repo: "*" }, { action: "inbox", inbox: true, cursor: "old" }),
+  ).rejects.toThrow(/^chi-inbox-invalid-cursor$/);
+  await expect(
+    f.restart().execute({ ...f.input.identity, repo: "*" }, { action: "inbox", inbox: true }),
+  ).rejects.toThrow(/^chi-mentions-http-400$/);
   f.authority.request = async () =>
     Response.json({ reason: "private diagnostics" }, { status: 400 });
   await expect(

@@ -174,20 +174,26 @@ Definitive rejection is also fenced to its persisted attempt UUID: an older refu
 cannot unlock correction after a newer attempt of the same operation may have committed.
 
 The **Mentions** route binds its actor and endpoint independently of the connected
-host transport. The activity feed requires a host advertising `chiInboxActivity`;
-older clients retain their v3 request shapes. A single repository mapping
-for that deployment supplies the initial repository; otherwise the reader selects
-one from the catalog. Account verification and the first inbox read do not wait for
-the repository filter's catalog. Inbox and detail reads do not enumerate every
-repository again. Mapping and catalog hints never grant access: each selected-repository
-request still passes fresh backend authorization and source ACL checks. Account
-verification, catalog loading and inbox-read failures have distinct UI states.
-Backend keysets, unread counts
-and cache keys are repository-scoped; there is no synthetic global unread badge or
-cross-repository fan-out. Search covers loaded pages. Refresh reacquires access on
+host transport. The deployment-wide feed requires `chiDeploymentInbox` on the host
+and `deploymentInbox: {v: 3}` from the backend. That backend capability describes
+protocol support, not migration readiness: `deployment-inbox-not-ready` remains an
+explicit unavailable state until the operator completes the separately reviewed
+backend migration. Neither an older host nor an older backend falls back to a
+repository picker or client fan-out. Older clients retain their scoped v3 requests.
+The daemon-only baseline keeps its existing capture/helper contract. Deployment
+inbox capability parsing and requests live in the daemon, not a new native helper
+export. Only the inbox-specific readiness reason is added at this boundary;
+other 503 responses retain the baseline's status-only handling. This does not
+enable native Resume, replace a helper, or certify an installed-host drain.
+Inbox reads omit the repository header; detail and first-view reads retain the
+row's repository. Every page still passes fresh backend repository/source ACL and
+tombstone checks. No repository catalog or local mapping is needed to load the feed.
+Backend keysets and cache keys bind the deployment/recipient; unread counts retain
+their lower-bound semantics and do not create a synthetic global sidebar badge.
+Optional repository filtering and search cover loaded pages only. Refresh reacquires access on
 focus/reconnect and discards older pages from the preceding acquisition. The flat
-activity list leads with the workspace name, sender and timestamp, followed by a
-two-line message preview on mobile and desktop. New mention receipts freeze the
+activity list leads with the sender and timestamp, with workspace/repository as
+secondary context and a two-line message preview on mobile and desktop. New mention receipts freeze the
 workspace name with the request; the backend scans and stores it with the handoff.
 Historical mentions use a known local source workspace when available, otherwise
 the repository name. Loading rows never marks them read.
@@ -221,8 +227,11 @@ fields and adds an optional `appendRef`; those display strings never reconstruct
 backend authority. V3 requests send the actual `{pin,seq}` reference.
 
 Recipient first view saves `readAt` without acknowledging work. The affected
-repository inbox then refreshes from the server rather than changing counts in
-other cached repositories. This existing first-view receipt is the only write
+deployment inbox then refreshes across matching actor/deployment host transports,
+including when the preferred conversation host differs from the inbox-capable host.
+Invalidation never merges credential-generation or scope keys: every observer
+reauthorizes through its own scope rather than receiving copied unread counts.
+This existing first-view receipt is the only write
 associated with opening an unread recipient item; evidence and runtime access are
 read-only. Already-read opening performs no marker mutation. Context browsing
 retains the full frozen pin; Continue and reply controls are absent in this MVP.

@@ -151,7 +151,11 @@ and reply mutations are deferred; no v2 fallback. Pinned shared conversations us
 plugin, composer or execution integrations. Local native-route reuse remains
 deferred until a verified pin/identity resolver exists; a source label is not proof.
 Admission, queued-send recovery and protected inbox state are specified
-in [architecture](docs/architecture.md#components-at-a-glance). Use the targeted
+in [architecture](docs/architecture.md#components-at-a-glance).
+Deployment-wide Mentions additionally requires `chiDeploymentInbox` on the host
+and backend `deploymentInbox: {v: 3}`. Protocol capability does not certify the
+separate backend migration gate; an unready inbox stays unavailable, with no
+repository-picker or client-fan-out fallback. Use the targeted
 regressions and isolated two-account rendered acceptance in
 [testing](docs/testing.md#test-organization); the latter is a separate release gate
 and runs serially because its test-account fixture purges stale owned evidence.

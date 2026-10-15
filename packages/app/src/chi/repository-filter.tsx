@@ -11,7 +11,7 @@ const ThemedFolder = withUnistyles(Folder);
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 interface RepositoryFilterProps {
-  /** Authorized catalog choices, in canonical `github:owner/name` form. */
+  /** Repository identities from already loaded inbox rows. */
   repositories: readonly string[];
   selected: string;
   onSelect: (repository: string) => void;
@@ -41,17 +41,19 @@ export function RepositoryFilter({
   const filterAnchorRef = useRef<View>(null);
 
   const options = useMemo(
-    () =>
-      repositories.map((repository) => ({
+    () => [
+      { id: ALL_REPOSITORIES_OPTION_ID, label: "All repositories" },
+      ...repositories.map((repository) => ({
         id: repository,
         label: repositoryLabel(repository),
       })),
+    ],
     [repositories],
   );
 
   const selectedLabel = useMemo(
     () =>
-      selected === ALL_REPOSITORIES_OPTION_ID ? "Choose repository" : repositoryLabel(selected),
+      selected === ALL_REPOSITORIES_OPTION_ID ? "All repositories" : repositoryLabel(selected),
     [selected],
   );
 
