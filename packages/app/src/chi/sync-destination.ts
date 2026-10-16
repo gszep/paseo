@@ -27,6 +27,13 @@ export interface SyncDestinationState extends SyncDestinationResponse {
   warning: string | null;
   /** True until the first status response for a connected host. Never a local verdict. */
   loading: boolean;
+  /**
+   * True only when this is a current verdict for the live enabled/connected/
+   * supported context (an enabled, successfully resolved status). TanStack keeps
+   * a previous success while a query is disabled (disconnect, capability loss),
+   * so `!loading` alone is not readiness.
+   */
+  available: boolean;
   retry: () => void;
 }
 
@@ -38,6 +45,7 @@ export function syncDestinationQueryKey(serverId: string, workspaceId: string) {
 export function deriveSyncDestinationState(input: {
   response: SyncDestinationResponse | null;
   loading: boolean;
+  available: boolean;
   retry: () => void;
 }): SyncDestinationState {
   return {
@@ -47,6 +55,7 @@ export function deriveSyncDestinationState(input: {
     warning: input.response?.warning ?? null,
     mentionsAvailable: input.response?.mentionsAvailable ?? false,
     loading: input.loading,
+    available: input.available,
     retry: input.retry,
   };
 }

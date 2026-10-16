@@ -14,6 +14,31 @@ import {
   isTerminalSyncError,
   syncDestinationQueryKey,
 } from "./sync-destination";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useSyncDestination } from "./use-sync-destination";
+
+// The live enabled context is driven here; the RPC transport is a mock, but the
+// query client and the hook under test are real.
+const host = vi.hoisted(() => ({
+  connected: true,
+  supported: true,
+  chiSyncStatus: vi.fn(),
+}));
+vi.mock("@/runtime/host-runtime", () => ({
+  useHostRuntimeClient: (id: string) => (id ? { chiSyncStatus: host.chiSyncStatus } : null),
+  useHostRuntimeIsConnected: () => host.connected,
+}));
+vi.mock("@/stores/session-store", () => ({
+  useSessionStore: (select: (state: unknown) => unknown) =>
+    select({
+      sessions: {
+        "host-1": {
+          serverInfo: { features: { chiAppendV3: host.supported } },
+          agents: new Map(),
+        },
+      },
+    }),
+}));
 
 const mounted: Array<{ root: Root; container: HTMLDivElement }> = [];
 function mount(node: React.ReactNode) {
@@ -44,6 +69,7 @@ function Probe() {
       mentionsAvailable: true,
     },
     loading: false,
+    available: true,
     retry: () => undefined,
   });
   return (
@@ -65,6 +91,9 @@ afterEach(() => {
     act(() => entry.root.unmount());
     entry.container.remove();
   }
+  host.connected = true;
+  host.supported = true;
+  host.chiSyncStatus.mockReset();
   vi.clearAllMocks();
 });
 
@@ -81,8 +110,14 @@ describe("sync destination state", () => {
   });
 
   it("treats a missing response as loading, never as a local verdict", () => {
-    const state = deriveSyncDestinationState({ response: null, loading: true, retry: vi.fn() });
+    const state = deriveSyncDestinationState({
+      response: null,
+      loading: true,
+      available: false,
+      retry: vi.fn(),
+    });
     expect(state.loading).toBe(true);
+    expect(state.available).toBe(false);
     expect(state.destination).toBeNull();
     expect(state.pending).toBe(false);
     expect(state.error).toBeNull();
@@ -93,6 +128,7 @@ describe("sync destination state", () => {
     const state = deriveSyncDestinationState({
       response: { destination: null, pending: false, error: null },
       loading: false,
+      available: true,
       retry: vi.fn(),
     });
     expect(state.mentionsAvailable).toBe(false);
@@ -102,6 +138,7 @@ describe("sync destination state", () => {
     const state = deriveSyncDestinationState({
       response: { destination: null, pending: true, error: "evidence-http-503" },
       loading: false,
+      available: true,
       retry: vi.fn(),
     });
     expect(state.error).toBe("evidence-http-503");
@@ -125,5 +162,117 @@ describe("sync destination state", () => {
     expect(isTerminalSyncError("capture-local-scanner-unavailable")).toBe(false);
     expect(isTerminalSyncError("evidence-http-503")).toBe(false);
     expect(isTerminalSyncError(null)).toBe(false);
+  });
+});
+
+function LifecycleProbe() {
+  const state = useSyncDestination("host-1", "ws-1");
+  return (
+    <span
+      data-testid="lifecycle-probe"
+      data-available={String(state.available)}
+      data-loading={String(state.loading)}
+      data-error={state.error ?? ""}
+    />
+  );
+}
+
+describe("useSyncDestination readiness", () => {
+  function renderProbe() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = () =>
+      root.render(
+        <QueryClientProvider client={client}>
+          <LifecycleProbe />
+        </QueryClientProvider>,
+      );
+    act(render);
+    mounted.push({ root, container });
+    return { render, container };
+  }
+
+  function lifecycleProbe(container: HTMLElement) {
+    return container.querySelector('[data-testid="lifecycle-probe"]') as HTMLElement;
+  }
+
+  async function flush(ms = 0) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    });
+  }
+
+  async function waitForAvailable(container: HTMLElement, expected: boolean, timeoutMs = 4000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (lifecycleProbe(container).dataset.available === String(expected)) return;
+      await flush(25);
+    }
+    expect(lifecycleProbe(container).dataset.available).toBe(String(expected));
+  }
+
+  const ready = (error: string | null = null) => ({
+    outcome: "ready" as const,
+    destination: {
+      id: "d",
+      name: "D",
+      endpoint: "https://chi.invalid",
+      audience: "shared" as const,
+    },
+    pending: false,
+    error,
+    warning: null,
+    mentionsAvailable: true,
+  });
+
+  it("gates readiness on the live enabled context, not the retained query success", async () => {
+    host.connected = true;
+    host.supported = true;
+    host.chiSyncStatus.mockResolvedValue(ready());
+    const { render, container } = renderProbe();
+    await waitForAvailable(container, true);
+    expect(lifecycleProbe(container).dataset.loading).toBe("false");
+
+    // Disconnect: the query is disabled but TanStack keeps isSuccess, so loading
+    // stays false. Readiness must drop even though `loading` does not.
+    host.connected = false;
+    act(render);
+    await flush(50);
+    expect(lifecycleProbe(container).dataset.available).toBe("false");
+    expect(lifecycleProbe(container).dataset.loading).toBe("false");
+
+    // Capability loss: same retained success, no current verdict.
+    host.connected = true;
+    host.supported = false;
+    act(render);
+    await flush(50);
+    expect(lifecycleProbe(container).dataset.available).toBe("false");
+    expect(lifecycleProbe(container).dataset.loading).toBe("false");
+
+    // Reconnect with the capability: a current verdict is available again.
+    host.supported = true;
+    host.connected = true;
+    act(render);
+    await waitForAvailable(container, true);
+  });
+
+  it("surfaces a resolved workspace/auth error but suppresses a denied refetch", async () => {
+    host.connected = true;
+    host.supported = true;
+    host.chiSyncStatus.mockResolvedValue(ready("chi-repository-unauthorized"));
+    const { render, container } = renderProbe();
+    await waitForAvailable(container, true);
+    expect(lifecycleProbe(container).dataset.error).toBe("chi-repository-unauthorized");
+
+    // Denied refetch: the query errors, isSuccess becomes false, readiness drops.
+    host.chiSyncStatus.mockRejectedValue(new Error("chi-denied"));
+    host.connected = false;
+    act(render);
+    await flush(50);
+    host.connected = true;
+    act(render);
+    await waitForAvailable(container, false);
   });
 });

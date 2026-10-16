@@ -43,6 +43,7 @@ export const critical = {
     "src/chi/inbox-coverage.browser.test.tsx",
     "src/chi/mentions-unavailable.browser.test.tsx",
     "src/chi/repository-filter.browser.test.tsx",
+    "src/chi/sync-notice-scope.test.ts",
     "src/chi/sync-notice.browser.test.tsx",
     "src/chi/use-sync-destination.browser.test.tsx",
     "src/composer/actions.test.ts",
