@@ -31,6 +31,10 @@ A pairing invitation is neither. It is an expiring, single-use exchange that cre
 
 Agents and terminals use workspace authority. Both can execute code and mutate the workspace, so separate write permissions would claim an isolation boundary the daemon cannot enforce.
 
+[Agent write confinement](write-confinement.md) tracks the experimental OS process
+boundary and its closed production-admission gate. Daemon permissions do not
+establish filesystem confinement.
+
 Owner, operator, and viewer are UI presets expanded into explicit permissions. Do not persist them as roles. Adding a permission must not silently widen an existing principal.
 
 Permissions are additive allows. Missing authority denies the operation. Do not add deny precedence.
