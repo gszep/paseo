@@ -54,11 +54,59 @@ test("a transient failure still suggests a retry, not the secret copy", () => {
   expect(isTerminalSyncError("evidence-http-503")).toBe(false);
 });
 
+test("a drained or unready repository explains setup/maintenance instead of a host reconnect", () => {
+  for (const code of [
+    "append-http-503-source-writers-drained",
+    "chi-mentions-http-503-source-writers-drained",
+  ]) {
+    const message = mentionError(new Error(code));
+    expect(message).toContain("setup or maintenance");
+    expect(message).toContain("repository admin or operator");
+    expect(message).not.toContain("Reconnect this host and retry");
+    // Retryable: the bounded auto-retry resumes once the backend state changes.
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
+test("an unknown 503 stays a generic temporary outage, never a reconnect or reset", () => {
+  for (const code of [
+    "append-http-503",
+    "append-http-503-log-commit-unknown",
+    "chi-mentions-http-503",
+    "chi-mentions-http-503-capacity-contention",
+  ]) {
+    const message = mentionError(new Error(code));
+    expect(message).toContain("temporarily unavailable");
+    expect(message).not.toContain("Reconnect this host and retry");
+    expect(message).not.toContain("reset");
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
+test("an unconfirmed commit never claims the capture was rejected", () => {
+  for (const code of ["append-http-503", "append-http-503-log-commit-unknown"]) {
+    const message = mentionError(new Error(code));
+    expect(message).toMatch(/could not confirm/);
+    expect(message).not.toMatch(/did not accept|was rejected|not accepted/);
+    // Immutable replay keeps it retryable and duplicate-safe.
+    expect(message).toContain("replays the exact same batch");
+    expect(isTerminalSyncError(code)).toBe(false);
+  }
+});
+
 test("a cut-scan limit explains capacity without claiming a secret was found", () => {
   const code = "capture-local-cut-scan-limit";
   expect(mentionError(new Error(code))).toBe(
     "This batch exceeds the local truncation safety-scan limit. Sync stopped. Keep the session local until the oversized record is resolved.",
   );
+  expect(isTerminalSyncError(code)).toBe(true);
+});
+test("an over-cap reasoning record explains the capacity stop without claiming a secret was found", () => {
+  const code = "native-capture-bounds";
+  expect(mentionError(new Error(code))).toBe(
+    "This session has a record too large to keep its reasoning within the shared evidence limit. Sync stopped; start a shorter session or keep this session local.",
+  );
+  expect(mentionError(new Error(code))).not.toContain("A secret was detected");
   expect(isTerminalSyncError(code)).toBe(true);
 });
 test.each([

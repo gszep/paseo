@@ -53,6 +53,10 @@ export interface BrandConfig {
   favicons: BrandFavicons | null;
   /** Home-screen attribution, or null to keep the default community links. */
   attribution: BrandAttribution | null;
+  /** Public agent setup guide shown before host pairing on the welcome screen. */
+  agentSetup: BrandAttribution | null;
+  /** Standalone participant sign-in, independent of host pairing. */
+  connect: BrandAttribution | null;
 }
 
 /** The default Paseo brand, matching the upstream app. */
@@ -68,6 +72,8 @@ export const PASEO_BRAND: BrandConfig = {
   titleMark: null,
   favicons: null,
   attribution: null,
+  agentSetup: null,
+  connect: null,
 };
 
 const NAME_PATTERN = /^[\p{L}\p{N} ·_-]{1,40}$/u;
@@ -170,10 +176,8 @@ function parseAttribution(value: unknown): BrandAttribution | null {
  */
 export function parseBrandConfig(input: unknown): BrandConfig {
   if (typeof input !== "object" || input === null) throw new Error("brand must be an object");
-  const { name, mark, workingIndicator, titleMark, favicons, attribution } = input as Record<
-    string,
-    unknown
-  >;
+  const { name, mark, workingIndicator, titleMark, favicons, attribution, agentSetup, connect } =
+    input as Record<string, unknown>;
   if (typeof name !== "string" || !NAME_PATTERN.test(name)) {
     throw new Error("brand.name is invalid");
   }
@@ -190,6 +194,8 @@ export function parseBrandConfig(input: unknown): BrandConfig {
     titleMark: typeof titleMark === "string" ? titleMark : null,
     favicons: parseFavicons(favicons),
     attribution: parseAttribution(attribution),
+    agentSetup: parseAttribution(agentSetup),
+    connect: parseAttribution(connect),
   };
 }
 

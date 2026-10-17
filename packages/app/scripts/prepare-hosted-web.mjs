@@ -62,7 +62,7 @@ function parseBrandFaviconSet(value, label) {
  */
 export function parseBrandJson(raw) {
   if (typeof raw !== "object" || raw === null) throw new Error("brand.json must be an object");
-  const { name, mark, workingIndicator, titleMark, icons, attribution } = raw;
+  const { name, mark, workingIndicator, titleMark, icons, attribution, agentSetup, connect } = raw;
   if (typeof name !== "string" || !BRAND_NAME_PATTERN.test(name)) {
     throw new Error("Invalid brand name");
   }
@@ -79,6 +79,8 @@ export function parseBrandJson(raw) {
     titleMark: typeof titleMark === "string" ? titleMark : null,
     icons: parseBrandIcons(icons),
     attribution: parseAttributionInput(attribution),
+    agentSetup: parseAttributionInput(agentSetup),
+    connect: parseAttributionInput(connect),
   };
 }
 
@@ -229,6 +231,8 @@ export function brandRuntimeConfig(brand) {
         }
       : null,
     attribution: brand.attribution,
+    agentSetup: brand.agentSetup,
+    connect: brand.connect,
   };
 }
 

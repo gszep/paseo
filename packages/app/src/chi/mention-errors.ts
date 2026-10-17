@@ -9,6 +9,24 @@ export function mentionError(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error);
   if (code === "chi-mentions-http-503-deployment-inbox-not-ready")
     return "Deployment-wide Mentions is not ready yet. The operator must complete the inbox migration before mentions can load. Reconnecting this host will not help.";
+  // A repository that is drained or not yet provisioned rejects v3 writes with
+  // the same fixed 503 category. This is a destination-side state, never a host
+  // reconnect or a user credential problem, and repeated retries cannot succeed
+  // until the backend state changes. Keep the copy neutral: the public reason
+  // conflates missing setup with an intentional maintenance drain.
+  if (
+    code === "append-http-503-source-writers-drained" ||
+    code === "chi-mentions-http-503-source-writers-drained"
+  )
+    return "This repository is temporarily unavailable for Chi sync or mentions. It may be in setup or maintenance; check with the repository admin or operator. Reconnecting this host will not help.";
+  // Any other current or future fixed 503 category stays generic: never a
+  // reconnect, reset or an exposed backend body. An unconfirmed 503 (e.g.
+  // log-commit-unknown) may already have committed, so the copy must not claim
+  // the batch was rejected; the saved request is replayed immutably on retry.
+  if (code === "append-http-503" || code.startsWith("append-http-503-"))
+    return "Chi could not confirm this capture and is temporarily unavailable. The saved request is retained, so retrying replays the exact same batch rather than duplicating it. Reconnecting this host will not help.";
+  if (code === "chi-mentions-http-503" || code.startsWith("chi-mentions-http-503-"))
+    return "Chi is temporarily unavailable. Retry the same delivery; reconnecting this host will not help.";
   const copy: Record<string, string> = {
     "capture-head-diverged": CAPTURE_HEAD_DIVERGED_MESSAGE,
     "capture-recovery-invalid": CAPTURE_RECOVERY_INVALID_MESSAGE,
@@ -55,6 +73,8 @@ export function mentionError(error: unknown): string {
       "This batch exceeds the local truncation safety-scan limit. Sync stopped. Keep the session local until the oversized record is resolved.",
     "capture-local-secret-scan-limit":
       "This batch exceeds the local secret-scan limit. Sync stopped; keep the session local until the oversized record is resolved.",
+    "native-capture-bounds":
+      "This session has a record too large to keep its reasoning within the shared evidence limit. Sync stopped; start a shorter session or keep this session local.",
     "capture-local-scanner-unavailable":
       "The secret scanner is unavailable on this host. Check the pinned Gitleaks installation, then retry sync.",
     "evidence-http-422-server-secret-scan-rejected":
@@ -81,7 +101,6 @@ export function mentionError(error: unknown): string {
       "This discussion or its source is no longer available to your identity.",
     "chi-mentions-http-409": "The discussion changed. Refresh before starting a new reply.",
     "chi-mentions-http-422": "Chi rejected the content. Nothing new was delivered.",
-    "chi-mentions-http-503": "Chi is temporarily unavailable. Retry the same delivery.",
     "chi-mentions-unavailable": "Unable to confirm delivery. Retry the same operation.",
   };
   return copy[code] ?? "Chi could not complete this operation. Reconnect this host and retry.";
