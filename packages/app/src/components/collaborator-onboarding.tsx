@@ -57,9 +57,9 @@ export function CollaboratorOnboarding() {
       <View style={styles.step}>
         <Text style={styles.title}>2. Set up an agent — only if you need one</Text>
         <Text style={styles.copy}>
-          Give your agent this guide. Public new-host installation is currently blocked; check
-          availability before changing your machine. Existing installations and history must be
-          preserved, with permission before replacement.
+          Give your agent this guide for the released installer, supported fresh-host setup, and
+          current limits. Existing installations and history must be preserved, with permission
+          before replacement.
         </Text>
         <Text selectable style={styles.copy}>
           {BRAND.agentSetup.url}
