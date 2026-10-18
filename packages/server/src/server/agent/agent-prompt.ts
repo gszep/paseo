@@ -11,6 +11,7 @@ import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
+import { formatWorkContext } from "./work-context.js";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
 
@@ -418,12 +419,16 @@ interface FinishNotificationBodyInput {
   title: string;
   reason: FinishNotificationReason;
   lastAssistantMessage: string | null;
+  workContext?: string | null;
   permissionRequest?: AgentPermissionRequest;
 }
 
 function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
   const statusLine = `Agent ${params.childAgentId} (${params.title}) ${params.reason}.`;
   const sections = [statusLine];
+  if (params.workContext) {
+    sections.push(params.workContext);
+  }
   if (params.reason === "needs permission" && params.permissionRequest) {
     sections.push(
       "Respond with `respond_to_permission` using the `agentId` and `requestId` below.",
@@ -512,11 +517,19 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     }
     const title = record?.title ?? childAgentId;
     const lastAssistantMessage = await agentManager.getLastAssistantMessage(childAgentId);
+    const childSnapshot = agentManager.getAgent(childAgentId);
+    const workContext = formatWorkContext({
+      childAgentId,
+      labels: record?.labels,
+      lifecycle: childSnapshot?.lifecycle ?? null,
+      pendingPermissions: childSnapshot?.pendingPermissions.size ?? null,
+    });
     const body = formatFinishNotificationBody({
       childAgentId,
       title,
       reason,
       lastAssistantMessage,
+      workContext,
       permissionRequest,
     });
 
