@@ -1,4 +1,5 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type CDPSession, type Page } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 import { test } from "../support/fixtures";
 import {
   readScrollMetrics,
@@ -234,3 +235,173 @@ test("editing keys in an embedded question keep output following", async ({ page
     await longChat.cleanup();
   }
 });
+
+for (const width of [1280, 390]) {
+  for (const position of [
+    "reading",
+    "bottom",
+    "background",
+    "browser-background",
+    "browser-background-reading",
+    "reconnect",
+  ] as const) {
+    test(`question visibility ${position} at ${width}px`, async ({ page }, testInfo) => {
+      test.setTimeout(180_000);
+      const chat = await seedLongMockAgentTimeline({ turns: 12 });
+      const other =
+        position === "background"
+          ? await seedMockAgentWorkspace({
+              repoPrefix: "question-visibility-other-",
+              title: "Other fixture",
+            })
+          : null;
+      let lifecycle: CDPSession | undefined;
+      try {
+        await page.setViewportSize({ width, height: 900 });
+        await openAgentTimeline(page, chat);
+        await expectChatAtBottom(page);
+        let readingTop: number | undefined;
+        let readingAnchor: { id: string | null; top: number } | null = null;
+        if (position === "reading" || position === "browser-background-reading") {
+          readingTop = (
+            await scrollChatAwayFromBottom(page, { deltaY: -600, minDistanceFromBottom: 300 })
+          ).offsetY;
+          readingAnchor = await page
+            .locator('[data-testid="agent-chat-scroll"]:visible')
+            .first()
+            .evaluate((root) => {
+              const viewport = root.getBoundingClientRect();
+              const row = Array.from(
+                root.querySelectorAll<HTMLElement>("[data-history-row-id]"),
+              ).find(
+                (e) =>
+                  e.getBoundingClientRect().bottom > viewport.top + 4 &&
+                  e.getBoundingClientRect().top < viewport.bottom,
+              );
+              return row
+                ? {
+                    id: row.getAttribute("data-history-row-id"),
+                    top: row.getBoundingClientRect().top - viewport.top,
+                  }
+                : null;
+            });
+          await page.screenshot({ path: testInfo.outputPath("reading-before-question.png") });
+        }
+        if (other) {
+          if (width === 390) await openMobileAgentSidebar(page);
+          await switchWorkspaceViaSidebar({
+            page,
+            serverId: getServerId(),
+            workspaceId: other.workspaceId,
+          });
+        }
+        if (position === "browser-background" || position === "browser-background-reading") {
+          lifecycle = await page.context().newCDPSession(page);
+          await lifecycle.send("Page.setWebLifecycleState", { state: "frozen" });
+        }
+        // This is the isolated mock provider/daemon, never a live user question.
+        await chat.client.sendAgentMessage(
+          chat.agentId,
+          "Emit synthetic questions: two free-write questions.",
+        );
+        await chat.client.waitForAgentUpsert(
+          chat.agentId,
+          (agent) => agent.pendingPermissions.some((p) => p.kind === "question"),
+          15_000,
+        );
+        if (lifecycle) {
+          await lifecycle.send("Page.setWebLifecycleState", { state: "active" });
+          await lifecycle.detach();
+          lifecycle = undefined;
+          await page.bringToFront();
+        }
+        if (other) {
+          if (width === 390) await openMobileAgentSidebar(page);
+          await switchWorkspaceViaSidebar({
+            page,
+            serverId: getServerId(),
+            workspaceId: chat.workspaceId,
+          });
+        }
+        if (position === "reconnect") await page.reload();
+        const card = page.getByTestId("question-form-card").first();
+        await expect(card).toBeVisible({ timeout: 30_000 });
+        await page.screenshot({ path: testInfo.outputPath("pending-before-action.png") });
+        const afterMetrics = await readScrollMetrics(page);
+        const afterAnchor = await page
+          .locator('[data-testid="agent-chat-scroll"]:visible')
+          .first()
+          .evaluate((root, id) => {
+            const row = Array.from(
+              root.querySelectorAll<HTMLElement>("[data-history-row-id]"),
+            ).find((e) => e.getAttribute("data-history-row-id") === id);
+            return row ? row.getBoundingClientRect().top - root.getBoundingClientRect().top : null;
+          }, readingAnchor?.id ?? null);
+        await testInfo.attach("question-geometry", {
+          body: JSON.stringify({ readingTop, readingAnchor, afterMetrics, afterAnchor }),
+          contentType: "application/json",
+        });
+        await writeFile(
+          testInfo.outputPath("question-geometry.json"),
+          JSON.stringify({ readingTop, readingAnchor, afterMetrics, afterAnchor }),
+        );
+        if (readingTop !== undefined) {
+          if (!readingAnchor?.id) throw new Error("Reading anchor was not captured");
+          const anchor = readingAnchor;
+          // Older-page prepends may change scrollTop. Preserve the actual read
+          // row at the same viewport offset, not the document's absolute offset.
+          await expect
+            .poll(async () =>
+              page
+                .locator('[data-testid="agent-chat-scroll"]:visible')
+                .first()
+                .evaluate((root, before) => {
+                  const row = root.querySelector<HTMLElement>(
+                    `[data-history-row-id="${CSS.escape(before.id ?? "")}"]`,
+                  );
+                  return row
+                    ? Math.abs(
+                        row.getBoundingClientRect().top -
+                          root.getBoundingClientRect().top -
+                          before.top,
+                      )
+                    : Infinity;
+                }, anchor),
+            )
+            .toBeLessThanOrEqual(24);
+          const jump = page.getByTestId("scroll-to-question-button");
+          await expect(jump).toBeInViewport();
+          await jump.click();
+        }
+        await expect(card.getByTestId("question-form-current-question")).toBeInViewport();
+        await expect(card.getByTestId("question-form-primary-action")).toBeInViewport();
+        await page.screenshot({
+          path: `test-results/question-visibility-${position}-${width}.png`,
+        });
+        await fillQuestionAnswer(page, {
+          question: "What is the GitHub private repo URL to push to?",
+          answer: "https://example.test/fixture",
+        });
+        await continueToNextQuestion(page);
+        await fillQuestionAnswer(page, {
+          question: "What should the first commit message be?",
+          answer: "Synthetic visibility check",
+        });
+        await submitQuestionAnswers(page);
+        await expect(page.getByTestId("scroll-to-question-button")).toHaveCount(0);
+        await chat.client.waitForFinish(chat.agentId, 20_000);
+        await chat.client.sendAgentMessage(chat.agentId, "emit 2 coalesced agent stream updates");
+        await chat.client.waitForFinish(chat.agentId, 20_000);
+        await expectChatAtBottom(page);
+      } finally {
+        if (lifecycle) {
+          await lifecycle
+            .send("Page.setWebLifecycleState", { state: "active" })
+            .catch(() => undefined);
+          await lifecycle.detach().catch(() => undefined);
+        }
+        await Promise.allSettled([chat.cleanup(), other?.cleanup()]);
+      }
+    });
+  }
+}
