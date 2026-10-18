@@ -230,6 +230,7 @@ export const ja: TranslationResources = {
   agentStream: {
     empty: "このエージェントとチャットを始めましょう...",
     scrollToBottom: "下にスクロール",
+    showPendingQuestion: "回答待ちの質問を表示",
     historyLoadFailed: "エージェントの履歴を読み込めませんでした",
     messageCapped: "このメッセージは上限で切り詰められました（{{bytes}}バイト）。",
     permission: {

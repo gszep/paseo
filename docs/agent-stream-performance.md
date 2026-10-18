@@ -34,6 +34,14 @@ So arrival sets a _target_ and the reveal rate is derived from the backlog inste
   paragraph separators and exposes fragments to plugin callbacks, which need the whole source text.
 - **First sight of a text is revealed whole.** Only growth is paced. This is what makes history hydration, timeline replay, a virtualized row remounting on scroll, and an already-finished message all render complete on first paint without a special case for each.
 - **Leaving `phase: "streaming"` snaps the reveal.** A completed turn must never be left holding characters. `layoutStream` sets the phase, so anything outside the live head with an active turn is already complete.
+- **Pending questions must stay discoverable without stealing the reading position.**
+  Following the bottom includes the live question card. When the reader has moved
+  away, the existing bottom-jump control names the pending question rather than
+  showing only an unexplained arrow. It clears with the permission snapshot; it
+  does not answer the form, force-scroll older reading, or appear in shared read-only history.
+  An upward viewport gesture stops following immediately when there is history
+  above; a delayed scroll event must not lose that intent. Cancelled gestures,
+  editing keys and nested scrollers keep their own behavior.
 - **The reducer queue commits on a frame, with a timer as the ceiling.** A frame callback never fires in a hidden tab, so a timer races it and wins when nothing is painting — the store has to keep advancing either way.
 - **A history row re-renders only when its item or layout item identity changes.** The inverted
   FlatList hands every mounted cell a new `index` and `ref` whenever a row is prepended, so without a

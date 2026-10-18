@@ -54,6 +54,7 @@ import { returnToTimelineTail } from "./timeline-tail-navigation";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { ToolCallDetailsContent } from "@/components/tool-call-details";
 import { QuestionFormCard } from "@/components/question-form-card";
+import { Button } from "@/components/ui/button";
 import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
 import { createStreamPresentation } from "./presentation";
 import { StreamItemWrapper, useStreamRowRenderer } from "./rows";
@@ -126,6 +127,42 @@ function renderLiveAuxiliaryNode(input: {
 function BottomOverlayInset({ height }: { height: number }) {
   const style = useMemo(() => ({ height }), [height]);
   return <View style={style} />;
+}
+
+function StreamTailAction({
+  pendingPermissions,
+  readOnly,
+  onPress,
+}: {
+  pendingPermissions: PendingPermission[];
+  readOnly: boolean;
+  onPress(): void;
+}) {
+  const { t } = useTranslation();
+  const hasPendingQuestion =
+    !readOnly && pendingPermissions.some((permission) => permission.request.kind === "question");
+  if (hasPendingQuestion)
+    return (
+      <Button
+        onPress={onPress}
+        leftIcon={ChevronDown}
+        accessibilityLiveRegion="polite"
+        testID="scroll-to-question-button"
+      >
+        {t("agentStream.showPendingQuestion")}
+      </Button>
+    );
+  return (
+    <Pressable
+      style={stylesheet.scrollToBottomButton}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={t("agentStream.scrollToBottom")}
+      testID="scroll-to-bottom-button"
+    >
+      <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
+    </Pressable>
+  );
 }
 
 function renderPendingPermissionsNode(input: {
@@ -1004,15 +1041,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
             {(!isNearBottom || isTimelineDetached) && (
               <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
                 <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-                  <Pressable
-                    style={stylesheet.scrollToBottomButton}
+                  <StreamTailAction
+                    pendingPermissions={pendingPermissionItems}
+                    readOnly={readOnly}
                     onPress={scrollToBottom}
-                    accessibilityRole="button"
-                    accessibilityLabel={t("agentStream.scrollToBottom")}
-                    testID="scroll-to-bottom-button"
-                  >
-                    <ChevronDown size={24} color={stylesheet.scrollToBottomIcon.color} />
-                  </Pressable>
+                  />
                 </Animated.View>
               </View>
             )}

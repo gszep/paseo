@@ -230,6 +230,7 @@ export const ru: TranslationResources = {
   agentStream: {
     empty: "Начните общаться с этим агентом...",
     scrollToBottom: "Прокрутить вниз",
+    showPendingQuestion: "Показать ожидающий вопрос",
     historyLoadFailed: "Не удалось загрузить историю агента",
     messageCapped: "Это сообщение было обрезано ({{bytes}} байт).",
     permission: {

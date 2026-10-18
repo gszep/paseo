@@ -813,110 +813,109 @@ describe("createWebStreamStrategy", () => {
     expect(onNearHistoryStart).toHaveBeenCalledTimes(2);
   });
 
-  it("does not force bottom after upward wheel when cached scroll top is stale", async () => {
-    const scrollTo = vi.fn(function (
-      this: HTMLElement,
-      options?: ScrollToOptions | number,
-      y?: number,
-    ) {
-      const top = typeof options === "object" ? (options.top ?? 0) : (y ?? 0);
-      Object.defineProperty(this, "scrollTop", {
-        configurable: true,
-        value: top,
+  it.each([true, false])(
+    "keeps upward reading intent when scroll delivery is delayed and cached top is stale (mobile=%s)",
+    async (isMobileBreakpoint) => {
+      const scrollTo = vi.fn(function (
+        this: HTMLElement,
+        options?: ScrollToOptions | number,
+        y?: number,
+      ) {
+        const top = typeof options === "object" ? (options.top ?? 0) : (y ?? 0);
+        Object.defineProperty(this, "scrollTop", {
+          configurable: true,
+          value: top,
+        });
       });
-    });
-    HTMLElement.prototype.scrollTo = scrollTo;
+      HTMLElement.prototype.scrollTo = scrollTo;
 
-    const strategy = createWebStreamStrategy({ isMobileBreakpoint: true });
-    const viewportRef = React.createRef<StreamViewportHandle>();
-    const historyMounted = Array.from({ length: 20 }, (_, index) => userMessage(index));
-    const routeBottomAnchorRequest = {
-      agentId: "agent",
-      reason: "initial-entry" as const,
-      requestKey: "server:agent:initial-entry",
-    };
-    const renderInput = {
-      agentId: "agent",
-      segments: {
-        historyVirtualized: [],
-        historyMounted,
-        liveHead: [],
-      },
-      boundary: {
-        hasVirtualizedHistory: false,
-        hasMountedHistory: true,
-        hasLiveHead: false,
-      },
-      renderers: createRenderers(vi.fn()),
-      listEmptyComponent: null,
-      viewportRef,
-      routeBottomAnchorRequest,
-      onNearBottomChange: vi.fn(),
-      onNearHistoryStart: vi.fn().mockReturnValue(true),
-      isLoadingOlderHistory: false,
-      hasOlderHistory: false,
-      olderHistoryProgressKey: null,
-      scrollEnabled: true,
-      listStyle: null,
-      baseListContentContainerStyle: null,
-      forwardListContentContainerStyle: null,
-    };
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
+      const strategy = createWebStreamStrategy({ isMobileBreakpoint });
+      const viewportRef = React.createRef<StreamViewportHandle>();
+      const historyMounted = Array.from({ length: 20 }, (_, index) => userMessage(index));
+      const routeBottomAnchorRequest = {
+        agentId: "agent",
+        reason: "initial-entry" as const,
+        requestKey: "server:agent:initial-entry",
+      };
+      const renderInput = {
+        agentId: "agent",
+        segments: {
+          historyVirtualized: [],
+          historyMounted,
+          liveHead: [],
+        },
+        boundary: {
+          hasVirtualizedHistory: false,
+          hasMountedHistory: true,
+          hasLiveHead: false,
+        },
+        renderers: createRenderers(vi.fn()),
+        listEmptyComponent: null,
+        viewportRef,
+        routeBottomAnchorRequest,
+        onNearBottomChange: vi.fn(),
+        onNearHistoryStart: vi.fn().mockReturnValue(true),
+        isLoadingOlderHistory: false,
+        hasOlderHistory: false,
+        olderHistoryProgressKey: null,
+        scrollEnabled: true,
+        listStyle: null,
+        baseListContentContainerStyle: null,
+        forwardListContentContainerStyle: null,
+      };
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
 
-    act(() => {
-      root?.render(
-        strategy.render({
-          ...renderInput,
-          isAuthoritativeHistoryReady: false,
-        }),
-      );
-    });
+      act(() => {
+        root?.render(
+          strategy.render({
+            ...renderInput,
+            isAuthoritativeHistoryReady: false,
+          }),
+        );
+      });
 
-    const scrollContainer = container.querySelector('[data-testid="agent-chat-scroll"]');
-    if (!(scrollContainer instanceof HTMLElement)) {
-      throw new Error("Expected agent chat scroll container");
-    }
-    Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 500 });
-    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 1491 });
-    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 0 });
-    await act(async () => {
-      await new Promise((resolve) => requestAnimationFrame(resolve));
-    });
-    act(() => {
-      scrollContainer.dispatchEvent(new Event("scroll"));
-    });
-    scrollTo.mockClear();
+      const scrollContainer = container.querySelector('[data-testid="agent-chat-scroll"]');
+      if (!(scrollContainer instanceof HTMLElement)) {
+        throw new Error("Expected agent chat scroll container");
+      }
+      Object.defineProperty(scrollContainer, "clientHeight", { configurable: true, value: 500 });
+      Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 1491 });
+      Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 0 });
+      await act(async () => {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      });
+      act(() => {
+        scrollContainer.dispatchEvent(new Event("scroll"));
+      });
+      scrollTo.mockClear();
 
-    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 991 });
-    act(() => {
-      scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -900 }));
-    });
-    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 91 });
-    act(() => {
-      scrollContainer.dispatchEvent(new Event("scroll"));
-    });
-    expect(scrollTo).not.toHaveBeenCalled();
+      Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 991 });
+      const clock = vi.spyOn(window.performance, "now").mockReturnValue(1000);
+      act(() => {
+        scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -900 }));
+      });
+      clock.mockReturnValue(1201);
+      Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 91 });
+      act(() => {
+        scrollContainer.dispatchEvent(new Event("scroll"));
+      });
+      expect(scrollTo).not.toHaveBeenCalled();
 
-    Object.defineProperty(scrollContainer, "scrollTop", { configurable: true, value: 0 });
-    act(() => {
-      scrollContainer.dispatchEvent(new Event("scroll"));
-    });
-    expect(scrollTo).not.toHaveBeenCalled();
+      Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 2531 });
+      act(() => {
+        root?.render(
+          strategy.render({
+            ...renderInput,
+            isAuthoritativeHistoryReady: true,
+          }),
+        );
+      });
 
-    Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 2531 });
-    act(() => {
-      root?.render(
-        strategy.render({
-          ...renderInput,
-          isAuthoritativeHistoryReady: true,
-        }),
-      );
-    });
-
-    expect(scrollTo).not.toHaveBeenCalled();
-  });
+      expect(scrollTo).not.toHaveBeenCalled();
+    },
+  );
 
   it("reattaches follow-output when a small scroll range returns to bottom", async () => {
     const scrollTo = vi.fn(function (
@@ -1127,6 +1126,24 @@ describe("createWebStreamStrategy", () => {
       scrollContainer.dispatchEvent(
         new WheelEvent("wheel", { bubbles: true, ctrlKey: true, deltaY: -100 }),
       );
+      const canceledWheel = new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -100,
+      });
+      canceledWheel.preventDefault();
+      scrollContainer.dispatchEvent(canceledWheel);
+      const canceledKey = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "Home",
+      });
+      canceledKey.preventDefault();
+      scrollContainer.dispatchEvent(canceledKey);
+      const input = document.createElement("textarea");
+      scrollContainer.append(input);
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Home" }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowUp" }));
     });
     Object.defineProperty(scrollContainer, "scrollHeight", { configurable: true, value: 1800 });
     act(() => {

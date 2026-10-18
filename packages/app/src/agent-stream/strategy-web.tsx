@@ -971,12 +971,19 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
 
     const markUpwardViewportInput = () => {
       markUpwardInputEvidence();
+      // A real upward gesture can precede its scroll event by more than the
+      // evidence window under load. Stop following before queued layout work
+      // can pull the reader back down; nested/editing gestures are filtered out.
+      if (scrollContainer.scrollTop > USER_SCROLL_DELTA_EPSILON) {
+        stopFollowingOutputFromUserIntent();
+      }
       if (scrollContainer.scrollTop <= USER_SCROLL_DELTA_EPSILON) {
         rearmHistoryStartFromUserIntent();
       }
     };
     const handleWheel = (event: WheelEvent) => {
       if (
+        !event.defaultPrevented &&
         !event.ctrlKey &&
         event.deltaY < 0 &&
         !canNestedScrollerConsumeUpwardInput(event.target, scrollContainer)
@@ -985,7 +992,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!isUpwardViewportScrollKey(event)) {
+      if (event.defaultPrevented || !isUpwardViewportScrollKey(event)) {
         return;
       }
       if (canNestedScrollerConsumeUpwardInput(event.target, scrollContainer)) {
@@ -1054,6 +1061,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
       lastTouchClientYRef.current = touch.clientY;
     };
     const handleTouchMove = (event: TouchEvent) => {
+      if (event.defaultPrevented) return;
       const touch = event.touches[0];
       if (!touch) {
         return;
@@ -1107,6 +1115,7 @@ function WebStreamViewport(props: StreamRenderInput & { isMobileBreakpoint: bool
     isActive,
     markUpwardInputEvidence,
     rearmHistoryStartFromUserIntent,
+    stopFollowingOutputFromUserIntent,
   ]);
 
   useEffect(() => {

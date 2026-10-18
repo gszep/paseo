@@ -1,5 +1,5 @@
 import { V2Timeline } from "./timeline.js";
-import type { ModelInfo, SessionMessageAssistant } from "@opencode/client";
+import type { FormInfo, ModelInfo, SessionMessageAssistant } from "@opencode/client";
 import { describe, expect, test, vi } from "vitest";
 import { applyResumeOverrides } from "./configuration.js";
 import { OpenCodeV2AgentClient } from "./agent.js";
@@ -253,6 +253,73 @@ describe("OpenCode v2 resume configuration", () => {
         tool: undefined,
       },
     ]);
+  });
+
+  test("native question form events reconcile without text deltas and remain answerable after reconnect", async () => {
+    const harness = new V2Harness();
+    const form: FormInfo = {
+      id: "native-question-fixture",
+      sessionID: "session",
+      title: "Fixture question",
+      metadata: { kind: "question", tool: { messageID: "fixture-message", id: "fixture-call" } },
+      fields: [
+        {
+          key: "surface",
+          title: "Which fixture surface?",
+          type: "string",
+          options: [{ label: "Web", value: "web", description: "Synthetic browser surface" }],
+        },
+      ],
+    };
+    let available = false;
+    const forms = vi
+      .spyOn(harness.api.session.form, "list")
+      .mockImplementation(async () => (available ? [form] : []));
+    const reply = vi.spyOn(harness.api.session.form, "reply").mockImplementation(async () => {
+      available = false;
+    });
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.createSession({ provider: "opencode", cwd: "/tmp/project" });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      available = true;
+      harness.push({ id: "created", created: 2, type: "form.created", data: { form } });
+      await vi.waitFor(() => expect(session.getPendingPermissions()).toHaveLength(1));
+      expect(session.getPendingPermissions()[0]).toMatchObject({
+        kind: "question",
+        input: {
+          questions: [
+            {
+              header: "surface",
+              question: "Which fixture surface?",
+              options: [{ label: "Web", value: "web" }],
+            },
+          ],
+        },
+      });
+      const before = forms.mock.calls.length;
+      harness.push({ id: "reconnected", created: 3, type: "server.connected", data: {} });
+      await vi.waitFor(() => expect(forms.mock.calls.length).toBeGreaterThan(before));
+      expect(events.filter((event) => event.type === "permission_requested")).toHaveLength(1);
+      await session.respondToPermission(form.id, {
+        behavior: "allow",
+        updatedInput: { answers: { surface: "Web" } },
+      });
+      expect(reply).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "session",
+        formID: form.id,
+        answer: { surface: "web" },
+      });
+      expect(session.getPendingPermissions()).toEqual([]);
+      expect(events.filter((event) => event.type === "permission_resolved")).toHaveLength(1);
+      expect(harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+    }
   });
   test("restores each same-directory agent environment on reconnect and resume", async () => {
     const first = new V2Harness();

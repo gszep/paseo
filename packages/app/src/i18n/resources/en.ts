@@ -224,6 +224,7 @@ export const en = {
   agentStream: {
     empty: "Start chatting with this agent...",
     scrollToBottom: "Scroll to bottom",
+    showPendingQuestion: "Show pending question",
     historyLoadFailed: "Couldn't load agent history",
     messageCapped: "This message was capped ({{bytes}} bytes).",
     permission: {
