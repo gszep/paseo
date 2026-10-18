@@ -5,6 +5,7 @@ import { useFetchInfiniteQuery } from "@/data/query";
 import type { InboxContext } from "./use-inbox";
 import {
   conversationKey,
+  conversationTailCursor,
   conversationPresentation,
   mentionWindowCursor,
   olderConversationCursor,
@@ -16,16 +17,20 @@ export function usePinnedConversation(
   handoffId: string,
   index: number,
   ref: ChiEntryRef,
+  viewPin?: ChiEntryRef["pin"],
 ) {
   const cache = useQueryClient();
-  const key = conversationKey(ref);
+  const key = JSON.stringify([
+    conversationKey(ref),
+    viewPin ? conversationKey({ pin: viewPin, seq: ref.seq }) : null,
+  ]);
   const queryKey = useMemo(
     () => [...context.queryKey, "conversation", ref.pin.repo, handoffId, index, key],
     [context.queryKey, ref.pin.repo, handoffId, index, key],
   );
   const query = useFetchInfiniteQuery({
     queryKey,
-    initialPageParam: mentionWindowCursor(ref),
+    initialPageParam: viewPin ? conversationTailCursor(viewPin) : mentionWindowCursor(ref),
     enabled: context.isCurrent(),
     retry: false,
     gcTime: 0,
@@ -44,17 +49,19 @@ export function usePinnedConversation(
           id: handoffId,
           index,
           cursor: pageParam,
+          ...(viewPin ? { pin: viewPin } : {}),
         });
         if (signal.aborted || !context.isCurrent()) throw new Error("chi-mention-context-changed");
         if (result.kind !== "context") throw new Error("chi-mention-invalid-response");
-        return validateConversationPage(ref, result, pageParam);
+        return validateConversationPage(ref, result, pageParam, viewPin ?? ref.pin);
       } catch (error) {
         if (!signal.aborted)
           cache.getQueryCache().find({ queryKey, exact: true })?.setState({ data: undefined });
         throw error;
       }
     },
-    getPreviousPageParam: (page) => olderConversationCursor(ref, page),
+    getPreviousPageParam: (page) =>
+      olderConversationCursor(viewPin ? { pin: viewPin, seq: ref.seq } : ref, page),
     getNextPageParam: (page) => page.nextCursor ?? undefined,
   });
   const historyId = JSON.stringify(queryKey);

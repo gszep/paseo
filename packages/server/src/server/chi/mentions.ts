@@ -615,6 +615,41 @@ export class ChiMentions {
       throw new Error("chi-mention-native-source-required");
     return this.readSource(identity, source, operation);
   }
+  private async contextView(
+    identity: MentionIdentity,
+    reference: Pin,
+    operation: Extract<ChiMentionOperation, { action: "context" }>,
+  ) {
+    let selected = reference;
+    let cursor = operation.cursor;
+    let bindingRevision: number | undefined;
+    if (operation.latest) {
+      if (operation.pin || cursor) throw new Error("chi-mention-invalid-source");
+      const head = z
+        .object({
+          pin: z.unknown(),
+          bindingRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        })
+        .parse(
+          await this.call(identity, "evidence/inspect", "GET", undefined, {
+            sourceId: reference.sourceId,
+          }),
+        );
+      selected = parsePin(head.pin);
+      bindingRevision = head.bindingRevision;
+      cursor = `${selected.head}:${Math.max(0, selected.count - 8)}`;
+    } else if (operation.pin) selected = parsePin(operation.pin);
+    if (
+      selected.deployment !== reference.deployment ||
+      selected.repo !== reference.repo ||
+      selected.sourceId !== reference.sourceId ||
+      selected.count < reference.count ||
+      (selected.count === reference.count && selected.head !== reference.head)
+    )
+      throw new Error("chi-mention-invalid-response");
+    return { selected, cursor, bindingRevision };
+  }
+
   private async readSource(
     identity: MentionIdentity,
     source: Extract<ChiSource, { kind: "neutral" }>,
@@ -624,12 +659,17 @@ export class ChiMentions {
     const ref = source.appendRef;
     if (!ref) throw new Error("chi-mention-native-source-required");
     if (operation.action === "context") {
+      const { selected, cursor, bindingRevision } = await this.contextView(
+        identity,
+        ref.pin,
+        operation,
+      );
       // V3 complete-entry witnesses are below 100 KiB; eight entries leave
       // response framing room under the strict 1 MiB decoder boundary.
-      const { start, end } = pinnedContextRange(ref.pin, operation.cursor);
+      const { start, end } = pinnedContextRange(selected, cursor);
       const page = z.object({ entries: z.array(z.string()).max(30) }).parse(
         await this.call(identity, "evidence/entries", "GET", undefined, {
-          pin: JSON.stringify(ref.pin),
+          pin: JSON.stringify(selected),
           start: String(start),
           end: String(end),
         }),
@@ -641,7 +681,9 @@ export class ChiMentions {
         actor,
         source,
         entries,
-        nextCursor: end < ref.pin.count ? `${ref.pin.head}:${end}` : null,
+        nextCursor: end < selected.count ? `${selected.head}:${end}` : null,
+        ...(operation.latest || operation.pin ? { viewPin: selected } : {}),
+        ...(bindingRevision === undefined ? {} : { bindingRevision }),
       } as const;
       return boundedPinnedContext(result);
     }

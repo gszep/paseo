@@ -18,6 +18,7 @@ import { mentionQueryKey } from "./mention-context";
 
 const fixture = vi.hoisted(() => ({
   supported: true,
+  currentSupported: false,
   connected: true,
   client: { chiMentions: vi.fn() },
   localCandidate: false,
@@ -88,6 +89,7 @@ function store() {
             chiInboxActivity: true,
             chiDeploymentInbox: fixture.deploymentInbox,
             chiPinnedTimeline: fixture.supported,
+            chiPinnedCurrent: fixture.currentSupported,
           },
         },
         agents: new Map(
@@ -176,6 +178,8 @@ let currentIdentity: ChiMentionContext;
 let currentHandoff: ChiHandoff;
 let viewedDelay: Promise<void> | undefined;
 let selectedPin = pin;
+let currentPin = { ...pin, count: 80, head: "c".repeat(64) };
+let currentDelay: Promise<void> | undefined;
 let inboxRows: ChiHandoff[] = [];
 let inboxError: string | undefined;
 
@@ -183,6 +187,7 @@ beforeEach(() => {
   vi.stubGlobal("React", React);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   fixture.supported = true;
+  fixture.currentSupported = false;
   fixture.connected = true;
   fixture.localCandidate = false;
   fixture.deploymentInbox = true;
@@ -197,6 +202,8 @@ beforeEach(() => {
   currentHandoff = handoff;
   viewedDelay = undefined;
   selectedPin = pin;
+  currentPin = { ...pin, count: 80, head: "c".repeat(64) };
+  currentDelay = undefined;
   inboxRows = [];
   inboxError = undefined;
   fixture.client.chiMentions.mockImplementation(
@@ -237,9 +244,14 @@ beforeEach(() => {
         throw new Error(`Unexpected mutation or native operation: ${operation.action}`);
       expect(operation.repo).toBe(selectedPin.repo);
       expect(operation.id).toBe(handoff.id);
-      expect(operation.cursor?.startsWith(`${selectedPin.head}:`)).toBe(true);
-      const start = Number(operation.cursor!.split(":")[1]);
-      const end = Math.min(start + 8, selectedPin.count);
+      const viewPin = operation.latest ? currentPin : (operation.pin ?? selectedPin);
+      const cursor = operation.latest
+        ? `${viewPin.head}:${Math.max(0, viewPin.count - 8)}`
+        : operation.cursor!;
+      expect(cursor.startsWith(`${viewPin.head}:`)).toBe(true);
+      const start = Number(cursor.split(":")[1]);
+      const end = Math.min(start + 8, viewPin.count);
+      if (operation.latest && currentDelay) await currentDelay;
       if (delayed) await delayed;
       if (transient)
         throw new ChiOperationError(transient, {
@@ -251,6 +263,8 @@ beforeEach(() => {
         actor: context.actor,
         context,
         source: currentHandoff.sources[0],
+        ...(operation.latest || operation.pin ? { viewPin } : {}),
+        ...(operation.latest ? { bindingRevision: 7 } : {}),
         entries: Array.from({ length: end - start }, (_, n) => {
           const seq = start + n;
           return {
@@ -270,7 +284,7 @@ beforeEach(() => {
             ],
           };
         }),
-        nextCursor: end < selectedPin.count ? `${selectedPin.head}:${end}` : null,
+        nextCursor: end < viewPin.count ? `${viewPin.head}:${end}` : null,
       };
     },
   );
@@ -300,6 +314,70 @@ function target() {
   return container.querySelector<HTMLElement>('[data-testid="referenced-history-item"]');
 }
 
+test.each([390, 1280])(
+  "explicit current tail preserves the mention and never executes at %spx",
+  async (width) => {
+    fixture.currentSupported = true;
+    await page.viewport(width, 900);
+    render();
+    await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View current shared tail" }).click();
+    await expect.element(page.getByTestId("shared-current-pin")).toHaveTextContent("80 entries");
+    await expect
+      .element(page.getByTestId("shared-conversation-pin"))
+      .toHaveTextContent("40 entries");
+    expect(
+      fixture.client.chiMentions.mock.calls.some(
+        ([input]) =>
+          input.operation.action === "context" && input.operation.pin?.head === currentPin.head,
+      ),
+    ).toBe(true);
+    await expect
+      .poll(() => {
+        const last = [...container.querySelectorAll<HTMLElement>("*")].find(
+          (element) =>
+            element.children.length === 0 &&
+            element.textContent?.trim() === "Earlier shared message 79. ".repeat(30).trim(),
+        );
+        const viewport = container.querySelector('[data-testid="read-only-stream"]');
+        if (!last || !viewport) return false;
+        const row = last.getBoundingClientRect(),
+          bounds = viewport.getBoundingClientRect();
+        return row.bottom > bounds.top && row.top < bounds.bottom;
+      })
+      .toBe(true);
+    await page.screenshot({ path: `../../.vitest-screenshots/current-tail-${width}.png` });
+    currentPin = { ...currentPin, count: 81, head: "d".repeat(64) };
+    await expect.element(page.getByTestId("shared-current-pin")).toHaveTextContent("80 entries");
+    await page.getByRole("button", { name: "Jump to mention" }).click();
+    await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+    expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
+    expect(
+      fixture.client.chiMentions.mock.calls.every(([input]) =>
+        ["scope", "read", "context"].includes(input.operation.action),
+      ),
+    ).toBe(true);
+  },
+);
+
+test("a late current-head response cannot override an explicit return to the mention", async () => {
+  fixture.currentSupported = true;
+  render();
+  await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+  let release!: () => void;
+  currentDelay = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.getByRole("button", { name: "View current shared tail" }).click();
+  await page.getByRole("button", { name: "Jump to mention" }).click();
+  await act(async () => {
+    release();
+    await currentDelay;
+  });
+  expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
+  await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+});
+
 function renderRoute() {
   root.render(
     <QueryClientProvider client={queryClient}>
@@ -307,6 +385,31 @@ function renderRoute() {
     </QueryClientProvider>,
   );
 }
+
+test("revocation clears the selected current tail and ignores a late head refresh", async () => {
+  fixture.currentSupported = true;
+  render();
+  await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View current shared tail" }).click();
+  await expect.element(page.getByTestId("shared-current-pin")).toHaveTextContent("80 entries");
+  let release!: () => void;
+  currentDelay = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.getByRole("button", { name: "View current shared tail" }).click();
+  denied = "chi-mentions-http-404";
+  await act(async () => {
+    await queryClient.invalidateQueries({ predicate: (q) => q.queryKey.includes("handoff") });
+  });
+  expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
+  expect(protectedData()).toEqual([]);
+  await act(async () => {
+    release();
+    await currentDelay;
+  });
+  expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
+  expect(protectedData()).toEqual([]);
+});
 
 test.each([390, 1280])(
   "sidebar to cross-repository mentions to exact conversation and back at %spx",
@@ -370,7 +473,7 @@ test.each([390, 1280])(
           return rect.top >= viewport.top - 1 && rect.bottom <= viewport.bottom + 1;
         })
         .toBe(true);
-      expect(container.textContent).toContain("Read-only shared snapshot");
+      expect(container.textContent).toContain("Original mention snapshot (read-only)");
       await page.screenshot({
         path: `../../.vitest-screenshots/flat-mentions-conversation-${width}-${row.repo.split("/").at(-1)}.png`,
       });
@@ -534,7 +637,7 @@ test.each([390, 1280])(
     );
     expect(container.textContent).toContain("Shared workspace");
     expect(container.textContent).toContain("Mention from @sender");
-    expect(container.textContent).toContain("Read-only shared snapshot");
+    expect(container.textContent).toContain("Original mention snapshot (read-only)");
     expect(
       container.querySelectorAll("textarea,input,[data-testid*=rewind],[data-testid*=composer]")
         .length,
