@@ -80,7 +80,7 @@ export function useInboxTransport({ deploymentInbox: requireDeploymentInbox = fa
 
 export function useInbox(
   transport: ReturnType<typeof useInboxTransport>,
-  options: { paused?: boolean; autoContinue?: boolean } = {},
+  options: { paused?: boolean; autoContinue?: boolean; inbox?: boolean } = {},
 ) {
   const { scope, state, host, queryKey } = transport;
   return useInboxQuery({

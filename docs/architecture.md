@@ -185,6 +185,10 @@ inbox capability parsing and requests live in the daemon, not a new native helpe
 export. Only the inbox-specific readiness reason is added at this boundary;
 other 503 responses retain the baseline's status-only handling. This does not
 enable native Resume, replace a helper, or certify an installed-host drain.
+Received and Sent share the same bounded feed and direction-separated query keys.
+The direction is a route parameter so conversation Back returns to the selected
+list; switching direction remounts local search/filter/detail state. Sent rows
+lead with the recipient, and listing either direction never marks rows read.
 Inbox reads omit the repository header; detail and first-view reads retain the
 row's repository. Every page still passes fresh backend repository/source ACL and
 tombstone checks. No repository catalog or local mapping is needed to load the feed.

@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { userEvent } from "vitest/browser";
+import { page as browserPage, userEvent } from "vitest/browser";
 import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 import { AtSign } from "lucide-react-native";
 import { SidebarHeaderRow } from "@/components/sidebar/sidebar-header-row";
@@ -25,8 +25,28 @@ const host = vi.hoisted(() => ({
   statuses: new Map([["transport-host", "online"]]),
   client: { chiMentions: vi.fn() },
 }));
+const directionRoute = vi.hoisted(() => ({
+  value: "received",
+  listeners: new Set<() => void>(),
+}));
+const listEvents = vi.hoisted(() => ({ end: () => {} }));
 vi.mock("expo-router", () => ({
-  router: { push: vi.fn() },
+  router: {
+    push: vi.fn(),
+    setParams: vi.fn(({ direction }: { direction: string }) => {
+      directionRoute.value = direction;
+      for (const listener of directionRoute.listeners) listener();
+    }),
+  },
+  useLocalSearchParams: () => ({
+    direction: React.useSyncExternalStore(
+      (listener) => {
+        directionRoute.listeners.add(listener);
+        return () => directionRoute.listeners.delete(listener);
+      },
+      () => directionRoute.value,
+    ),
+  }),
   usePathname: () => "/chi",
   useFocusEffect: () => {},
 }));
@@ -56,15 +76,18 @@ vi.mock("react-native", async (importOriginal) => {
     // layout-driven onEndReached hiding a broken autoContinue connection.
     FlatList: ({
       onScroll,
+      onEndReached,
       testID,
       data,
       renderItem,
     }: {
       onScroll(event: { nativeEvent: { contentOffset: { y: number } } }): void;
+      onEndReached(): void;
       testID: string;
       data: InboxListRow[];
       renderItem(info: { item: InboxListRow }): React.ReactNode;
     }) => {
+      listEvents.end = onEndReached;
       const scroll = React.useCallback(
         (event: React.UIEvent<HTMLDivElement>) =>
           onScroll?.({ nativeEvent: { contentOffset: { y: event.currentTarget.scrollTop } } }),
@@ -104,6 +127,7 @@ vi.mock("./inbox-identity", async () => {
 });
 
 beforeEach(() => {
+  directionRoute.value = "received";
   vi.stubGlobal("React", React);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 });
@@ -131,6 +155,131 @@ afterEach(() => {
   }
   queryClient.clear();
 });
+
+test.each([390, 1280])(
+  "Received/Sent use separate global cursors and preserve read-only direction at %spx",
+  async (width) => {
+    await browserPage.viewport(width, 900);
+    expect(window.innerWidth).toBe(width);
+    const context: ChiMentionContext = {
+      actor: "github:alice",
+      deployment: "synthetic-deployment",
+      generation: "b".repeat(64),
+      evidenceVersion: 3,
+      repo: "*",
+      deploymentInbox: true,
+    };
+    function handoff(id: string, repo: string, recipient: string): ChiHandoff {
+      return {
+        schemaVersion: 1,
+        id,
+        repo,
+        author: "github:alice",
+        recipient,
+        text: "Direction fixture",
+        sources: [{ kind: "neutral", id: "source", snapshot: "a".repeat(64), entryId: "entry" }],
+        state: "open",
+        revision: 1,
+        createdAt: "2026-10-08T00:00:00Z",
+        updatedAt: "2026-10-08T00:00:00Z",
+        events: [],
+      };
+    }
+    const received = handoff(
+      "00000000-0000-4000-8000-000000000021",
+      "github:o/received",
+      "github:alice",
+    );
+    const lateReceived = handoff(
+      "00000000-0000-4000-8000-000000000022",
+      "github:o/received",
+      "github:alice",
+    );
+    const sentA = handoff("00000000-0000-4000-8000-000000000023", "github:o/a", "github:bob");
+    const sentB = handoff("00000000-0000-4000-8000-000000000024", "github:o/b", "github:carol");
+    const delayed = deferred<{
+      kind: "inbox";
+      actor: string;
+      context: ChiMentionContext;
+      handoffs: ChiHandoff[];
+      nextCursor: null;
+      unreadCount: number;
+    }>();
+    const reads: Array<{ inbox: boolean; cursor?: string }> = [];
+    host.client = {
+      chiMentions: vi.fn(async ({ operation }) => {
+        if (operation.action === "scope") {
+          expect(operation.includeRepositories).toBe(false);
+          return { kind: "scope", actor: context.actor, context };
+        }
+        if (operation.action !== "inbox") throw Error("unexpected mutation/detail request");
+        expect(operation.repo).toBeUndefined();
+        reads.push({ inbox: operation.inbox, cursor: operation.cursor });
+        if (operation.inbox && operation.cursor) return delayed.promise;
+        const sentPage = operation.cursor ? [sentB] : [sentA];
+        const firstCursor = operation.inbox ? "received-tail" : "sent-tail";
+        return {
+          kind: "inbox",
+          actor: context.actor,
+          context,
+          handoffs: operation.inbox ? [received] : sentPage,
+          nextCursor: operation.cursor ? null : firstCursor,
+          unreadCount: 1,
+        };
+      }),
+    };
+    const screen = (
+      <QueryClientProvider client={queryClient}>
+        <ChiInboxScreen />
+      </QueryClientProvider>
+    );
+    const view = mount(screen);
+    const row = (h: ChiHandoff) =>
+      view.container.querySelector(`[data-testid="mention-row-${h.id}"]`);
+    await vi.waitFor(() => expect(row(received)).not.toBeNull());
+    act(() => listEvents.end());
+    await vi.waitFor(() => expect(reads.some((r) => r.cursor === "received-tail")).toBe(true));
+    await act(async () => {
+      await userEvent.click(view.container.querySelector('[data-testid="inbox-sent"]')!);
+    });
+    await vi.waitFor(() => expect(row(sentA)).not.toBeNull());
+    expect(row(received)).toBeNull();
+    expect(row(sentA)!.textContent).toContain("@bob");
+    act(() =>
+      delayed.resolve({
+        kind: "inbox",
+        actor: context.actor,
+        context,
+        handoffs: [lateReceived],
+        nextCursor: null,
+        unreadCount: 1,
+      }),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(row(lateReceived)).toBeNull();
+    act(() => listEvents.end());
+    await vi.waitFor(() => expect(row(sentB)).not.toBeNull());
+    expect(row(sentB)!.textContent).toContain("@carol");
+    await browserPage.screenshot({ path: `../../.vitest-screenshots/flat-sent-${width}.png` });
+    expect(reads.some((r) => !r.inbox && r.cursor === "sent-tail")).toBe(true);
+    expect(reads.some((r) => !r.inbox && r.cursor === "received-tail")).toBe(false);
+    const { router } = await import("expo-router");
+    await act(async () => {
+      await userEvent.click(row(sentA)!.querySelector('[role="button"]')!);
+    });
+    expect(router.push).toHaveBeenLastCalledWith({
+      pathname: "/chi",
+      params: { view: "conversation", repo: sentA.repo, handoff: sentA.id, sourceIndex: "0" },
+    });
+    expect(directionRoute.value).toBe("sent");
+    act(() => view.root.render(null));
+    act(() => view.root.render(screen));
+    await vi.waitFor(() => expect(row(sentA)).not.toBeNull());
+    expect(row(received)).toBeNull();
+  },
+);
 
 test.each(["account", "credential", "deployment", "capability", "failure"])(
   "real transport verification evicts cached scope before the first observer render: %s",

@@ -13,10 +13,11 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { MessageSquare } from "lucide-react-native";
 import type { Theme } from "@/styles/theme";
 import { useQueryClient } from "@tanstack/react-query";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import type { ChiHandoff } from "@getpaseo/protocol/chi-mentions";
 import { useFetchQuery } from "@/data/query";
 import { Button } from "@/components/ui/button";
+import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
 import { Alert } from "@/components/ui/alert";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { SearchField } from "@/components/ui/search-field";
@@ -43,6 +44,11 @@ import {
 function rowKey(row: InboxListRow) {
   return row.key;
 }
+type InboxDirection = "received" | "sent";
+const directionOptions: SegmentedControlOption<InboxDirection>[] = [
+  { value: "received", label: "Received", testID: "inbox-received" },
+  { value: "sent", label: "Sent", testID: "inbox-sent" },
+];
 function EmptyInbox({ filtered }: { filtered: boolean }) {
   return <Text style={styles.hint}>{filtered ? "No mentions match" : "No mentions yet"}</Text>;
 }
@@ -121,18 +127,49 @@ export function ChiInboxScreen() {
         />
       ) : null}
       {host && context?.identity.deploymentInbox && !state.loading ? (
-        <Inbox key={`${host}/${state.generation}`} transport={transport} context={context} />
+        <DirectedInbox
+          key={`${host}/${state.generation}`}
+          transport={transport}
+          context={context}
+        />
       ) : null}
     </View>
+  );
+}
+
+function DirectedInbox({
+  transport,
+  context,
+}: {
+  transport: ReturnType<typeof useInboxTransport>;
+  context: InboxContext;
+}) {
+  const params = useLocalSearchParams<{ direction?: string }>();
+  const direction = params.direction === "sent" ? "sent" : "received";
+  const selectDirection = useCallback((value: InboxDirection) => {
+    router.setParams({ direction: value });
+  }, []);
+  return (
+    <Inbox
+      key={direction}
+      transport={transport}
+      context={context}
+      direction={direction}
+      selectDirection={selectDirection}
+    />
   );
 }
 
 function Inbox({
   transport,
   context,
+  direction,
+  selectDirection,
 }: {
   transport: ReturnType<typeof useInboxTransport>;
   context: InboxContext;
+  direction: InboxDirection;
+  selectDirection(value: InboxDirection): void;
 }) {
   const cache = useQueryClient();
   const compact = useIsCompactFormFactor();
@@ -154,6 +191,7 @@ function Inbox({
   );
   // The recipient inbox shares its first page with the sidebar badge.
   const query = useInbox(transport, {
+    inbox: direction === "received",
     paused: scrolledDown,
     autoContinue: true,
   });
@@ -189,14 +227,19 @@ function Inbox({
     ({ item }: { item: InboxListRow }) => (
       <InboxRow
         handoff={item.handoff}
+        inbox={direction === "received"}
         search={searchInput}
-        unread={!item.handoff.readAt && item.handoff.recipient === context.identity.actor}
+        unread={
+          direction === "received" &&
+          !item.handoff.readAt &&
+          item.handoff.recipient === context.identity.actor
+        }
         selected={selected?.id === item.handoff.id && selected?.repo === item.handoff.repo}
         onSelect={choose}
         onDiscuss={discuss}
       />
     ),
-    [searchInput, selected?.id, selected?.repo, choose, discuss, context.identity.actor],
+    [searchInput, selected?.id, selected?.repo, choose, discuss, context.identity.actor, direction],
   );
   const isFiltered = searchInput.trim().length > 0 || repository !== ALL_REPOSITORIES_OPTION_ID;
   const repositoryOptionTestID = useCallback((id: string) => `inbox-repo-filter-item-${id}`, []);
@@ -204,6 +247,13 @@ function Inbox({
   return (
     <View style={styles.screen}>
       <View style={styles.filterRail}>
+        <SegmentedControl
+          options={directionOptions}
+          value={direction}
+          onValueChange={selectDirection}
+          size="sm"
+          testID="inbox-direction"
+        />
         <View style={styles.filterRow}>
           <SearchField
             value={searchInput}
@@ -275,6 +325,7 @@ function Inbox({
 /** Context stays secondary to the sender and message; opening never requires a local workspace. */
 function InboxRow({
   handoff,
+  inbox,
   search,
   unread,
   selected,
@@ -282,13 +333,14 @@ function InboxRow({
   onDiscuss,
 }: {
   handoff: ChiHandoff;
+  inbox: boolean;
   search: string;
   unread: boolean;
   selected: boolean;
   onSelect(h: ChiHandoff): void;
   onDiscuss(h: ChiHandoff): void;
 }) {
-  const handle = `@${handoff.author.slice(7)}`;
+  const handle = `@${(inbox ? handoff.author : handoff.recipient).slice(7)}`;
   const repo = repositoryLabel(handoff.repo);
   const workspace = inboxWorkspaceName(handoff);
   const timeAgo = formatTimeAgo(new Date(handoff.createdAt));
