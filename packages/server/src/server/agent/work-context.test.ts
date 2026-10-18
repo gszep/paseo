@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+
 import { expect, test } from "vitest";
 
 import {
@@ -81,6 +83,34 @@ test("attention never becomes a false human alert", () => {
     "human-decision",
   );
   expect(deriveWorkContextAttention({ lifecycle: "error" })).toBe("failure");
+});
+
+test("unicode values are clipped by code point and the payload cap is byte-based", () => {
+  const emoji = "🙂".repeat(300);
+  const block = formatWorkContext({
+    childAgentId: "child-1",
+    labels: { "paseo.next-action": emoji },
+    lifecycle: "idle",
+  })!;
+  const json = block.match(/^<work-context[^>]*>\n([\s\S]*)\n<\/work-context>$/)?.[1];
+  expect(json).toBeDefined();
+  const payload = JSON.parse(json!) as Record<string, unknown>;
+  expect(Array.from(String(payload.nextAction))).toHaveLength(211);
+  expect(String(payload.nextAction).endsWith("[truncated]")).toBe(true);
+  expect(Buffer.byteLength(json!, "utf8")).toBeLessThanOrEqual(1024);
+  expect(block.match(/<\/work-context>/g)).toHaveLength(1);
+
+  const oversized = formatWorkContext({
+    childAgentId: "child-1",
+    labels: { "paseo.task": emoji, "paseo.next-action": emoji },
+    lifecycle: "idle",
+  })!;
+  const oversizedJson = oversized.match(/^<work-context[^>]*>\n([\s\S]*)\n<\/work-context>$/)?.[1];
+  expect(oversizedJson).toBeDefined();
+  const fallback = JSON.parse(oversizedJson!) as Record<string, unknown>;
+  expect(fallback.truncated).toBe(true);
+  expect(Buffer.byteLength(oversizedJson!, "utf8")).toBeLessThanOrEqual(1024);
+  expect(oversized.match(/<\/work-context>/g)).toHaveLength(1);
 });
 
 test("two children under one parent share a budget reference, not a new grant", () => {

@@ -7,6 +7,14 @@
 // not change runtime permissions. Missing values are omitted; lifecycle is
 // reported separately from attention. Values are clipped and the whole payload
 // is bounded and JSON-escaped before it is placed in the notification prompt.
+//
+// The block becomes part of the ordinary finish-notification prompt. There is no
+// separate store, but the prompt flows into the authorized caller's provider
+// transcript and may be captured or exported under the existing minimisation,
+// scanner and audience policy. Bounding and escaping are not secret redaction;
+// labels are ordinary shared task metadata, not a secret channel.
+
+import { Buffer } from "node:buffer";
 
 export const WORK_CONTEXT_VERSION = "work-context/v0";
 
@@ -46,8 +54,9 @@ function readLabel(labels: Record<string, unknown>, key: string): string | undef
 }
 
 function clip(value: string): string {
-  return value.length > WORK_CONTEXT_VALUE_LIMIT
-    ? `${value.slice(0, WORK_CONTEXT_VALUE_LIMIT)}[truncated]`
+  const codePoints = Array.from(value);
+  return codePoints.length > WORK_CONTEXT_VALUE_LIMIT
+    ? `${codePoints.slice(0, WORK_CONTEXT_VALUE_LIMIT).join("")}[truncated]`
     : value;
 }
 
@@ -174,7 +183,7 @@ export function formatWorkContext(input: WorkContextInput): string | null {
   const lifecycle = resolveLifecycle(input.lifecycle);
   const payload = buildWorkContextPayload(fields, input, lifecycle);
   let json = serialise(payload);
-  if (json.length > WORK_CONTEXT_BLOCK_LIMIT) {
+  if (Buffer.byteLength(json, "utf8") > WORK_CONTEXT_BLOCK_LIMIT) {
     json = serialise({
       version: WORK_CONTEXT_VERSION,
       childAgentId: clip(input.childAgentId),
