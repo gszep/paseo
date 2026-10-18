@@ -203,6 +203,8 @@ export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
     id: z.string().uuid(),
     index: z.number().int().min(0).max(31),
     cursor: z.string().max(4096).optional(),
+    latest: z.boolean().optional(),
+    pin: ChiPinSchema.optional(),
   }),
   z.object({
     action: z.literal("acknowledge"),
@@ -257,6 +259,8 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
     kind: z.literal("context"),
     actor: principal,
     source: ChiSourceSchema,
+    viewPin: ChiPinSchema.optional(),
+    bindingRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
     entries: z
       .array(
         z.object({

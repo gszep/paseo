@@ -150,6 +150,9 @@ and reply mutations are deferred; no v2 fallback. Pinned shared conversations us
 `chiPinnedTimeline` and the normal supplied-history renderer without agent, file,
 plugin, composer or execution integrations. Local native-route reuse remains
 deferred until a verified pin/identity resolver exists; a source label is not proof.
+`chiPinnedCurrent` adds explicit authorized shared-head/tail selection while
+preserving the original mention pin. Head/binding metadata is read selection,
+never a Resume grant; neither selection advances silently on refresh.
 Admission, queued-send recovery and protected inbox state are specified
 in [architecture](docs/architecture.md#components-at-a-glance).
 Deployment-wide Mentions additionally requires `chiDeploymentInbox` on the host

@@ -19,6 +19,7 @@ export interface ReadOnlyStreamViewProps {
   historyId: string;
   streamItems: StreamItem[];
   targetItemId?: string;
+  startAtEnd?: boolean;
   historyPagination: {
     hasOlder: boolean;
     isLoadingOlder: boolean;
@@ -51,6 +52,7 @@ function ReadOnlyHistory({
   historyId,
   streamItems,
   targetItemId,
+  startAtEnd = false,
   historyPagination,
   newerPagination,
 }: ReadOnlyStreamViewProps) {
@@ -60,6 +62,13 @@ function ReadOnlyHistory({
     [isMobile],
   );
   const viewportRef = useRef<StreamViewportHandle | null>(null);
+  const bottomRequest = useMemo(
+    () =>
+      startAtEnd
+        ? { reason: "initial-entry" as const, agentId: historyId, requestKey: `${historyId}:tail` }
+        : null,
+    [historyId, startAtEnd],
+  );
   const scrolledTarget = useRef<string | undefined>(undefined);
   const [expandedInline, setExpandedInline] = useState<Set<string>>(() => new Set());
   const { start, hasLocalHistory, revealLoadedHistory, loadOlder } = useStreamHistoryWindow({
@@ -189,7 +198,7 @@ function ReadOnlyHistory({
             renderers,
             listEmptyComponent: null,
             viewportRef,
-            routeBottomAnchorRequest: null,
+            routeBottomAnchorRequest: bottomRequest,
             isAuthoritativeHistoryReady: true,
             onNearBottomChange: ignoreNearBottom,
             onNearHistoryStart: loadOlder,

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { router } from "expo-router";
 import { StyleSheet } from "react-native-unistyles";
@@ -19,7 +19,11 @@ import { inboxWorkspaceName, repositoryLabel } from "./inbox-model";
 import { useInboxReader, type InboxContext } from "./use-inbox";
 import { useViewedHandoff } from "./use-viewed-handoff";
 import { usePinnedConversation } from "./use-pinned-conversation";
-import { conversationKey, conversationReference } from "./pinned-conversation";
+import {
+  conversationKey,
+  conversationReference,
+  currentConversationSelection,
+} from "./pinned-conversation";
 import { mentionError } from "./mention-errors";
 
 export interface ChiConversationScreenProps {
@@ -32,6 +36,9 @@ export function ChiConversationScreen(props: ChiConversationScreenProps) {
   const { host, scope, state, context, verifying, transportError } = useInboxReader();
   const supported = useSessionStore(
     (store) => store.sessions[host]?.serverInfo?.features?.chiPinnedTimeline === true,
+  );
+  const currentSupported = useSessionStore(
+    (store) => store.sessions[host]?.serverInfo?.features?.chiPinnedCurrent === true,
   );
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   const back = useCallback(() => {
@@ -87,6 +94,7 @@ export function ChiConversationScreen(props: ChiConversationScreenProps) {
         key={`${host}/${state.generation}/${props.repo}/${props.handoffId}/${props.sourceIndex}`}
         {...props}
         context={context}
+        currentSupported={currentSupported}
       />
     );
   }
@@ -108,7 +116,8 @@ function AuthorizedConversation({
   repo,
   handoffId,
   sourceIndex,
-}: ChiConversationScreenProps & { context: InboxContext }) {
+  currentSupported,
+}: ChiConversationScreenProps & { context: InboxContext; currentSupported: boolean }) {
   const cache = useQueryClient();
   const options = inboxDetailQueryOptions({
     queryKey: context.queryKey,
@@ -140,19 +149,41 @@ function AuthorizedConversation({
   const retry = useCallback(() => void refetch(), [refetch]);
   if (query.isError) return <ReadError error={query.error} retry={retry} />;
   if (!query.data) return <Text style={styles.hint}>Loading the referenced conversation…</Text>;
-  return <ConversationSource context={context} handoff={query.data} index={sourceIndex} />;
+  return (
+    <ConversationSource
+      context={context}
+      handoff={query.data}
+      index={sourceIndex}
+      currentSupported={currentSupported}
+    />
+  );
 }
 
 function ConversationSource({
   context,
   handoff,
   index,
+  currentSupported,
 }: {
   context: InboxContext;
   handoff: ChiHandoff;
   index: number;
+  currentSupported: boolean;
 }) {
   const viewed = useViewedHandoff(context, handoff);
+  const cache = useQueryClient();
+  const [current, setCurrent] = useState<ReturnType<typeof currentConversationSelection> | null>(
+    null,
+  );
+  const [currentError, setCurrentError] = useState<Error | null>(null);
+  const [loadingCurrent, setLoadingCurrent] = useState(false);
+  const request = useRef(0);
+  useEffect(
+    () => () => {
+      request.current++;
+    },
+    [],
+  );
   const selection = useMemo(() => {
     try {
       return { ref: conversationReference(handoff, index), error: null };
@@ -160,6 +191,42 @@ function ConversationSource({
       return { ref: null, error };
     }
   }, [handoff, index]);
+  const showMention = useCallback(() => {
+    request.current++;
+    setCurrent(null);
+    setCurrentError(null);
+    setLoadingCurrent(false);
+  }, []);
+  const showCurrent = useCallback(async () => {
+    const attempt = ++request.current;
+    setLoadingCurrent(true);
+    setCurrentError(null);
+    try {
+      if (!selection.ref) throw new Error("chi-mention-native-source-required");
+      const page = await context.execute({
+        action: "context",
+        repo: handoff.repo,
+        id: handoff.id,
+        index,
+        latest: true,
+      });
+      if (!context.isCurrent() || request.current !== attempt) return;
+      if (page.kind !== "context") throw new Error("chi-mention-invalid-response");
+      setCurrent(
+        currentConversationSelection(selection.ref, page, JSON.stringify(context.queryKey)),
+      );
+    } catch (error) {
+      if (!context.isCurrent() || request.current !== attempt) return;
+      const pages = [...context.queryKey, "conversation", handoff.repo, handoff.id];
+      void cache.cancelQueries({ queryKey: pages }, { revert: false });
+      cache.removeQueries({ queryKey: pages });
+      setCurrent(null);
+      setCurrentError(error instanceof Error ? error : new Error("chi-mention-invalid-response"));
+    } finally {
+      if (request.current === attempt) setLoadingCurrent(false);
+    }
+  }, [cache, context, handoff.repo, handoff.id, index, selection.ref]);
+  if (currentError) return <ReadError error={currentError} retry={showCurrent} />;
   if (!selection.ref)
     return (
       <Alert
@@ -175,13 +242,25 @@ function ConversationSource({
         <Text style={styles.hint}>
           Mention from @{handoff.author.slice(7)} · {repositoryLabel(handoff.repo)}
         </Text>
+        {currentSupported ? (
+          <Button size="sm" disabled={loadingCurrent} onPress={showCurrent}>
+            {loadingCurrent ? "Checking shared head…" : "View current shared tail"}
+          </Button>
+        ) : null}
+        {current ? (
+          <Text selectable style={styles.hint} testID="shared-current-pin">
+            Viewing verified shared head · {current.pin.count} entries ·{" "}
+            {current.pin.head.slice(0, 12)} · binding {current.bindingRevision}. Unsynced native
+            work is not included. This read does not acquire control.
+          </Text>
+        ) : null}
         <Text selectable style={styles.hint} testID="shared-conversation-pin">
-          Read-only shared snapshot · {selection.ref.pin.count} entries ·{" "}
+          Original mention snapshot (read-only) · {selection.ref.pin.count} entries ·{" "}
           {selection.ref.pin.head.slice(0, 12)}
         </Text>
         <Text style={styles.hint}>
-          Minimised history. Later pages stay within this snapshot; new session activity is not
-          loaded automatically.
+          Minimised history. Pages stay within the selected view; new activity is not loaded
+          automatically.
         </Text>
         {viewed.isError ? (
           <Alert
@@ -194,11 +273,13 @@ function ConversationSource({
         ) : null}
       </View>
       <ConversationWindow
-        key={conversationKey(selection.ref)}
+        key={JSON.stringify([conversationKey(selection.ref), current])}
         context={context}
         handoffId={handoff.id}
         index={index}
         reference={selection.ref}
+        viewPin={current?.pin}
+        showMention={showMention}
       />
     </View>
   );
@@ -209,13 +290,22 @@ function ConversationWindow({
   handoffId,
   index,
   reference,
+  viewPin,
+  showMention,
 }: {
   context: InboxContext;
   handoffId: string;
   index: number;
   reference: ChiEntryRef;
+  viewPin?: ChiEntryRef["pin"];
+  showMention(): void;
 }) {
-  const query = usePinnedConversation(context, handoffId, index, reference);
+  const query = usePinnedConversation(context, handoffId, index, reference, viewPin);
+  const retryMention = query.retry;
+  const jumpToMention = useCallback(() => {
+    showMention();
+    if (!viewPin) retryMention();
+  }, [showMention, viewPin, retryMention]);
   const historyPagination = useMemo(
     () => ({
       hasOlder: query.hasPreviousPage,
@@ -243,14 +333,15 @@ function ConversationWindow({
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Button size="sm" variant="ghost" onPress={query.retry}>
+        <Button size="sm" variant="ghost" onPress={jumpToMention}>
           Jump to mention
         </Button>
       </View>
       <ReadOnlyStreamView
         historyId={query.historyId}
         streamItems={query.items}
-        targetItemId={query.targetItemId}
+        targetItemId={viewPin ? undefined : query.targetItemId}
+        startAtEnd={Boolean(viewPin)}
         historyPagination={historyPagination}
         newerPagination={newerPagination}
       />

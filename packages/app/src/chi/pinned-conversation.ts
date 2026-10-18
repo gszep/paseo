@@ -2,6 +2,52 @@ import type { ChiEntryRef, ChiHandoff, ChiMentionResult } from "@getpaseo/protoc
 import { hydrateStreamState, type StreamItem } from "@/types/stream";
 
 export type ConversationPage = Extract<ChiMentionResult, { kind: "context" }>;
+type Pin = ChiEntryRef["pin"];
+
+/** Read selection only. Neither a binding revision nor a label grants checkout. */
+export function currentConversationSelection(
+  reference: ChiEntryRef,
+  page: ConversationPage,
+  contextKey: string,
+) {
+  const original = page.source.kind === "neutral" ? page.source.appendRef : undefined;
+  const pin = page.viewPin;
+  if (
+    typeof contextKey !== "string" ||
+    !contextKey ||
+    !original ||
+    conversationKey(original) !== conversationKey(reference) ||
+    !pin ||
+    pin.deployment !== reference.pin.deployment ||
+    pin.repo !== reference.pin.repo ||
+    pin.sourceId !== reference.pin.sourceId ||
+    pin.count < reference.pin.count ||
+    (pin.count === reference.pin.count && pin.head !== reference.pin.head) ||
+    !Number.isSafeInteger(page.bindingRevision) ||
+    page.bindingRevision! < 1
+  )
+    throw new Error("chi-mention-invalid-response");
+  validateConversationPage(reference, page, conversationTailCursor(pin), pin);
+  return { pin: { ...pin }, bindingRevision: page.bindingRevision!, contextKey };
+}
+
+export function conversationTailCursor(pin: Pin) {
+  return `${pin.head}:${Math.max(0, pin.count - 8)}`;
+}
+
+export function assertCheckoutSelectionCurrent(
+  selected: { pin: Pin; bindingRevision: number; contextKey: string },
+  observed: { pin: Pin; bindingRevision: number; contextKey: string },
+) {
+  if (
+    conversationKey({ pin: selected.pin, seq: 0 }) !==
+      conversationKey({ pin: observed.pin, seq: 0 }) ||
+    selected.bindingRevision !== observed.bindingRevision ||
+    selected.contextKey !== observed.contextKey
+  )
+    throw new Error("chi-checkout-selection-stale");
+  // Caller must separately verify the owner grant and native stop receipt.
+}
 
 export function conversationReference(handoff: ChiHandoff, index: number): ChiEntryRef {
   const source = handoff.sources[index];
@@ -30,25 +76,32 @@ export function validateConversationPage(
   ref: ChiEntryRef,
   page: ConversationPage,
   cursor: string,
+  viewPin: Pin = ref.pin,
 ): ConversationPage {
   const received = page.source.kind === "neutral" ? page.source.appendRef : undefined;
   if (!received || conversationKey(received) !== conversationKey(ref))
     throw new Error("chi-mention-invalid-response");
   const start = Number(cursor.slice(cursor.lastIndexOf(":") + 1));
   if (
-    !cursor.startsWith(`${ref.pin.head}:`) ||
+    !cursor.startsWith(`${viewPin.head}:`) ||
     !Number.isSafeInteger(start) ||
     start < 0 ||
-    start >= ref.pin.count
+    start >= viewPin.count
   )
     throw new Error("chi-mention-invalid-response");
-  if (page.entries.length !== Math.min(8, ref.pin.count - start))
+  if (
+    viewPin !== ref.pin &&
+    (!page.viewPin ||
+      conversationKey({ pin: page.viewPin, seq: 0 }) !== conversationKey({ pin: viewPin, seq: 0 }))
+  )
+    throw new Error("chi-mention-invalid-response");
+  if (page.entries.length !== Math.min(8, viewPin.count - start))
     throw new Error("chi-mention-invalid-response");
   for (const [index, entry] of page.entries.entries()) {
-    validateConversationEntry(entry, start + index, ref.pin.count);
+    validateConversationEntry(entry, start + index, viewPin.count);
   }
   const end = start + page.entries.length;
-  const expectedNext = end < ref.pin.count ? `${ref.pin.head}:${end}` : null;
+  const expectedNext = end < viewPin.count ? `${viewPin.head}:${end}` : null;
   if (page.nextCursor !== expectedNext) throw new Error("chi-mention-invalid-response");
   return page;
 }

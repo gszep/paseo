@@ -232,7 +232,19 @@ reauthorizes through its own scope rather than receiving copied unread counts.
 This existing first-view receipt is the only write
 associated with opening an unread recipient item; evidence and runtime access are
 read-only. Already-read opening performs no marker mutation. Context browsing
-retains the full frozen pin; Continue and reply controls are absent in this MVP.
+retains the original mention pin. With `chiPinnedCurrent`, an explicit current-tail
+action obtains a fresh shared-log pin and binding revision, then reads bounded
+pages at that selected pin through the same renderer. The original EntryRef stays
+separate, Jump to mention restores it, and no background refresh advances either
+selection. Unsynced native work is not implied to be included. Returning to the
+mention or losing context invalidates a delayed current-head response.
+
+This remains an intermediate reader, not Resume. A current head, source label or
+binding revision grants no execution authority. Checkout must revalidate head,
+binding and context, then separately obtain an owner-authorized recipient grant
+and supported session-specific stop/readmission proof. The eventual send must
+append to the same canonical source; an independent Fork is a separate action.
+Continue and reply controls remain absent.
 Account or repository changes never adopt another principal's saved intent.
 Existing local reply/human-prompt receipts are retained but not dispatched through
 retired backend mutations. Session policy consent remains backend-owned.

@@ -625,6 +625,91 @@ test("exact metadata cannot authorize transformed or duplicate user entries", as
   expect(f.submissions).toHaveLength(1);
 });
 
+test("explicit current-tail reads retain the mention pin and freeze subsequent pages", async () => {
+  const f = await fixture(),
+    sender = f.restart();
+  await sender.prepare(f.input);
+  await sender.captured(f.capture);
+  const id = [...f.records.keys()][0]!;
+  const original = structuredClone(f.records.get(id)!.sources[0]!);
+  const selected = { ...original.pin, count: 12, head: "c".repeat(64) };
+  let current = selected;
+  const ordinary = f.authority.request;
+  let inspections = 0;
+  f.authority.request = async (url, init) => {
+    const target = new URL(String(url));
+    if (target.pathname === "/api/evidence/inspect") {
+      inspections++;
+      return Response.json({ pin: current, bindingRevision: 7 });
+    }
+    if (
+      target.pathname === "/api/evidence/entries" &&
+      JSON.parse(target.searchParams.get("pin")!).head === selected.head
+    ) {
+      const start = Number(target.searchParams.get("start")),
+        end = Number(target.searchParams.get("end"));
+      expect(end - start).toBeLessThanOrEqual(8);
+      return Response.json({
+        entries: Array.from({ length: end - start }, (_, i) =>
+          encodeEntry({
+            v: 3,
+            seq: start + i,
+            kind: "message",
+            minimiser: "min-v1",
+            payload: {
+              native: JSON.stringify({
+                id: `msg_${start + i}`,
+                type: "user",
+                time: { created: 1 },
+                text: "synthetic shared history",
+              }),
+            },
+          }),
+        ),
+      });
+    }
+    return ordinary(url, init);
+  };
+  const tail = await sender.execute(f.input.identity, {
+    action: "context",
+    id,
+    index: 0,
+    latest: true,
+  });
+  expect(tail).toMatchObject({
+    kind: "context",
+    source: { appendRef: original },
+    viewPin: selected,
+    bindingRevision: 7,
+    nextCursor: null,
+  });
+  if (tail.kind !== "context") throw new Error("wrong result");
+  expect(tail.entries.map((e) => e.seq)).toEqual([4, 5, 6, 7, 8, 9, 10, 11]);
+  current = { ...selected, count: 13, head: "d".repeat(64) };
+  await sender.execute(f.input.identity, {
+    action: "context",
+    id,
+    index: 0,
+    pin: selected,
+    cursor: `${selected.head}:0`,
+  });
+  expect(inspections).toBe(1);
+  expect(f.records.get(id)!.sources[0]).toEqual(original);
+  await expect(
+    sender.execute(f.input.identity, {
+      action: "context",
+      id,
+      index: 0,
+      pin: { ...selected, sourceId: "e".repeat(64) },
+    }),
+  ).rejects.toThrow("chi-mention-invalid-response");
+  f.deny();
+  await expect(
+    sender.execute(f.input.identity, { action: "context", id, index: 0, pin: selected }),
+  ).rejects.toThrow();
+  expect(f.submissions).toHaveLength(1); // fixture mention only; reads never send.
+});
+
 test("source and neighboring context reads reacquire the handoff and retain its pinned snapshot", async () => {
   const f = await fixture();
   const sender = f.restart();

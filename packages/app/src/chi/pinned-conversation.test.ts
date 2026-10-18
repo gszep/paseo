@@ -2,6 +2,9 @@ import { expect, test } from "vitest";
 import type { ChiEntryRef } from "@getpaseo/protocol/chi-mentions";
 import {
   conversationPresentation,
+  conversationTailCursor,
+  currentConversationSelection,
+  assertCheckoutSelectionCurrent,
   mentionWindowCursor,
   olderConversationCursor,
   validateConversationPage,
@@ -19,6 +22,88 @@ const ref: ChiEntryRef = {
   },
   seq: 27,
 };
+
+test("explicit current-tail selection preserves the original mention and does not authorize checkout", () => {
+  const original = structuredClone(ref);
+  const pin = { ...ref.pin, count: 120, head: "c".repeat(64) };
+  const latest = {
+    ...page(32),
+    viewPin: pin,
+    bindingRevision: 7,
+    entries: page(32).entries.map((entry, i) => Object.assign(entry, { seq: 112 + i })),
+    nextCursor: null,
+  };
+  const selected = currentConversationSelection(ref, latest, "scope-a");
+  expect(selected).toEqual({ pin, bindingRevision: 7, contextKey: "scope-a" });
+  expect(ref).toEqual(original);
+  expect(conversationTailCursor(pin)).toBe(`${pin.head}:112`);
+  expect(() =>
+    assertCheckoutSelectionCurrent(selected, { pin, bindingRevision: 8, contextKey: "scope-a" }),
+  ).toThrow("chi-checkout-selection-stale");
+  expect(() =>
+    assertCheckoutSelectionCurrent(selected, {
+      pin: { ...pin, count: 121, head: "d".repeat(64) },
+      bindingRevision: 7,
+      contextKey: "scope-a",
+    }),
+  ).toThrow("chi-checkout-selection-stale");
+  expect(() => assertCheckoutSelectionCurrent(selected, selected)).not.toThrow();
+  expect(() =>
+    assertCheckoutSelectionCurrent(selected, { ...selected, contextKey: "scope-after-restart" }),
+  ).toThrow("chi-checkout-selection-stale");
+  expect(selected).not.toHaveProperty("executionGranted");
+});
+
+test("current-tail responses cannot substitute scope, rewrite a head or erase mention coordinates", () => {
+  for (const changed of [
+    { deployment: "other" },
+    { repo: "github:other/repo" },
+    { sourceId: "e".repeat(64) },
+    { count: 39 },
+    { head: "f".repeat(64) },
+  ]) {
+    expect(() =>
+      currentConversationSelection(
+        ref,
+        {
+          ...page(32),
+          viewPin: { ...ref.pin, ...changed },
+          bindingRevision: 1,
+        },
+        "scope-a",
+      ),
+    ).toThrow("chi-mention-invalid-response");
+  }
+  expect(() => currentConversationSelection(ref, page(32), "scope-a")).toThrow(
+    "chi-mention-invalid-response",
+  );
+  expect(() =>
+    currentConversationSelection(
+      ref,
+      { ...page(32), viewPin: ref.pin, bindingRevision: 0 },
+      "scope-a",
+    ),
+  ).toThrow("chi-mention-invalid-response");
+});
+
+test("later pages stay at the explicitly selected head instead of silently following a new one", () => {
+  const pin = { ...ref.pin, count: 48, head: "c".repeat(64) };
+  const tail = {
+    ...page(32),
+    viewPin: pin,
+    entries: page(32).entries.map((entry, i) => Object.assign(entry, { seq: 40 + i })),
+    nextCursor: null,
+  };
+  expect(validateConversationPage(ref, tail, `${pin.head}:40`, pin)).toBe(tail);
+  expect(() =>
+    validateConversationPage(
+      ref,
+      { ...tail, viewPin: { ...pin, head: "d".repeat(64) } },
+      `${pin.head}:40`,
+      pin,
+    ),
+  ).toThrow("chi-mention-invalid-response");
+});
 function page(start: number): ConversationPage {
   const end = Math.min(start + 8, ref.pin.count);
   return {
