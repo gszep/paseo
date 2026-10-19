@@ -30,6 +30,50 @@ function jobs(text = source) {
   );
 }
 
+test("two CI lanes retain every check and continue across failed or skipped predecessors", () => {
+  const lanes = [
+    [
+      "format",
+      "lint",
+      "typecheck",
+      "server-tests-ubuntu",
+      "server-tests-ubuntu-v2",
+      "server-tests-windows",
+      "server-tests-windows-v2",
+      "desktop-tests-ubuntu",
+      "desktop-tests-windows",
+    ],
+    [
+      "app-tests",
+      "sdk-tests",
+      "playwright-1",
+      "playwright-2",
+      "playwright-3",
+      "playwright-4",
+      "relay-tests",
+      "cli-tests-1",
+      "cli-tests-2",
+      "cli-tests-3",
+    ],
+  ];
+  const inventory = jobs();
+  assert.deepEqual([...inventory.keys()].sort(), ["changes", ...lanes.flat()].sort());
+  for (const lane of lanes)
+    for (const [index, name] of lane.entries()) {
+      const block = inventory.get(name);
+      const needs = index === 0 ? "needs: changes" : `needs: [changes, ${lane[index - 1]}]`;
+      assert.ok(block.includes(needs), `${name}: missing lane dependency`);
+      assert.match(
+        block,
+        /if: \$\{\{ !cancelled\(\)/,
+        `${name}: predecessor status must not suppress checks`,
+      );
+      const guard = /^    if: (.+)$/m.exec(block)?.[1];
+      assert.ok(guard, `${name}: missing job guard`);
+      assert.doesNotMatch(guard, /needs\.[\w-]+\.result|success\(\)|failure\(\)/);
+    }
+});
+
 test("all required names remain static, with fail-open gating and no workflow path filters", () => {
   const trigger = source.split("jobs:")[0];
   assert.match(trigger, /merge_group:/);
@@ -41,7 +85,7 @@ test("all required names remain static, with fail-open gating and no workflow pa
   for (const name of contexts) assert.ok(source.includes(`    name: ${name}\n`), name);
   for (const [id, block] of jobs()) {
     if (id === "changes") continue;
-    assert.match(block, /needs: changes/);
+    assert.match(block, /needs: (?:changes|\[changes, [\w-]+\])/);
     assert.match(block, /!cancelled\(\)/);
     assert.match(block, /needs\.changes\.outputs\.full != 'false'/);
     if (/^(server-tests|app-tests|sdk-tests|cli-tests)/.test(id)) {

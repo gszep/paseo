@@ -20,6 +20,9 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
+  # Two scheduling lanes bound this workflow to two simultaneous jobs. Every
+  # check keeps its selection and !cancelled() guard, so failed/skipped lane
+  # predecessors do not suppress independent checks. Coordinate runs across PRs.
   changes:
     name: changes
     runs-on: ubuntu-latest
@@ -100,7 +103,7 @@ jobs:
 
   lint:
     name: lint
-    needs: changes
+    needs: [changes, format]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
     steps:
@@ -135,7 +138,7 @@ jobs:
 
   typecheck:
     name: typecheck
-    needs: changes
+    needs: [changes, lint]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
     steps:
@@ -178,7 +181,7 @@ jobs:
 
   server-tests-ubuntu:
     name: server-tests (ubuntu-latest, opencode-ai@1.14.46)
-    needs: changes
+    needs: [changes, typecheck]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     # Static names also exist when job-level draft/docs gating skips execution.
@@ -231,7 +234,7 @@ jobs:
 
   server-tests-ubuntu-v2:
     name: server-tests (ubuntu-latest, @opencode/cli@2.0.10)
-    needs: changes
+    needs: [changes, server-tests-ubuntu]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -240,7 +243,7 @@ jobs:
 
   server-tests-windows:
     name: server-tests (windows-latest, opencode-ai@1.14.46)
-    needs: changes
+    needs: [changes, server-tests-ubuntu-v2]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
@@ -251,7 +254,7 @@ jobs:
 
   server-tests-windows-v2:
     name: server-tests (windows-latest, @opencode/cli@2.0.10)
-    needs: changes
+    needs: [changes, server-tests-windows]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
@@ -261,7 +264,7 @@ jobs:
 
   desktop-tests-ubuntu:
     name: desktop-tests (ubuntu-latest)
-    needs: changes
+    needs: [changes, server-tests-windows-v2]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -337,7 +340,7 @@ jobs:
 
   desktop-tests-windows:
     name: desktop-tests (windows-latest)
-    needs: changes
+    needs: [changes, desktop-tests-ubuntu]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: windows-latest
     timeout-minutes: 30
@@ -379,7 +382,7 @@ jobs:
 
   sdk-tests:
     name: sdk-tests
-    needs: changes
+    needs: [changes, app-tests]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
     runs-on: ubuntu-latest
     steps:
@@ -428,7 +431,7 @@ jobs:
 
   playwright-1:
     name: playwright (shard 1/4)
-    needs: changes
+    needs: [changes, sdk-tests]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -479,7 +482,7 @@ jobs:
 
   playwright-2:
     name: playwright (shard 2/4)
-    needs: changes
+    needs: [changes, playwright-1]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -489,7 +492,7 @@ jobs:
 
   playwright-3:
     name: playwright (shard 3/4)
-    needs: changes
+    needs: [changes, playwright-2]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -499,7 +502,7 @@ jobs:
 
   playwright-4:
     name: playwright (shard 4/4)
-    needs: changes
+    needs: [changes, playwright-3]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -509,7 +512,7 @@ jobs:
 
   relay-tests:
     name: relay-tests
-    needs: changes
+    needs: [changes, playwright-4]
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
     runs-on: ubuntu-latest
     steps:
@@ -537,7 +540,7 @@ jobs:
 
   cli-tests-1:
     name: cli-tests (shard 1/3)
-    needs: changes
+    needs: [changes, relay-tests]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -580,7 +583,7 @@ jobs:
 
   cli-tests-2:
     name: cli-tests (shard 2/3)
-    needs: changes
+    needs: [changes, cli-tests-1]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
@@ -593,7 +596,7 @@ jobs:
 
   cli-tests-3:
     name: cli-tests (shard 3/3)
-    needs: changes
+    needs: [changes, cli-tests-2]
     if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
