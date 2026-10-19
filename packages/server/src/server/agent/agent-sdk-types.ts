@@ -215,6 +215,8 @@ export interface AgentRunOptions {
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
   clientMessageId?: string;
+  /** Internal one-use capability, never accepted from client JSON. */
+  coDriveAdmission?: object;
   /** Runtime-only, caller-bound historical data; never persisted as user text. */
   humanPromptReminder?: string;
   onHumanPromptReminder?: () => Promise<void>;

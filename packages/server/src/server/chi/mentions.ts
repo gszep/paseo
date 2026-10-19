@@ -45,6 +45,7 @@ export interface MentionIdentity {
   credentialGeneration?: string;
   humanPrompts?: boolean;
   deploymentInbox?: boolean;
+  coDrive?: boolean;
 }
 export interface MentionAuthority {
   endpoint: string;
@@ -589,7 +590,8 @@ export class ChiMentions {
     if (
       operation.action === "reply" ||
       operation.action === "acknowledge" ||
-      operation.action === "list"
+      operation.action === "list" ||
+      operation.action === "control"
     )
       throw new Error("chi-operation-unsupported");
     if (operation.action === "participants")
@@ -675,7 +677,7 @@ export class ChiMentions {
         }),
       );
       if (page.entries.length !== end - start) throw new Error("chi-mention-invalid-response");
-      const entries = pinnedTimelineEntries(page.entries, start);
+      const entries = await this.attributedTimeline(identity, selected, page.entries, start);
       const result = {
         kind: "context",
         actor,
@@ -709,6 +711,47 @@ export class ChiMentions {
       payload,
     };
   }
+  private async attributedTimeline(
+    identity: MentionIdentity,
+    pin: Pin,
+    raw: string[],
+    start: number,
+  ) {
+    const entries = pinnedTimelineEntries(raw, start);
+    // Native metadata is only an index hint. Attribution comes from the
+    // authenticated broker receipt matched to this exact canonical entry.
+    if (!identity.coDrive) return entries;
+    for (const [offset, bytes] of raw.entries()) {
+      const decoded = decodeEntry(bytes);
+      if (decoded.kind !== "message") continue;
+      const native = z.object({ native: z.string() }).parse(decoded.payload);
+      const value = z
+        .object({ metadata: z.object({ paseoClientMessageId: z.string() }).optional() })
+        .safeParse(parseNativeJson(native.native));
+      const match = value.success
+        ? value.data.metadata?.paseoClientMessageId.match(/^co-drive:([0-9a-f-]{36})$/)
+        : null;
+      if (!match || !z.string().uuid().safeParse(match[1]).success) continue;
+      const verified = z
+        .object({
+          actor: z
+            .string()
+            .regex(/^github:[a-z0-9][a-z0-9-]{0,38}$/)
+            .nullable(),
+        })
+        .parse(
+          await this.call(identity, "evidence/control", "GET", undefined, {
+            sourceId: pin.sourceId,
+            attribution: match[1]!,
+            pin: JSON.stringify(pin),
+            seq: String(start + offset),
+          }),
+        );
+      if (verified.actor) Object.assign(entries[offset]!, { actor: verified.actor });
+    }
+    return entries;
+  }
+
   private async inbox(
     identity: MentionIdentity,
     operation: Extract<ChiMentionOperation, { action: "inbox" }>,

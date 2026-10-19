@@ -25,6 +25,7 @@ import {
   currentConversationSelection,
 } from "./pinned-conversation";
 import { mentionError } from "./mention-errors";
+import { CoDrivePanel } from "./co-drive-panel";
 
 export interface ChiConversationScreenProps {
   repo: string;
@@ -39,6 +40,9 @@ export function ChiConversationScreen(props: ChiConversationScreenProps) {
   );
   const currentSupported = useSessionStore(
     (store) => store.sessions[host]?.serverInfo?.features?.chiPinnedCurrent === true,
+  );
+  const controlSupported = useSessionStore(
+    (store) => store.sessions[host]?.serverInfo?.features?.chiCoDrive === true,
   );
   const verify = useCallback(() => void scope.acquire().catch(() => undefined), [scope]);
   const back = useCallback(() => {
@@ -95,6 +99,7 @@ export function ChiConversationScreen(props: ChiConversationScreenProps) {
         {...props}
         context={context}
         currentSupported={currentSupported}
+        controlSupported={controlSupported}
       />
     );
   }
@@ -117,7 +122,12 @@ function AuthorizedConversation({
   handoffId,
   sourceIndex,
   currentSupported,
-}: ChiConversationScreenProps & { context: InboxContext; currentSupported: boolean }) {
+  controlSupported,
+}: ChiConversationScreenProps & {
+  context: InboxContext;
+  currentSupported: boolean;
+  controlSupported: boolean;
+}) {
   const cache = useQueryClient();
   const options = inboxDetailQueryOptions({
     queryKey: context.queryKey,
@@ -155,6 +165,7 @@ function AuthorizedConversation({
       handoff={query.data}
       index={sourceIndex}
       currentSupported={currentSupported}
+      controlSupported={controlSupported}
     />
   );
 }
@@ -164,11 +175,13 @@ function ConversationSource({
   handoff,
   index,
   currentSupported,
+  controlSupported,
 }: {
   context: InboxContext;
   handoff: ChiHandoff;
   index: number;
   currentSupported: boolean;
+  controlSupported: boolean;
 }) {
   const viewed = useViewedHandoff(context, handoff);
   const cache = useQueryClient();
@@ -281,6 +294,14 @@ function ConversationSource({
         viewPin={current?.pin}
         showMention={showMention}
       />
+      {controlSupported && context.identity.coDrive && current ? (
+        <CoDrivePanel
+          key={JSON.stringify([context.queryKey, handoff.repo, selection.ref.pin.sourceId])}
+          context={context}
+          source={selection.ref}
+          pin={current.pin}
+        />
+      ) : null}
     </View>
   );
 }
@@ -340,6 +361,7 @@ function ConversationWindow({
       <ReadOnlyStreamView
         historyId={query.historyId}
         streamItems={query.items}
+        verifiedAuthors={query.verifiedAuthors}
         targetItemId={viewPin ? undefined : query.targetItemId}
         startAtEnd={Boolean(viewPin)}
         historyPagination={historyPagination}

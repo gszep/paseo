@@ -116,6 +116,8 @@ export type { InlinePathTarget } from "@/assistant-file-links";
 export type { AssistantForkTarget };
 
 interface UserMessageProps {
+  /** Verified presentation attribution; never an authorization decision. */
+  author?: string;
   /** Supplied evidence has no recipient-host actions or attachment acquisition. */
   readOnly?: boolean;
   serverId?: string;
@@ -426,7 +428,7 @@ function UserMessageImagePill({ image, onOpen, accessibilityLabel }: UserMessage
 const MESSAGE_TEXT_DATASET = { messageText: "true" };
 
 export const UserMessage = memo(function UserMessage(props: UserMessageProps) {
-  if (props.readOnly) return <UserMessageBody {...props} />;
+  if (props.readOnly) return <UserMessageBody {...props} author={props.author ?? "User"} />;
   return <InteractiveUserMessage {...props} />;
 });
 
@@ -449,6 +451,7 @@ function InteractiveUserMessage(props: UserMessageProps) {
 }
 
 function UserMessageBody({
+  author,
   readOnly = false,
   rewind,
   message,
@@ -533,7 +536,7 @@ function UserMessageBody({
         <View style={userMessageStylesheet.bubble}>
           {readOnly ? (
             <Text style={userMessageStylesheet.timestampText} testID="user-message-author">
-              User
+              {author}
             </Text>
           ) : null}
           {hasImages ? (

@@ -142,6 +142,7 @@ export function conversationPresentation(
       if (entry.seq !== undefined && !entries.has(entry.seq)) entries.set(entry.seq, entry);
     }
   const items: StreamItem[] = [];
+  const verifiedAuthors: Record<string, string> = {};
   let targetItemId: string | undefined;
   let targetNativeId: string | undefined;
   const namespace = encodeURIComponent(JSON.stringify([scopeKey, conversationKey(ref)]));
@@ -158,11 +159,13 @@ export function conversationPresentation(
     for (const [index, row] of rows.entries()) {
       const id = `chi:${namespace}:${seq}:${index}`;
       items.push({ ...row, id });
+      if (entry.actor && row.kind === "user_message")
+        verifiedAuthors[id] = `@${entry.actor.slice(7)}`;
       if (seq === ref.seq && index === 0) {
         targetItemId = id;
         targetNativeId = entry.nativeId;
       }
     }
   }
-  return { items, targetItemId, targetNativeId };
+  return { items, targetItemId, targetNativeId, verifiedAuthors };
 }

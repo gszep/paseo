@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { Duplex } from "node:stream";
+import { resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
 
 interface VitestProject {
-  provide: (key: "passwordlessRelayUrl", value: string) => void;
+  provide: (key: string, value: unknown) => void;
 }
 
 export default async function setup(project: VitestProject): Promise<() => Promise<void>> {
@@ -63,8 +65,28 @@ export default async function setup(project: VitestProject): Promise<() => Promi
     throw new Error("Browser WebSocket regression server did not expose a TCP address");
   }
   project.provide("passwordlessRelayUrl", `ws://127.0.0.1:${address.port}/relay`);
+  // Explicit cross-repository synthetic acceptance only. Normal browser suites
+  // neither discover checkouts nor contact an installed daemon/backend.
+  let fixture: { address: string; key: string; close(): Promise<void> } | undefined;
+  const fixtureModule = process.env.CHI_CODRIVE_FIXTURE_MODULE;
+  if (fixtureModule) {
+    try {
+      const loaded = await import(
+        /* @vite-ignore */ pathToFileURL(resolvePath(fixtureModule)).href
+      );
+      fixture = await loaded.startCoDriveFixture(resolvePath(process.cwd(), "../.."));
+    } catch (error) {
+      server.close();
+      throw error;
+    }
+  }
+  project.provide(
+    "coDriveFixture",
+    fixture ? { address: fixture.address, key: fixture.key } : null,
+  );
 
   return async () => {
+    await fixture?.close();
     for (const client of clients) {
       client.destroy();
     }

@@ -2,6 +2,8 @@ import { mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { writeJsonFileAtomic } from "../atomic-file.js";
 import { createHash } from "node:crypto";
+import { hostname } from "node:os";
+import { CoDriveDriver, type ControlSource } from "./co-drive.js";
 import { confirmsNativeSubmission } from "../message-receipts/native.js";
 import { join } from "node:path";
 import { z } from "zod";
@@ -16,6 +18,10 @@ import type {
   Conversation,
   ConversationReply,
   ConversationDestination,
+} from "@henkaku-center/chi-native/conversations";
+import {
+  publishConversationReceipt,
+  readConversationReceipt,
 } from "@henkaku-center/chi-native/conversations";
 import {
   exchangeGitHubToken,
@@ -40,6 +46,7 @@ import type {
   ChiHandoff,
 } from "@getpaseo/protocol/chi-mentions";
 import { ChiOperationError } from "@getpaseo/protocol/chi-mentions";
+import { CoDriveViewSchema, type CoDriveGrant } from "@getpaseo/protocol/chi-mentions";
 import type { ChiSyncDestination, MutableChiConfig } from "@getpaseo/protocol/messages";
 import { createSessionLogin } from "./session-login.js";
 import { ParticipantCache } from "./participant-cache.js";
@@ -53,8 +60,13 @@ import {
   type ResolvedChiDestination,
 } from "./destinations.js";
 import { removeProvenance, type ProvenanceRemover, type ProvenanceWriter } from "./provenance.js";
-import { captureAppend, supportsAppendCapture, type AppendCaptureInput } from "./append-capture.js";
-import { parsePin, type Pin } from "@henkaku-center/chi-native/append-codec";
+import {
+  captureAppend,
+  supportsAppendCapture,
+  verifyCapturedSource,
+  type AppendCaptureInput,
+} from "./append-capture.js";
+import { canonicalJson, parsePin, type Pin } from "@henkaku-center/chi-native/append-codec";
 import { AppendHttpError } from "@henkaku-center/chi-native/append-client";
 
 const label = "chi.native";
@@ -85,6 +97,7 @@ const associationSchema = z.object({
   paused: z.boolean().optional(),
   // Durable sync-needed marker: a capture is outstanding across restarts.
   capturePending: z.boolean().optional(),
+  coDrive: z.number().int().positive().optional(),
   // Historical explicit Share/Continue labels used private visibility.
   explicit: z.boolean().optional(),
   // Hidden provenance ref written after a settled turn in a mapped workspace.
@@ -238,6 +251,13 @@ function createDeployment(endpoint: string): ChiAuthority {
 }
 
 export class ChiConnection {
+  private readonly controlAdmissions = new WeakMap<
+    object,
+    { agentId: string; admit: () => Promise<void> }
+  >();
+  private readonly controlDriver: CoDriveDriver;
+  private controlTimer: ReturnType<typeof setTimeout> | null = null;
+  private controlStopped = true;
   readonly mentions: ChiMentions;
   readonly humanPrompts: HumanPrompts;
   isHumanPromptViewed: (agentId: string, recipient: string, owner: string) => boolean = () => false;
@@ -283,11 +303,22 @@ export class ChiConnection {
     const stored = associationSchema.parse(JSON.parse(encoded));
     if (stored.conversationId || stored.blocked) throw new Error("chi-native-reset-required");
   }
-  withPromptAdmission<T>(agentId: string, start: () => Promise<T>): Promise<T> {
+  withPromptAdmission<T>(
+    agentId: string,
+    start: () => Promise<T>,
+    controlAdmission?: object,
+  ): Promise<T> {
     return this.exclusive(agentId, async () => {
       const agent = this.manager.getAgent(agentId);
       if (!agent) throw new Error("chi-native-agent-required");
       await this.assertCurrent(agent);
+      if (controlAdmission) {
+        const permit = this.controlAdmissions.get(controlAdmission);
+        this.controlAdmissions.delete(controlAdmission);
+        if (!permit || permit.agentId !== agentId)
+          throw new Error("chi-control-admission-required");
+        await permit.admit();
+      }
       return start();
     });
   }
@@ -350,6 +381,316 @@ export class ChiConnection {
       },
     });
     this.humanPrompts = new HumanPrompts(options.home);
+    this.controlDriver = new CoDriveDriver(options.home, {
+      source: (agentId) => this.controlSource(agentId),
+      call: (source, request, operationId) =>
+        this.controlCall(
+          source.endpoint,
+          source.repo,
+          source.actor,
+          source.sourceId,
+          request,
+          operationId,
+        ),
+      capture: async (agentId) => {
+        await this.capture(agentId);
+        return this.controlSource(agentId);
+      },
+      verify: (source, grant) => this.verifyControlSource(source, grant),
+      native: (source) =>
+        this.manager.withNativeRuntime(source.nativeSessionId, (runtime) =>
+          runtime.export(source.nativeSessionId),
+        ),
+      busy: (agentId) =>
+        this.manager.isDraining() ||
+        this.manager.isChiAgentBusy(agentId) ||
+        this.manager.getAgent(agentId)?.lifecycle !== "idle" ||
+        Boolean(this.manager.getAgent(agentId)?.pendingPermissions.size),
+      disable: async (source) => {
+        await this.patchAssociation(source.agentId, (current) =>
+          current.sourceId === source.sourceId && current.coDrive === source.discoveryGeneration
+            ? { coDrive: undefined }
+            : {},
+        );
+      },
+      run: async (source, operation, admit) => {
+        if (this.manager.isDraining()) throw new Error("chi-control-executor-unavailable");
+        const ticket = this.manager.beginAdmission(),
+          permit = {};
+        this.controlAdmissions.set(permit, { agentId: source.agentId, admit });
+        try {
+          await this.manager.runAgent(source.agentId, operation.text, {
+            clientMessageId: `co-drive:${operation.id}`,
+            coDriveAdmission: permit,
+          });
+        } finally {
+          this.controlAdmissions.delete(permit);
+          this.manager.endAdmission(ticket);
+        }
+      },
+    });
+  }
+
+  private async controlCall(
+    endpoint: string,
+    repo: string,
+    actor: string,
+    sourceId: string,
+    request?: Record<string, unknown>,
+    operationId?: string,
+  ) {
+    const authority = this.authorityFor(endpoint),
+      auth = await this.verifiedSession(authority);
+    if (!auth.coDrive || !sameActor(auth.chiUserId, actor))
+      throw new Error("chi-control-context-changed");
+    const url = append(endpointUrl(endpoint), "evidence/control");
+    if (!request) {
+      url.searchParams.set("sourceId", sourceId);
+      if (operationId) url.searchParams.set("operationId", operationId);
+    }
+    const response = await authority.request(url, {
+      method: request ? "POST" : "GET",
+      redirect: "error",
+      signal: AbortSignal.timeout(30000),
+      headers: {
+        authorization: `Bearer ${auth.sessionToken}`,
+        "x-chi-repo": repo,
+        "content-type": "application/json",
+      },
+      ...(request ? { body: JSON.stringify({ ...request, v: 3, sourceId }) } : {}),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`chi-control-http-${response.status}`);
+    }
+    return JSON.parse(await boundedText(response, 128 * 1024));
+  }
+
+  private async controlSource(agentId: string): Promise<ControlSource> {
+    const agent = this.manager.getAgent(agentId);
+    if (!agent || agent.provider !== "opencode" || !agent.persistence)
+      throw new Error("chi-control-executor-unavailable");
+    const association = this.association(agent);
+    if (!association) throw new Error("chi-share-required");
+    const bound = this.resolveAssociation(association),
+      nativeSessionId = agent.persistence.nativeHandle ?? agent.persistence.sessionId;
+    if (!bound.pin || !bound.sourceId || !bound.endpoint || bound.paused || !nativeSessionId)
+      throw new Error("chi-control-context-changed");
+    const auth = await this.authorize(bound.repo, agent.cwd, this.authorityFor(bound.endpoint));
+    if (
+      !auth.coDrive ||
+      !sameActor(auth.chiUserId, bound.actor) ||
+      auth.appendDeployment !== bound.pin.deployment
+    )
+      throw new Error("chi-control-context-changed");
+    return {
+      agentId,
+      sourceId: bound.sourceId,
+      repo: bound.repo,
+      endpoint: bound.endpoint,
+      actor: bound.actor.toLowerCase(),
+      instanceId: `${this.options.serverId}:opencode`,
+      nativeSessionId,
+      cwd: agent.cwd,
+      pin: bound.pin,
+      discoveryGeneration: bound.coDrive,
+    };
+  }
+
+  private async verifyControlSource(source: ControlSource, grant: CoDriveGrant) {
+    if (
+      grant.executor.instanceId !== source.instanceId ||
+      grant.executor.nativeSessionId !== source.nativeSessionId ||
+      grant.executor.bindingRevision !== 1
+    )
+      throw new Error("chi-control-binding-mismatch");
+    await this.manager.withNativeRuntime(source.nativeSessionId, async (runtime) => {
+      if (z.object({ version: z.string() }).parse(await runtime.info()).version !== "2.0.15-chi.2")
+        throw new Error("chi-control-runtime-unsupported");
+      const native = await verifyCapturedSource({
+        ...source,
+        sessionId: source.nativeSessionId,
+        home: this.options.home,
+        native: await runtime.export(source.nativeSessionId),
+      });
+      const model = z
+        .object({ providerID: z.string(), id: z.string(), variant: z.string().optional() })
+        .parse(native.info.model);
+      if (
+        model.providerID !== grant.executor.modelProvider ||
+        model.id !== grant.executor.modelId ||
+        (model.variant ?? null) !== grant.executor.modelVariant ||
+        createHash("sha256")
+          .update(canonicalJson(native.info.permissions ?? null))
+          .digest("hex") !== grant.executor.policyDigest
+      )
+        throw new Error("chi-control-context-changed");
+    });
+  }
+
+  private async coDriveOperation(
+    identity: MentionIdentity,
+    operation: Extract<ChiMentionOperation, { action: "control" }>,
+  ) {
+    if (!identity.coDrive) throw new Error("chi-control-upgrade-required");
+    const request = operation.request,
+      endpoint = this.authority.endpoint,
+      repo = operation.repo;
+    const readView = async (operationId?: string) => {
+      const view = CoDriveViewSchema.parse(
+        await this.controlCall(
+          endpoint,
+          repo,
+          identity.actor,
+          request.sourceId,
+          undefined,
+          operationId,
+        ),
+      );
+      const binding = view.binding;
+      const canGrantHere =
+        view.ownerId === identity.actor &&
+        binding?.instanceId === `${this.options.serverId}:opencode` &&
+        this.manager
+          .listAgents()
+          .some(
+            (agent) =>
+              agent.provider === "opencode" &&
+              (agent.persistence?.nativeHandle ?? agent.persistence?.sessionId) ===
+                binding.nativeSessionId &&
+              agent.lifecycle === "idle" &&
+              !this.manager.isChiAgentBusy(agent.id) &&
+              agent.pendingPermissions.size === 0 &&
+              this.association(agent)?.sourceId === request.sourceId &&
+              this.association(agent)?.repo === repo,
+          );
+      return { ...view, canGrantHere };
+    };
+    if (request.action === "read")
+      return {
+        kind: "control" as const,
+        actor: identity.actor,
+        view: await readView(request.operationId),
+      };
+    if (request.action === "grant") {
+      // Labels locate candidates only. Capture, immutable ledger and the actual
+      // native ID/instance must prove this is the original local executor.
+      const candidates = this.manager
+        .listAgents()
+        .filter(
+          (agent) =>
+            this.association(agent)?.sourceId === request.sourceId &&
+            this.association(agent)?.repo === repo,
+        );
+      if (candidates.length !== 1) throw new Error("chi-control-original-host-required");
+      const agent = candidates[0]!;
+      if (
+        this.manager.isChiAgentBusy(agent.id) ||
+        agent.lifecycle !== "idle" ||
+        agent.pendingPermissions.size
+      )
+        throw new Error("chi-control-executor-unavailable");
+      await this.capture(agent.id);
+      const source = await this.controlSource(agent.id);
+      if (
+        source.endpoint !== endpoint ||
+        source.actor !== identity.actor ||
+        source.sourceId !== request.sourceId
+      )
+        throw new Error("chi-control-context-changed");
+      const model = await this.manager.withNativeRuntime(
+        source.nativeSessionId,
+        async (runtime) => {
+          if (
+            z.object({ version: z.string() }).parse(await runtime.info()).version !== "2.0.15-chi.2"
+          )
+            throw new Error("chi-control-runtime-unsupported");
+          const native = await verifyCapturedSource({
+            ...source,
+            sessionId: source.nativeSessionId,
+            home: this.options.home,
+            native: await runtime.export(source.nativeSessionId),
+          });
+          return z.object({ providerID: z.string(), id: z.string() }).parse(native.info.model);
+        },
+      );
+      const receipts = join(this.options.home, "chi", "receipts");
+      await mkdir(receipts, { recursive: true, mode: 0o700 });
+      const savedPath = join(receipts, `co-drive-grant-${request.id}.json`);
+      await publishConversationReceipt(savedPath, {
+        endpoint,
+        repo,
+        actor: identity.actor,
+        input: request,
+        request: {
+          ...request,
+          host: hostname(),
+          modelProvider: model.providerID,
+          modelId: model.id,
+          bindingRevision: 1,
+          instanceId: source.instanceId,
+          nativeSessionId: source.nativeSessionId,
+        },
+      });
+      const saved = z
+        .object({
+          endpoint: z.string(),
+          repo: z.string(),
+          actor: z.string(),
+          input: z.unknown(),
+          request: z.record(z.string(), z.unknown()),
+        })
+        .strict()
+        .parse(await readConversationReceipt(savedPath));
+      if (
+        saved.endpoint !== endpoint ||
+        saved.repo !== repo ||
+        saved.actor !== identity.actor ||
+        canonicalJson(saved.input) !== canonicalJson(request)
+      )
+        throw new Error("chi-control-context-changed");
+      const granted = z
+        .object({ control: z.object({ generation: z.number().int().positive() }) })
+        .parse(
+          await this.controlCall(endpoint, repo, identity.actor, request.sourceId, saved.request),
+        );
+      await this.patchAssociation(agent.id, { coDrive: granted.control.generation });
+    } else await this.controlCall(endpoint, repo, identity.actor, request.sourceId, request);
+    return {
+      kind: "control" as const,
+      actor: identity.actor,
+      view: await readView(
+        request.action === "submit" || request.action === "cancel" ? request.id : undefined,
+      ),
+    };
+  }
+
+  async pollCoDrive(agentId: string) {
+    await this.controlDriver.tick(agentId);
+  }
+  startCoDriveSweep() {
+    if (!this.controlStopped) return;
+    this.controlStopped = false;
+    const sweep = async () => {
+      try {
+        for (const agent of this.manager.listAgents().slice(0, 32)) {
+          if (this.controlStopped) break;
+          if (this.association(agent)?.coDrive)
+            await this.pollCoDrive(agent.id).catch(() => undefined);
+        }
+      } finally {
+        if (!this.controlStopped) {
+          this.controlTimer = setTimeout(() => void sweep(), 5000);
+          this.controlTimer.unref();
+        }
+      }
+    };
+    void sweep();
+  }
+  stopCoDriveSweep() {
+    this.controlStopped = true;
+    if (this.controlTimer) clearTimeout(this.controlTimer);
+    this.controlTimer = null;
   }
 
   private chiConfig(): ChiDestinationsConfig | null {
@@ -554,6 +895,7 @@ export class ChiConnection {
       repo: identity.repo,
       deployment: this.authority.endpoint,
       evidenceVersion: 3,
+      coDrive: identity.coDrive,
       generation: createHash("sha256")
         .update(
           JSON.stringify([
@@ -886,6 +1228,7 @@ export class ChiConnection {
           repo: "*",
           deployment: auth.appendDeployment,
           deploymentInbox: auth.deploymentInbox,
+          coDrive: auth.coDrive,
         };
       } catch (error) {
         throw new ChiOperationError(safeChiError(error), { accessLost: true, outcome: "unknown" });
@@ -940,7 +1283,10 @@ export class ChiConnection {
       }
       // Backend authorizes the supplied repository; inbox transport needs no local checkout.
       // Catalog loading is independent discovery, never an authorization verdict.
-      const result = await this.mentions.execute({ ...current, repo }, operation);
+      const result =
+        operation.action === "control"
+          ? await this.coDriveOperation({ ...current, repo }, operation)
+          : await this.mentions.execute({ ...current, repo }, operation);
       if (result.kind === "inbox") await this.nameInboxWorkspaces(result.handoffs);
       this.requireMentionContext(await identity(), context);
       return { context: { ...context, repositories: expected?.repositories }, result };
@@ -1119,6 +1465,9 @@ export class ChiConnection {
       ...session,
       appendDeployment: capabilities.data.appendLog.deployment,
       deploymentInbox: deploymentInboxCapabilitySchema.safeParse(identity.capabilities).success,
+      coDrive: z
+        .object({ coDrive: z.object({ v: z.literal(3), surface: z.literal("send-text") }) })
+        .safeParse(identity.capabilities).success,
       humanPrompts: false,
     };
   }
