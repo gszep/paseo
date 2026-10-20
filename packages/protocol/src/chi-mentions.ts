@@ -77,7 +77,7 @@ export const CoDriveSendSchema = z.object({
   generation: z.number().int().positive(),
   contextDigest: hash,
   expectedPin: ChiPinSchema,
-  text: z.string().max(8000),
+  text: z.string().max(8000).nullable(),
   digest: hash,
   phase: z.enum(["queued", "admitted", "recorded", "canceled"]),
   admissionId: z.string().uuid().nullable(),
@@ -102,6 +102,15 @@ export const CoDriveViewSchema = z.object({
     })
     .optional(),
 });
+const CoDriveSubmissionSchema = z.object({
+  action: z.literal("submit"),
+  sourceId: hash,
+  id: z.string().uuid(),
+  generation: z.number().int().positive(),
+  contextDigest: hash,
+  expectedPin: ChiPinSchema,
+  text: z.string().min(1).max(8000),
+});
 export const CoDriveRequestSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("read"),
@@ -122,16 +131,13 @@ export const CoDriveRequestSchema = z.discriminatedUnion("action", [
     id: z.string().uuid(),
     generation: z.number().int().positive(),
   }),
+  CoDriveSubmissionSchema,
   z.object({
-    action: z.literal("submit"),
+    action: z.literal("cancel"),
     sourceId: hash,
     id: z.string().uuid(),
-    generation: z.number().int().positive(),
-    contextDigest: hash,
-    expectedPin: ChiPinSchema,
-    text: z.string().min(1).max(8000),
+    submission: CoDriveSubmissionSchema.optional(),
   }),
-  z.object({ action: z.literal("cancel"), sourceId: hash, id: z.string().uuid() }),
 ]);
 export type CoDriveRequest = z.infer<typeof CoDriveRequestSchema>;
 export type CoDriveView = z.infer<typeof CoDriveViewSchema>;

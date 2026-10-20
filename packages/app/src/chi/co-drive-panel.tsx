@@ -103,8 +103,9 @@ function OperationStatus({ model, state, view }: Pick<Controls, "model" | "state
             : view.operation.phase}
         </Text>
       ) : null}
-      {state.pending?.action === "submit" && view.operation?.phase === "queued" ? (
-        <Button onPress={model.cancel}>Cancel queued send</Button>
+      {state.pending?.action === "submit" &&
+      (!view.operation || view.operation.phase === "queued") ? (
+        <Button onPress={model.cancel}>Reconcile and cancel saved send</Button>
       ) : null}
       {state.error ? <Text accessibilityRole="alert">{state.error}</Text> : null}
     </>
@@ -126,6 +127,9 @@ export function CoDrivePanel(props: {
       <View>
         <Text accessibilityRole="alert">{state.error ?? "Session control unavailable."}</Text>
         <Button onPress={model.retry}>Retry saved control operation</Button>
+        {state.pending?.action === "submit" ? (
+          <Button onPress={model.cancel}>Reconcile and cancel saved send</Button>
+        ) : null}
       </View>
     );
   const control = view.control;

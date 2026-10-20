@@ -44,6 +44,7 @@ test.skipIf(!fixture)(
   async () => {
     vi.stubGlobal("React", React);
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    await page.viewport(1280, 900);
     const call = async (path: string, value: unknown = {}) => {
       const response = await fetch(fixture!.address + path, {
         method: "POST",
@@ -83,6 +84,7 @@ test.skipIf(!fixture)(
         runs: number;
         original: ChiEntryRef["pin"];
         nativeSessionId: string;
+        lifecycle: string;
         bindingUnchanged: boolean;
         views: Record<"alice" | "bob", CoDriveView>;
       }>;
@@ -108,6 +110,22 @@ test.skipIf(!fixture)(
       .toHaveTextContent("not your account");
     expect((await summary()).runs).toBe(0);
     const text = "Synthetic recipient message for the original canonical session";
+    await page.screenshot({ path: "../../.vitest-screenshots/co-drive-before-send.png" });
+    await userEvent.fill(
+      page.getByRole("textbox", { name: "Shared session message" }),
+      "Rejected synthetic draft",
+    );
+    await call("/reject-next-submit");
+    await page.getByRole("button", { name: "Send to shared session", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Reconcile and cancel saved send", exact: true })
+      .click();
+    await expect.element(page.getByTestId("co-drive-operation")).toHaveTextContent("canceled");
+    expect((await summary()).runs).toBe(0);
+    expect(await call("/tick")).toEqual({ ok: true });
+    await expect
+      .element(page.getByText("Original executor is ready.", { exact: true }))
+      .toBeVisible();
     await userEvent.fill(page.getByRole("textbox", { name: "Shared session message" }), text);
     await page.getByRole("button", { name: "Send to shared session", exact: true }).click();
     await expect.poll(async () => (await summary()).views.alice.operation?.phase).toBe("queued");
@@ -117,6 +135,7 @@ test.skipIf(!fixture)(
     await call("/lose-next-native-reply");
     expect((await call("/tick")).ok).toBe(false);
     expect((await summary()).runs).toBe(1);
+    expect((await summary()).lifecycle).toBe("error");
     await call("/restart-owner");
     expect(await call("/tick")).toEqual({ ok: true });
     const recorded = await contexts.bob.execute({
@@ -161,6 +180,7 @@ test.skipIf(!fixture)(
       );
       await expect.element(page.getByText(text, { exact: true })).toBeVisible();
       await expect.element(page.getByText("@bob", { exact: true })).toBeVisible();
+      await page.screenshot({ path: `../../.vitest-screenshots/co-drive-recorded-${name}.png` });
     }
     await mount("alice", current.views.alice.pin);
     await page.getByRole("button", { name: "Revoke session control", exact: true }).click();

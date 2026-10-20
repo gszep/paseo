@@ -124,8 +124,10 @@ async function fixture() {
     capture: async () => structuredClone(source),
     native: async () => structuredClone(native),
     busy: () => false,
+    canStart: () => true,
     disable: vi.fn(async () => {}),
     run: vi.fn(async (_source: ControlSource, input: CoDriveSend, admit: () => Promise<void>) => {
+      if (input.text === null) throw new Error("unexpected canceled operation");
       await admit();
       calls.native++;
       native.messages.push({

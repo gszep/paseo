@@ -257,6 +257,13 @@ labels never do. Explicit current-tail selection remains separate from recording
 a send. Offline means unavailable, not takeover. Cross-machine transfer and its
 stop/readmission proofs remain deferred; they are not co-drive prerequisites.
 Fork remains a separate action. These are source contracts, not live enablement.
+
+Control 401/403/404 and context loss use the same protected-scope cleanup as
+conversation reads, including delayed-response fencing. Clearing only the Send
+panel is insufficient. A rejected submit remains immutable until the broker
+proves cancellation of that exact identity; an absent read or ambiguous response
+cannot release its saved-send slot. Error lifecycle may reconcile an already
+admitted native input, but cannot advertise readiness or admit new work.
 Account or repository changes never adopt another principal's saved intent.
 Existing local reply/human-prompt receipts are retained but not dispatched through
 retired backend mutations. Session policy consent remains backend-owned.

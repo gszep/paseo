@@ -15,10 +15,12 @@ import { loseHostMentionScopes } from "./use-mention-scope";
 import ChiRoute from "@/app/chi";
 import { SidebarMentionsRow } from "@/components/sidebar/sidebar-mentions-row";
 import { mentionQueryKey } from "./mention-context";
+import { classifyMentionFailure } from "../../../server/src/server/chi/mention-failure";
 
 const fixture = vi.hoisted(() => ({
   supported: true,
   currentSupported: false,
+  controlSupported: false,
   connected: true,
   client: { chiMentions: vi.fn() },
   localCandidate: false,
@@ -90,6 +92,7 @@ function store() {
             chiDeploymentInbox: fixture.deploymentInbox,
             chiPinnedTimeline: fixture.supported,
             chiPinnedCurrent: fixture.currentSupported,
+            chiCoDrive: fixture.controlSupported,
           },
         },
         agents: new Map(
@@ -180,14 +183,25 @@ let viewedDelay: Promise<void> | undefined;
 let selectedPin = pin;
 let currentPin = { ...pin, count: 80, head: "c".repeat(64) };
 let currentDelay: Promise<void> | undefined;
+let controlDenied: string | undefined;
 let inboxRows: ChiHandoff[] = [];
 let inboxError: string | undefined;
+
+function assertControlAccess() {
+  if (controlDenied)
+    throw new ChiOperationError(controlDenied, classifyMentionFailure(new Error(controlDenied)));
+}
+function assertInboxAvailable() {
+  if (inboxError) throw new Error(inboxError);
+}
 
 beforeEach(() => {
   vi.stubGlobal("React", React);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   fixture.supported = true;
   fixture.currentSupported = false;
+  fixture.controlSupported = false;
+  controlDenied = undefined;
   fixture.connected = true;
   fixture.localCandidate = false;
   fixture.deploymentInbox = true;
@@ -215,9 +229,47 @@ beforeEach(() => {
           accessLost: true,
           outcome: "unknown",
         });
+      if (operation.action === "control") {
+        assertControlAccess();
+        return {
+          kind: "control",
+          actor: context.actor,
+          context,
+          view: {
+            sourceId: pin.sourceId,
+            pin: currentPin,
+            ownerId: "github:sender",
+            ready: true,
+            surface: "send-text",
+            operation: null,
+            control: {
+              v: 3,
+              generation: 1,
+              active: true,
+              recipient: context.actor,
+              contextDigest: "e".repeat(64),
+              readyUntil: Date.now() + 15000,
+              readyPin: currentPin,
+              pending: null,
+              executor: {
+                instanceId: "fixture-host:opencode",
+                nativeSessionId: "ses_fixture",
+                bindingRevision: 1,
+                host: "Fixture original host",
+                provider: "opencode",
+                modelProvider: "fixture",
+                modelId: "fixture-model",
+                modelVariant: null,
+                policyDigest: "f".repeat(64),
+                account: "owner-host-configured",
+              },
+            },
+          },
+        };
+      }
       if (operation.action === "inbox") {
         expect(operation.repo).toBeUndefined();
-        if (inboxError) throw new Error(inboxError);
+        assertInboxAvailable();
         return {
           kind: "inbox",
           actor: context.actor,
@@ -410,6 +462,43 @@ test("revocation clears the selected current tail and ignores a late head refres
   expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
   expect(protectedData()).toEqual([]);
 });
+
+test.each([401, 403, 404])(
+  "co-drive HTTP %s clears the enclosing conversation/cache and fences a late head response",
+  async (status) => {
+    localStorage.clear();
+    fixture.currentSupported = true;
+    fixture.controlSupported = true;
+    currentIdentity = { ...identity, coDrive: true };
+    render();
+    await expect.element(page.getByText("Exact target mention", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View current shared tail" }).click();
+    await expect
+      .element(page.getByRole("textbox", { name: "Shared session message" }))
+      .toBeVisible();
+    expect(protectedData().length).toBeGreaterThan(0);
+    let release!: () => void;
+    currentDelay = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.getByRole("button", { name: "View current shared tail" }).click();
+    controlDenied = `chi-control-http-${status}`;
+    await userEvent.fill(
+      page.getByRole("textbox", { name: "Shared session message" }),
+      "synthetic denied send",
+    );
+    await page.getByRole("button", { name: "Send to shared session", exact: true }).click();
+    await expect.poll(protectedData).toEqual([]);
+    expect(container.querySelector('[data-testid="read-only-stream"]')).toBeNull();
+    await act(async () => {
+      release();
+      await currentDelay;
+    });
+    expect(protectedData()).toEqual([]);
+    expect(container.querySelector('[data-testid="shared-current-pin"]')).toBeNull();
+    expect(container.querySelector('[data-testid="read-only-stream"]')).toBeNull();
+  },
+);
 
 test.each([390, 1280])(
   "sidebar to cross-repository mentions to exact conversation and back at %spx",

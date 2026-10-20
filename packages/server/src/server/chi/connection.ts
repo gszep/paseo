@@ -404,8 +404,8 @@ export class ChiConnection {
       busy: (agentId) =>
         this.manager.isDraining() ||
         this.manager.isChiAgentBusy(agentId) ||
-        this.manager.getAgent(agentId)?.lifecycle !== "idle" ||
         Boolean(this.manager.getAgent(agentId)?.pendingPermissions.size),
+      canStart: (agentId) => this.manager.getAgent(agentId)?.lifecycle === "idle",
       disable: async (source) => {
         await this.patchAssociation(source.agentId, (current) =>
           current.sourceId === source.sourceId && current.coDrive === source.discoveryGeneration
@@ -414,6 +414,7 @@ export class ChiConnection {
         );
       },
       run: async (source, operation, admit) => {
+        if (operation.text === null) throw new Error("chi-control-recovery-required");
         if (this.manager.isDraining()) throw new Error("chi-control-executor-unavailable");
         const ticket = this.manager.beginAdmission(),
           permit = {};

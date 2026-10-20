@@ -247,10 +247,15 @@ export function openCoDrive(input: {
     },
     async cancel() {
       const pending = state.pending;
-      if (pending?.action !== "submit" || state.view?.operation?.phase !== "queued") return;
+      if (pending?.action !== "submit") return;
       try {
         await observe(
-          await execute({ action: "cancel", sourceId: pending.sourceId, id: pending.id }),
+          await execute({
+            action: "cancel",
+            sourceId: pending.sourceId,
+            id: pending.id,
+            submission: pending,
+          }),
         );
       } catch (error) {
         responseEpoch++;

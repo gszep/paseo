@@ -39,6 +39,7 @@ interface DriverHooks {
   capture(agentId: string): Promise<ControlSource>;
   native(source: ControlSource): Promise<unknown>;
   busy(agentId: string): boolean;
+  canStart(agentId: string): boolean;
   disable(source: ControlSource): Promise<void>;
   /** Runs inside the existing manager admission lane, immediately before native start. */
   run(source: ControlSource, operation: CoDriveSend, admit: () => Promise<void>): Promise<void>;
@@ -66,6 +67,9 @@ export class CoDriveDriver {
       await this.hooks.disable(source);
       return;
     }
+    // Error lifecycle still permits proof-only reconciliation of an already
+    // admitted input. It never advertises readiness or admits another send.
+    if (operation?.phase !== "admitted" && !this.hooks.canStart(agentId)) return;
     source = await this.hooks.capture(agentId);
     if (operation?.phase !== "admitted") await this.hooks.verify(source, view.control);
     if (!operation) {
@@ -78,38 +82,10 @@ export class CoDriveDriver {
       });
       return;
     }
+    const text = operation.text;
+    if (text === null) throw new Error("chi-control-recovery-required");
     const messageId = `co-drive:${operation.id}`;
-    const directory = join(this.home, "chi", "receipts");
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    // A random claim ID is private operation identity, never a recipient token.
-    const claimPath = join(directory, `co-drive-${operation.id}.json`);
-    await publishConversationReceipt(claimPath, {
-      sourceId: source.sourceId,
-      endpoint: source.endpoint,
-      actor: source.actor,
-      operation: operation.id,
-      admissionId: randomUUID(),
-      digest: operation.digest,
-    });
-    const claim = z
-      .object({
-        sourceId: z.string(),
-        endpoint: z.string(),
-        actor: z.string(),
-        operation: z.string(),
-        admissionId: z.string().uuid(),
-        digest: z.string(),
-      })
-      .strict()
-      .parse(await readConversationReceipt(claimPath));
-    if (
-      claim.sourceId !== source.sourceId ||
-      claim.endpoint !== source.endpoint ||
-      claim.actor !== source.actor ||
-      claim.operation !== operation.id ||
-      claim.digest !== operation.digest
-    )
-      throw new Error("chi-control-recovery-required");
+    const claim = await this.claim(source, operation);
     const admitted = async () => {
       const current = await this.hooks.source(agentId);
       if (
@@ -165,7 +141,7 @@ export class CoDriveDriver {
             sessionId: source.nativeSessionId,
             cwd: source.cwd,
             messageId,
-            text: operation.text,
+            text,
           }),
       });
     } catch (error) {
@@ -180,7 +156,44 @@ export class CoDriveDriver {
     await this.record(await this.hooks.capture(agentId), operation, claim.admissionId);
   }
 
+  private async claim(source: ControlSource, operation: CoDriveSend) {
+    const directory = join(this.home, "chi", "receipts");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    // A random claim ID is private operation identity, never a recipient token.
+    const claimPath = join(directory, `co-drive-${operation.id}.json`);
+    await publishConversationReceipt(claimPath, {
+      sourceId: source.sourceId,
+      endpoint: source.endpoint,
+      actor: source.actor,
+      operation: operation.id,
+      admissionId: randomUUID(),
+      digest: operation.digest,
+    });
+    const claim = z
+      .object({
+        sourceId: z.string(),
+        endpoint: z.string(),
+        actor: z.string(),
+        operation: z.string(),
+        admissionId: z.string().uuid(),
+        digest: z.string(),
+      })
+      .strict()
+      .parse(await readConversationReceipt(claimPath));
+    if (
+      claim.sourceId !== source.sourceId ||
+      claim.endpoint !== source.endpoint ||
+      claim.actor !== source.actor ||
+      claim.operation !== operation.id ||
+      claim.digest !== operation.digest
+    )
+      throw new Error("chi-control-recovery-required");
+    return claim;
+  }
+
   private async record(source: ControlSource, operation: CoDriveSend, admissionId: string) {
+    const text = operation.text;
+    if (text === null) throw new Error("chi-control-recovery-required");
     const messageId = `co-drive:${operation.id}`;
     const directory = join(this.home, "chi", "receipts");
     const native = await this.hooks.native(source);
@@ -190,7 +203,7 @@ export class CoDriveDriver {
         sessionId: source.nativeSessionId,
         cwd: source.cwd,
         messageId,
-        text: operation.text,
+        text,
       })
     )
       throw new Error("chi-control-recovery-required");

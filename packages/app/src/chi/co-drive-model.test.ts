@@ -203,3 +203,58 @@ test("a delayed read cannot restore controls after a concurrent failed send", as
   await delayed;
   expect(model.getState().view).toBeNull();
 });
+
+test("rejected submit is editable again only after explicit cancellation proof, not an absent read", async () => {
+  const f = fixture();
+  f.execute.mockImplementation(async (op) => {
+    if (op.action !== "control") throw Error("unexpected action");
+    if (op.request.action === "submit") throw Error("chi-control-http-409");
+    if (op.request.action === "cancel") {
+      const input = op.request.submission!;
+      f.view.operation = {
+        ...input,
+        v: 3,
+        actor: f.context.actor,
+        digest: "f".repeat(64),
+        phase: "canceled",
+        admissionId: null,
+        entry: null,
+      };
+    }
+    return { kind: "control", actor: f.context.actor, view: structuredClone(f.view) };
+  });
+  const model = f.open();
+  await vi.waitFor(() => expect(model.getState().phase).toBe("ready"));
+  model.setText("immutable rejected send");
+  model.send(f.view.control!.contextDigest);
+  await vi.waitFor(() => expect(model.getState().phase).toBe("failed"));
+  await model.refresh();
+  expect(model.getState().pending).not.toBeNull();
+  expect(f.stored.size).toBe(1);
+  model.setText("not yet editable");
+  expect(model.getState().text).toBe("immutable rejected send");
+  await model.cancel();
+  expect(model.getState().pending).toBeNull();
+  expect(f.stored.size).toBe(0);
+  model.setText("new draft");
+  expect(model.getState().text).toBe("new draft");
+});
+
+test.each([404, 409])(
+  "cancel response %s is not proof that an ambiguous send was unadmitted",
+  async (status) => {
+    const f = fixture(),
+      model = f.open();
+    await vi.waitFor(() => expect(model.getState().phase).toBe("ready"));
+    f.loseReply();
+    model.setText("ambiguous send");
+    model.send(f.view.control!.contextDigest);
+    await vi.waitFor(() => expect(model.getState().phase).toBe("failed"));
+    f.execute.mockRejectedValueOnce(new Error(`chi-control-http-${status}`));
+    await model.cancel();
+    expect(model.getState().pending?.action).toBe("submit");
+    expect(f.stored.size).toBe(1);
+    model.setText("must not replace");
+    expect(model.getState().text).toBe("ambiguous send");
+  },
+);
