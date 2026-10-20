@@ -2150,6 +2150,12 @@ export class AgentManager {
   }
 
   async setAgentMode(agentId: string, modeId: string): Promise<AgentProviderNotice | null> {
+    return this.runForegroundMutation(agentId, () => this.setAgentModeNow(agentId, modeId));
+  }
+  private async setAgentModeNow(
+    agentId: string,
+    modeId: string,
+  ): Promise<AgentProviderNotice | null> {
     const agent = this.requireSessionAgent(agentId);
     const notice = (await agent.session.setMode(modeId)) ?? null;
     await this.drainSessionEvents(agentId);
@@ -2166,6 +2172,9 @@ export class AgentManager {
   }
 
   async setAgentModel(agentId: string, modelId: string | null): Promise<void> {
+    return this.runForegroundMutation(agentId, () => this.setAgentModelNow(agentId, modelId));
+  }
+  private async setAgentModelNow(agentId: string, modelId: string | null): Promise<void> {
     const agent = this.requireSessionAgent(agentId);
     const normalizedModelId =
       typeof modelId === "string" && modelId.trim().length > 0 ? modelId : null;
@@ -2184,6 +2193,14 @@ export class AgentManager {
   }
 
   async setAgentThinkingOption(
+    agentId: string,
+    thinkingOptionId: string | null,
+  ): Promise<AgentProviderNotice | null> {
+    return this.runForegroundMutation(agentId, () =>
+      this.setAgentThinkingOptionNow(agentId, thinkingOptionId),
+    );
+  }
+  private async setAgentThinkingOptionNow(
     agentId: string,
     thinkingOptionId: string | null,
   ): Promise<AgentProviderNotice | null> {
@@ -2212,6 +2229,15 @@ export class AgentManager {
   }
 
   async setAgentFeature(agentId: string, featureId: string, value: unknown): Promise<void> {
+    return this.runForegroundMutation(agentId, () =>
+      this.setAgentFeatureNow(agentId, featureId, value),
+    );
+  }
+  private async setAgentFeatureNow(
+    agentId: string,
+    featureId: string,
+    value: unknown,
+  ): Promise<void> {
     const agent = this.requireAgent(agentId);
 
     if (!agent.session.setFeature) {
@@ -2704,7 +2730,9 @@ export class AgentManager {
           });
         });
       };
-      const result = this.chi ? await this.chi.withPromptAdmission(agentId, start) : await start();
+      const result = this.chi
+        ? await this.chi.withPromptAdmission(agentId, start, options?.coDriveAdmission)
+        : await start();
       if (pendingRun.settled) {
         throw new Error(`Agent ${agentId} run was canceled before its turn started`);
       }

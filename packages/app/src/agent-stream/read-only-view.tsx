@@ -20,6 +20,7 @@ export interface ReadOnlyStreamViewProps {
   streamItems: StreamItem[];
   targetItemId?: string;
   startAtEnd?: boolean;
+  verifiedAuthors?: Readonly<Record<string, string>>;
   historyPagination: {
     hasOlder: boolean;
     isLoadingOlder: boolean;
@@ -53,6 +54,7 @@ function ReadOnlyHistory({
   streamItems,
   targetItemId,
   startAtEnd = false,
+  verifiedAuthors,
   historyPagination,
   newerPagination,
 }: ReadOnlyStreamViewProps) {
@@ -120,9 +122,13 @@ function ReadOnlyHistory({
   const onInlineExpandedChange = useCallback((id: string, expanded: boolean) => {
     setExpandedInline((previous) => updateExpansion(previous, id, expanded));
   }, []);
+  const renderAttributedUser = useCallback(
+    (row: StreamLayoutItem) => renderUserRow(row, verifiedAuthors?.[row.item.id]),
+    [verifiedAuthors],
+  );
   const renderContent = useStreamRowRenderer({
     readOnly: true,
-    renderUserMessage: renderUserRow,
+    renderUserMessage: renderAttributedUser,
     renderAssistantMessage: renderAssistantRow,
     groups: EMPTY_GROUPS,
     expandedGroupIds: EMPTY_EXPANDED_GROUPS,
@@ -223,12 +229,13 @@ function updateExpansion(previous: Set<string>, id: string, expanded: boolean) {
   return next;
 }
 
-function renderUserRow(layout: StreamLayoutItem) {
+function renderUserRow(layout: StreamLayoutItem, author?: string) {
   const item = layout.item;
   if (item.kind !== "user_message") return null;
   return (
     <UserMessage
       readOnly
+      author={author}
       message={item.text}
       timestamp={item.timestamp.getTime()}
       images={item.images}

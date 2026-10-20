@@ -101,6 +101,50 @@ function nativeExport(input: unknown): NativeExport {
 function rawRecords(messages: NativeExport["messages"]): string[] {
   return messages.map((message) => JSON.stringify(message));
 }
+
+/** Existing-source proof only: missing ledger/creation state never creates or
+ * retargets a source. Used at co-drive admission under the manager's lane. */
+export async function verifyCapturedSource(input: {
+  home: string;
+  endpoint: string;
+  actor: string;
+  instanceId: string;
+  sessionId: string;
+  cwd: string;
+  pin: Pin;
+  native: unknown;
+}) {
+  const native = nativeExport(input.native);
+  if (
+    native.info.id !== input.sessionId ||
+    sourceId("opencode-v2", input.instanceId, input.sessionId) !== input.pin.sourceId ||
+    (await realpath(z.object({ directory: z.string() }).parse(native.info.location).directory)) !==
+      (await realpath(input.cwd))
+  )
+    throw new Error("chi-control-binding-mismatch");
+  const scope: AppendScope = {
+    endpoint: input.endpoint,
+    actor: input.actor,
+    deployment: input.pin.deployment,
+    repo: input.pin.repo,
+    sourceId: input.pin.sourceId,
+    bindingRevision: 1,
+    instanceId: input.instanceId,
+    nativeSessionId: input.sessionId,
+  };
+  const root = join(input.home, "chi", "append", digest(canonicalJson(scope)));
+  const saved = await readConversationReceipt(join(root, "creation.json"));
+  if (!saved) throw new Error("append-recovery-required");
+  const client = await AppendClient.open({
+    directory: root,
+    scope,
+    creation: creationSchema.parse(saved),
+  });
+  const state = await client.state(input.pin);
+  if (native.messages.length !== state.messages) throw new Error("chi-control-unsynced");
+  await client.verifyPrefix(input.pin, rawRecords(native.messages));
+  return native;
+}
 async function captureExport(
   input: Pick<AppendCaptureInput, "native" | "sessionId" | "expected" | "cwd">,
 ): Promise<NativeExport> {

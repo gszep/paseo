@@ -3463,6 +3463,7 @@ export const ServerInfoStatusPayloadSchema = z
         chiAppendV3: z.boolean().optional(),
         chiPinnedTimeline: z.boolean().optional(),
         chiPinnedCurrent: z.boolean().optional(),
+        chiCoDrive: z.boolean().optional(),
         chiInboxActivity: z.boolean().optional(),
         chiDeploymentInbox: z.boolean().optional(),
         chiMentions: z.boolean().optional(),

@@ -239,12 +239,31 @@ separate, Jump to mention restores it, and no background refresh advances either
 selection. Unsynced native work is not implied to be included. Returning to the
 mention or losing context invalidates a delayed current-head response.
 
-This remains an intermediate reader, not Resume. A current head, source label or
-binding revision grants no execution authority. Checkout must revalidate head,
-binding and context, then separately obtain an owner-authorized recipient grant
-and supported session-specific stop/readmission proof. The eventual send must
-append to the same canonical source; an independent Fork is a separate action.
-Continue and reply controls remain absent.
+The current-tail reader alone grants no execution authority. The separate
+`chiCoDrive` source candidate keeps the original native session and executor;
+its backend owner grant names one recipient, generation, execution context and
+plain-text-send surface. Before Send, show the original host, provider/model and
+that its configured account is used (the runtime does not expose its identity).
+No pairing token, host management, model change or tool-approval authority is
+delegated. Existing owner tool policy still applies to the recipient's prompt.
+
+The existing authenticated operation transport submits immutable source-owned
+requests. Original-host admission rechecks the actual native identity, exact
+synced prefix, source/repository access and current grant before a one-time CAS.
+Revocation denies new admissions; already-admitted or uncertain work is not
+falsely canceled. Normal send receipts and exact native message IDs reconcile
+lost replies without a resend. Recorded canonical input proves actor attribution;
+labels never do. Explicit current-tail selection remains separate from recording
+a send. Offline means unavailable, not takeover. Cross-machine transfer and its
+stop/readmission proofs remain deferred; they are not co-drive prerequisites.
+Fork remains a separate action. These are source contracts, not live enablement.
+
+Control 401/403/404 and context loss use the same protected-scope cleanup as
+conversation reads, including delayed-response fencing. Clearing only the Send
+panel is insufficient. A rejected submit remains immutable until the broker
+proves cancellation of that exact identity; an absent read or ambiguous response
+cannot release its saved-send slot. Error lifecycle may reconcile an already
+admitted native input, but cannot advertise readiness or admit new work.
 Account or repository changes never adopt another principal's saved intent.
 Existing local reply/human-prompt receipts are retained but not dispatched through
 retired backend mutations. Session policy consent remains backend-owned.

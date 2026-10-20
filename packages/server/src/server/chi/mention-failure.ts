@@ -17,6 +17,10 @@ const accessFailures = new Set([
   "chi-mentions-http-401",
   "chi-mentions-http-403",
   "chi-mentions-http-404",
+  "chi-control-http-401",
+  "chi-control-http-403",
+  "chi-control-http-404",
+  "chi-control-context-changed",
 ]);
 
 export function classifyMentionFailure(error: unknown): ChiFailure {

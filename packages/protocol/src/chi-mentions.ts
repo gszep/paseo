@@ -6,6 +6,7 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const principal = z.string().regex(/^github:[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$/);
 const text = z.string().min(1).max(8000);
 export const ChiMentionContextSchema = z.object({
+  coDrive: z.boolean().optional(),
   actor: principal,
   repo: id,
   generation: hash,
@@ -46,6 +47,102 @@ export const ChiEntryRefSchema = z.object({
   pin: ChiPinSchema,
   seq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 });
+export const CoDriveExecutorSchema = z.object({
+  instanceId: id,
+  nativeSessionId: id,
+  bindingRevision: z.number().int().positive(),
+  host: z.string().min(1).max(128),
+  provider: z.literal("opencode"),
+  modelProvider: id,
+  modelId: id,
+  modelVariant: z.string().nullable(),
+  policyDigest: hash,
+  account: z.literal("owner-host-configured"),
+});
+export const CoDriveGrantSchema = z.object({
+  v: z.literal(3),
+  generation: z.number().int().positive(),
+  active: z.boolean(),
+  recipient: principal,
+  executor: CoDriveExecutorSchema,
+  contextDigest: hash,
+  readyUntil: z.number().int().nonnegative(),
+  readyPin: ChiPinSchema.nullable(),
+  pending: z.string().uuid().nullable(),
+});
+export const CoDriveSendSchema = z.object({
+  v: z.literal(3),
+  id: z.string().uuid(),
+  actor: principal,
+  generation: z.number().int().positive(),
+  contextDigest: hash,
+  expectedPin: ChiPinSchema,
+  text: z.string().max(8000).nullable(),
+  digest: hash,
+  phase: z.enum(["queued", "admitted", "recorded", "canceled"]),
+  admissionId: z.string().uuid().nullable(),
+  entry: ChiEntryRefSchema.nullable(),
+});
+export const CoDriveViewSchema = z.object({
+  sourceId: hash,
+  pin: ChiPinSchema,
+  ownerId: principal,
+  control: CoDriveGrantSchema.nullable(),
+  operation: CoDriveSendSchema.nullable(),
+  ready: z.boolean(),
+  surface: z.literal("send-text"),
+  canGrantHere: z.boolean().optional(),
+  binding: z
+    .object({
+      revision: z.number().int().positive(),
+      instanceId: id,
+      nativeSessionId: id,
+      active: z.boolean(),
+      pending: z.boolean(),
+    })
+    .optional(),
+});
+const CoDriveSubmissionSchema = z.object({
+  action: z.literal("submit"),
+  sourceId: hash,
+  id: z.string().uuid(),
+  generation: z.number().int().positive(),
+  contextDigest: hash,
+  expectedPin: ChiPinSchema,
+  text: z.string().min(1).max(8000),
+});
+export const CoDriveRequestSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("read"),
+    sourceId: hash,
+    operationId: z.string().uuid().optional(),
+  }),
+  z.object({
+    action: z.literal("grant"),
+    sourceId: hash,
+    id: z.string().uuid(),
+    generation: z.number().int().nonnegative(),
+    recipient: principal,
+    expectedPin: ChiPinSchema,
+  }),
+  z.object({
+    action: z.literal("revoke"),
+    sourceId: hash,
+    id: z.string().uuid(),
+    generation: z.number().int().positive(),
+  }),
+  CoDriveSubmissionSchema,
+  z.object({
+    action: z.literal("cancel"),
+    sourceId: hash,
+    id: z.string().uuid(),
+    submission: CoDriveSubmissionSchema.optional(),
+  }),
+]);
+export type CoDriveRequest = z.infer<typeof CoDriveRequestSchema>;
+export type CoDriveView = z.infer<typeof CoDriveViewSchema>;
+export type CoDriveSend = z.infer<typeof CoDriveSendSchema>;
+export type CoDriveGrant = z.infer<typeof CoDriveGrantSchema>;
 export type ChiEntryRef = z.infer<typeof ChiEntryRefSchema>;
 export const ChiSourceSchema = z.discriminatedUnion("kind", [
   z.object({
@@ -169,6 +266,7 @@ export const ChiDeliverySchema = z.object({
 });
 export type ChiDelivery = z.infer<typeof ChiDeliverySchema>;
 export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("control"), repo: id, request: CoDriveRequestSchema }),
   z.object({ action: z.literal("scope"), includeRepositories: z.boolean().optional() }),
   z.object({ action: z.literal("participants") }),
   z.object({
@@ -226,6 +324,7 @@ export const ChiMentionOperationSchema = z.discriminatedUnion("action", [
 ]);
 export type ChiMentionOperation = z.infer<typeof ChiMentionOperationSchema>;
 export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("control"), actor: principal, view: CoDriveViewSchema }),
   z.object({ kind: z.literal("scope"), actor: principal }),
   z.object({
     kind: z.literal("inbox"),
@@ -265,6 +364,7 @@ export const ChiMentionResultSchema = z.discriminatedUnion("kind", [
       .array(
         z.object({
           nativeId: id,
+          actor: principal.optional(),
           type: id,
           seq: z.number().int().nonnegative().optional(),
           timestamp: z.string().optional(),

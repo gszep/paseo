@@ -153,6 +153,11 @@ deferred until a verified pin/identity resolver exists; a source label is not pr
 `chiPinnedCurrent` adds explicit authorized shared-head/tail selection while
 preserving the original mention pin. Head/binding metadata is read selection,
 never a Resume grant; neither selection advances silently on refresh.
+The source-only `chiCoDrive` candidate adds a separate named-owner grant for
+plain-text sends on the original executor. It never imports/Forks a session or
+shares pairing authority. Keep owner approvals, explicit host/account context,
+fresh source access and one-time admission/reconciliation; synthetic acceptance
+is not installed-host or live-user enablement.
 Admission, queued-send recovery and protected inbox state are specified
 in [architecture](docs/architecture.md#components-at-a-glance).
 Deployment-wide Mentions additionally requires `chiDeploymentInbox` on the host

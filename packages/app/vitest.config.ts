@@ -44,7 +44,17 @@ export default defineConfig({
           include: ["src/**/*.browser.{test,spec}.{ts,tsx}"],
           browser: {
             enabled: true,
-            provider: playwright(),
+            provider: playwright(
+              process.env.CHI_CODRIVE_FIXTURE_MODULE
+                ? {
+                    contextOptions: {
+                      recordVideo: {
+                        dir: path.resolve(__dirname, ".vitest-screenshots/co-drive-video"),
+                      },
+                    },
+                  }
+                : {},
+            ),
             headless: true,
             connectTimeout: 180_000,
             instances: [{ browser: "chromium" }],

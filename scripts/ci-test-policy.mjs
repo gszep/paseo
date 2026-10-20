@@ -19,6 +19,7 @@ export const critical = {
     "src/server/agent/permission-response.test.ts",
     "src/server/agent/agent-manager.test.ts",
     "src/server/chi/connection.test.ts",
+    "src/server/chi/co-drive.test.ts",
     "src/server/chi/append-capture.test.ts",
     "src/server/chi/destinations.test.ts",
     "src/server/chi/mentions.test.ts",
@@ -31,6 +32,8 @@ export const critical = {
   app: [
     "src/utils/scanned-pairing-offer.test.ts",
     "src/chi/continuation-state.test.ts",
+    "src/chi/co-drive-model.test.ts",
+    "src/chi/co-drive.integration.browser.test.tsx",
     "src/chi/pinned-conversation.test.ts",
     "src/chi/conversation-screen.browser.test.tsx",
     "src/agent-stream/read-only-view.browser.test.tsx",
