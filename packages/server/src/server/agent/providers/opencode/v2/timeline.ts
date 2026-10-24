@@ -1,4 +1,5 @@
 import { mapOpencodeToolCall } from "../tool-call-mapper.js";
+import { AgentMessageOriginSchema } from "@getpaseo/protocol/timeline-item";
 import type { SessionMessageAssistantTool } from "@opencode/client";
 import { STRUCTURED_OUTPUT_TOOL } from "./structured-output.js";
 import type { SessionMessageInfo } from "@opencode/client";
@@ -69,7 +70,24 @@ export class V2Timeline {
     const push = (item: AgentTimelineItem) =>
       events.push({ type: "timeline", provider: "opencode", item, timestamp });
     if (message.type === "user") this.userMessage(message, state, push);
-    else if (message.type === "assistant") this.assistantMessage(message, state, push, mode);
+    else if (
+      message.type === "synthetic" &&
+      message.metadata?.source === "subagent" &&
+      typeof message.metadata.childID === "string"
+    ) {
+      if (this.content.has(message.id)) return events;
+      this.content.set(message.id, message.text);
+      push({
+        type: "user_message",
+        text: message.text,
+        messageId: message.id,
+        agentOrigin: {
+          agentId: message.metadata.childID,
+          eventId: message.id,
+          event: message.metadata.state === "completed" ? "completion" : "error",
+        },
+      });
+    } else if (message.type === "assistant") this.assistantMessage(message, state, push, mode);
     else if (message.type === "compaction") this.compactionMessage(message, push);
     return events;
   }
@@ -85,10 +103,12 @@ export class V2Timeline {
     if (this.content.has(message.id)) return;
     this.content.set(message.id, message.text);
     const clientMessageId = message.metadata?.paseoClientMessageId;
+    const origin = AgentMessageOriginSchema.safeParse(message.metadata?.paseoAgentOrigin);
     push({
       type: "user_message",
       text: message.text,
       messageId: message.id,
+      ...(origin.success ? { agentOrigin: origin.data } : {}),
       ...(this.includeClientMessageId && typeof clientMessageId === "string"
         ? { clientMessageId }
         : {}),

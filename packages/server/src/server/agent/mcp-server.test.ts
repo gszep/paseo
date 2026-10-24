@@ -3739,6 +3739,14 @@ describe("send_agent_prompt MCP tool", () => {
 
     const response = await tool.handler(parsed.data as Record<string, unknown>);
 
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledWith(
+      "child-agent",
+      "Follow up",
+      expect.objectContaining({
+        clientMessageId: expect.any(String),
+        agentOrigin: { agentId: "parent-agent", eventId: expect.any(String), event: "prompt" },
+      }),
+    );
     expect(spies.agentManager.subscribe).toHaveBeenCalledTimes(1);
     expect(spies.agentManager.waitForAgentEvent).not.toHaveBeenCalled();
     expect(response.structuredContent.guidance).toBe(
@@ -3784,6 +3792,11 @@ describe("send_agent_prompt MCP tool", () => {
     expect(spies.agentManager.waitForAgentEvent).toHaveBeenCalledWith(
       "child-agent",
       expect.objectContaining({ waitForActive: true }),
+    );
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledWith(
+      "child-agent",
+      "Follow up",
+      undefined,
     );
   });
 

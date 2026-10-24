@@ -59,6 +59,7 @@ const assistantPart = z.discriminatedUnion("type", [
 ]);
 const displayMessage = z.union([
   base.extend({ type: z.literal("user"), text: z.string() }),
+  base.extend({ type: z.literal("synthetic"), text: z.string() }),
   base.extend({
     type: z.literal("assistant"),
     agent: z.string(),
@@ -140,7 +141,7 @@ export function pinnedTimelineEntries(bytes: string[], start: number): ContextEn
         throw new Error("unsupported entry kind");
       const supported =
         entry.kind === "message" &&
-        ["user", "assistant", "compaction"].includes(identity.type ?? "");
+        ["user", "assistant", "compaction", "synthetic"].includes(identity.type ?? "");
       if (entry.kind === "message" && !supported) otherMessage.parse(native);
       if (entry.kind === "metadata")
         z.object({ id: z.string(), time: z.object({ created }) }).parse(native);

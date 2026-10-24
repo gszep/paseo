@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
@@ -1235,6 +1236,12 @@ function createToolCatalog(
     .object(legacyTopLevelCreateAgentInputSchema)
     .strict();
   const commonSendAgentPromptInputSchema = {
+    requiresAttention: z
+      .boolean()
+      .optional()
+      .describe(
+        "Keep this agent message visible to the human for a decision, approval, blocker, or meaningful deliverable. Routine coordination is collapsed, not withheld from the receiving agent.",
+      ),
     agentId: z.string(),
     prompt: z.string(),
     sessionMode: z.string().optional().describe("Optional mode to set before running the prompt."),
@@ -2117,6 +2124,7 @@ function createToolCatalog(
       sessionMode,
       background = Boolean(callerAgentId),
       notifyOnFinish = Boolean(callerAgentId),
+      requiresAttention,
     }) => {
       const shouldNotifyOnFinish = Boolean(callerAgentId && notifyOnFinish && background);
 
@@ -2127,6 +2135,19 @@ function createToolCatalog(
           agentId,
           prompt,
           sessionMode,
+          ...(callerAgentId
+            ? {
+                runOptions: {
+                  clientMessageId: randomUUID(),
+                  agentOrigin: {
+                    agentId: callerAgentId,
+                    eventId: randomUUID(),
+                    event: "prompt" as const,
+                    ...(requiresAttention ? { requiresAttention: true } : {}),
+                  },
+                },
+              }
+            : {}),
           admissionTicket,
           logger: childLogger,
         }),

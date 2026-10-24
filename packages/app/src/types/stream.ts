@@ -1,5 +1,6 @@
 import type {
   AgentProvider,
+  AgentMessageOrigin,
   AgentTimelineItem,
   JsonValue,
   ToolCallDetail,
@@ -90,6 +91,7 @@ export type StreamItem =
 export type UserMessageImageAttachment = AttachmentMetadata;
 
 export interface UserMessageItem {
+  agentOrigin?: AgentMessageOrigin;
   kind: "user_message";
   id: string;
   clientMessageId?: string;
@@ -103,6 +105,7 @@ export interface UserMessageItem {
 }
 
 export interface UserMessageInput {
+  agentOrigin?: AgentMessageOrigin;
   id?: string;
   clientMessageId?: string;
   messageId?: string;
@@ -115,12 +118,16 @@ export interface UserMessageInput {
 }
 
 export function createUserMessage(input: UserMessageInput): UserMessageItem {
-  const id = input.id ?? input.clientMessageId ?? input.messageId;
+  // Preserve an existing presentation key, but identify a newly materialized
+  // canonical row by its message identity, not a caller-chosen correlation ID.
+  // In particular, nonmatching human/agent records may share clientMessageId.
+  const id = input.id ?? input.messageId ?? input.clientMessageId;
   if (!id) {
     throw new Error("User message identity is required");
   }
   return {
     kind: "user_message",
+    ...(input.agentOrigin ? { agentOrigin: input.agentOrigin } : {}),
     id,
     ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
     ...(input.messageId ? { messageId: input.messageId } : {}),
@@ -201,6 +208,21 @@ function matchesUserMessage(
   incoming: UserMessageItem,
   policy: UserMessageMatchPolicy,
 ): boolean {
+  // A client-chosen correlation ID is not provenance. Never reconcile a human
+  // row into a coordination row, including identical text and delayed echoes.
+  if (existing.agentOrigin || incoming.agentOrigin) {
+    const a = existing.agentOrigin;
+    const b = incoming.agentOrigin;
+    if (
+      !a ||
+      !b ||
+      a.agentId !== b.agentId ||
+      a.eventId !== b.eventId ||
+      a.event !== b.event ||
+      a.requiresAttention !== b.requiresAttention
+    )
+      return false;
+  }
   if (existing.clientMessageId && incoming.clientMessageId) {
     return existing.clientMessageId === incoming.clientMessageId;
   }
@@ -269,7 +291,8 @@ function produceUserMessage(
     existing.text === merged.text &&
     existing.timestamp === merged.timestamp &&
     existing.images === merged.images &&
-    existing.attachments === merged.attachments
+    existing.attachments === merged.attachments &&
+    existing.agentOrigin === merged.agentOrigin
   ) {
     return { items, index, message: existing, matched: true };
   }
@@ -890,6 +913,7 @@ function appendUserMessage(
   clientMessageId?: string,
   timelineCursor?: TimelinePosition,
   turnId?: string,
+  agentOrigin?: AgentMessageOrigin,
 ): StreamItem[] {
   const { chunk, hasContent } = normalizeChunk(text);
   if (!hasContent) {
@@ -898,6 +922,7 @@ function appendUserMessage(
 
   const chunkSeed = chunk.trim() || chunk;
   const nextItem = createUserMessage({
+    agentOrigin,
     id: messageId ?? createUniqueTimelineId(state, "user", chunkSeed, timestamp),
     clientMessageId,
     messageId,
@@ -1512,6 +1537,7 @@ function reduceTimelineEvent(
           item.clientMessageId,
           timelineCursor,
           event.turnId,
+          item.agentOrigin,
         ),
       );
     case "assistant_message":
@@ -1876,6 +1902,7 @@ function applyCanonicalUserMessageEvent(params: {
   const flushedTail = head.length > 0 ? flushHeadToTail(tail, head) : tail;
   const flushedHead = head.length > 0 ? [] : head;
   const canonical = createUserMessage({
+    agentOrigin: event.item.agentOrigin,
     id:
       event.item.messageId ??
       createUniqueTimelineId([...tail, ...head], "user", normalized.chunk.trim(), timestamp),

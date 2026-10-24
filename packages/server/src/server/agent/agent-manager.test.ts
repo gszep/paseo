@@ -1815,10 +1815,11 @@ interface FakeCodexEmitterArgs {
 function fakeCodexEmitting(args: FakeCodexEmitterArgs): AgentClient {
   const turnItems = args.turnItems ?? [];
   const historyItems = args.historyItems ?? [];
+  let turnOrdinal = 0;
 
   class FakeCodexSession extends TestAgentSession {
     override async startTurn(): Promise<{ turnId: string }> {
-      const turnId = "turn-fake-codex";
+      const turnId = `turn-fake-codex-${++turnOrdinal}`;
       setTimeout(() => {
         this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
         for (const item of turnItems) {
@@ -11242,7 +11243,80 @@ test("listImportableSessions searches every provider result before global rankin
   ]);
 });
 
-test("user_message events wrapping a paseo-system envelope are not added to the timeline", async () => {
+test.each(["human different text", "callback payload"])(
+  "coordination ingress rejects human client-ID reuse (%s) before provider and across reload",
+  async (humanText) => {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-origin-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const agentOrigin = {
+      agentId: "worker",
+      eventId: "server-operation",
+      event: "completion" as const,
+    };
+    const callback: AgentTimelineItem = {
+      type: "user_message",
+      text: "callback payload",
+      messageId: "native-callback",
+      clientMessageId: "collision",
+      agentOrigin,
+    };
+    const human: AgentTimelineItem = {
+      type: "user_message",
+      text: humanText,
+      messageId: "native-human",
+      clientMessageId: "human-operation",
+    };
+    const turnItems = [callback];
+    const codex = fakeCodexEmitting({ turnItems, historyItems: [callback, human] });
+    const create = vi.spyOn(codex, "createSession");
+    codex.resumeSession = async (_handle, config) =>
+      codex.createSession(config as AgentSessionConfig);
+    const manager = new AgentManager({ clients: { codex }, registry: storage, logger });
+    try {
+      const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      });
+      const session = await create.mock.results[0]!.value;
+      const starts = vi.spyOn(session, "startTurn");
+      const pending = manager.streamAgent(agent.id, "callback payload", {
+        clientMessageId: "collision",
+        agentOrigin,
+      });
+      await expect(
+        manager.replaceAgentRun(agent.id, humanText, { clientMessageId: "collision" }),
+      ).rejects.toThrow("Prompt identity conflicts");
+      expect(starts).not.toHaveBeenCalled();
+      for await (const _event of pending) {
+        /* consume the admitted callback */
+      }
+      expect(starts).toHaveBeenCalledTimes(1);
+      await expect(
+        manager.runAgent(agent.id, humanText, { clientMessageId: "collision" }),
+      ).rejects.toThrow("Prompt identity conflicts");
+      expect(starts).toHaveBeenCalledTimes(1);
+      // A normal next human turn and a delayed exact callback echo both survive.
+      turnItems.splice(0, turnItems.length, human, callback);
+      await manager.runAgent(agent.id, humanText, { clientMessageId: "human-operation" });
+      expect(manager.getTimeline(agent.id).filter((item) => item.type === "user_message")).toEqual([
+        expect.objectContaining({ text: "callback payload", agentOrigin }),
+        expect.objectContaining({ text: humanText, clientMessageId: "human-operation" }),
+      ]);
+      await manager.reloadAgentSession(agent.id);
+      await expect(
+        manager.runAgent(agent.id, humanText, { clientMessageId: "collision" }),
+      ).rejects.toThrow("Prompt identity conflicts");
+      const rows = manager.getTimeline(agent.id).filter((item) => item.type === "user_message");
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toMatchObject({ agentOrigin });
+      expect(rows[1]).not.toHaveProperty("agentOrigin");
+    } finally {
+      await manager.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("human paseo-system envelope text is retained in the live timeline", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-envelope-live-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
@@ -11273,11 +11347,13 @@ test("user_message events wrapping a paseo-system envelope are not added to the 
   const timeline = manager.getTimeline(snapshot.id);
   const userMessages = timeline.filter((item) => item.type === "user_message");
 
-  expect(userMessages).toHaveLength(1);
-  expect(userMessages[0].text).toBe("plain user message");
+  expect(userMessages.map((item) => item.text)).toEqual([
+    formatSystemNotificationPrompt("child finished"),
+    "plain user message",
+  ]);
 });
 
-test("user_message events wrapping a paseo-system envelope are not restored during history replay", async () => {
+test("human paseo-system envelope text is retained during history replay", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-envelope-history-"));
   const storagePath = join(workdir, "agents");
   const storage = new AgentStorage(storagePath, logger);
@@ -11314,8 +11390,10 @@ test("user_message events wrapping a paseo-system envelope are not restored duri
   const timeline = manager.getTimeline(snapshot.id);
   const userMessages = timeline.filter((item) => item.type === "user_message");
 
-  expect(userMessages).toHaveLength(1);
-  expect(userMessages[0].text).toBe("real user message");
+  expect(userMessages.map((item) => item.text)).toEqual([
+    formatSystemNotificationPrompt("schedule fired"),
+    "real user message",
+  ]);
 });
 
 test("commandMayHaveChangedExternalState matches remote-state commands", () => {

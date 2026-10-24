@@ -1,4 +1,5 @@
 import type {
+  AgentMessageOrigin,
   AgentProviderNotice,
   AgentTaskItem,
   JsonValue,
@@ -211,6 +212,8 @@ export type AgentPromptContentBlock =
 export type AgentPromptInput = string | AgentPromptContentBlock[];
 
 export interface AgentRunOptions {
+  /** Trusted server ingress only; not accepted from client run options. */
+  agentOrigin?: AgentMessageOrigin;
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
@@ -406,7 +409,13 @@ export interface PluginTimelineItem {
 }
 
 export type AgentTimelineItem =
-  | { type: "user_message"; text: string; messageId?: string; clientMessageId?: string }
+  | {
+      type: "user_message";
+      text: string;
+      messageId?: string;
+      clientMessageId?: string;
+      agentOrigin?: AgentMessageOrigin;
+    }
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem

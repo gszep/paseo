@@ -76,6 +76,21 @@ Users can also detach an existing subagent from the subagents track. Detach is d
 `notifyOnFinish` defaults to `true` for agent-scoped creation and background prompt follow-ups because most delegated work needs to report back to the creating agent. Set it to `false` only for truly fire-and-forget agents or prompts.
 Permission requests are notification checkpoints, not the end of that subscription. The caller is notified again after a permission response when the child finishes, errors, or requests another permission.
 The permission notification includes the normalized request plus the child and request IDs, so the caller can inspect it and respond without fetching agent status.
+
+Agent-scoped prompt sends and finish callbacks carry server-assigned operation
+origin. The receiving agent still gets the payload; the shared conversation row
+collapses routine coordination with an explicit inspection control. Errors,
+permissions and sends marked `requiresAttention` remain expanded. Assistant
+replies are not classified by association or prose and remain visible.
+
+OpenCode V2 persists the origin on newly submitted messages and projects native
+child notifications from their structured metadata. Native export and pinned Chi
+reads retain that presentation origin without rewriting historical bytes. Unmarked
+history remains visible, including human-pasted system/child envelopes. A client
+message ID is correlation, not origin: conflicting text or ingress reuse rejects
+before provider dispatch. Other providers must preserve operation origin on
+their echoes and native history before claiming equivalent replay coverage;
+unmarked echoes stay visible rather than inheriting internal status from an ID.
 A watched child that closes before its finish event also notifies the caller so delegated work cannot disappear silently during archive or workspace teardown.
 
 ## Provider-managed child agents

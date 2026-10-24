@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import { randomUUID } from "node:crypto";
 
 import type {
   AgentPermissionRequest,
@@ -30,6 +31,11 @@ export type AgentRunController = Pick<
    * exempts a prompt whose admission began before the drain.
    */
   assertAcceptingPrompts?: (ticket?: symbol) => void;
+  assertPromptIdentity?: (
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ) => void;
 };
 
 export interface StartAgentRunOptions {
@@ -113,6 +119,7 @@ export async function startAgentRun(
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
   const snapshot = agentManager.getAgent(agentId);
+  agentManager.assertPromptIdentity?.(agentId, prompt, options?.runOptions);
   logger.trace(
     {
       agentId,
@@ -236,12 +243,6 @@ export async function unarchiveAgentState(
  */
 export function formatSystemNotificationPrompt(reason: string): string {
   return `<paseo-system>\n${reason}\n</paseo-system>`;
-}
-
-const SYSTEM_ENVELOPE_PATTERN = /^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/;
-
-export function isSystemInjectedEnvelope(text: string): boolean {
-  return SYSTEM_ENVELOPE_PATTERN.test(text);
 }
 
 export interface SendPromptToAgentParams {
@@ -454,7 +455,19 @@ interface NotifySafelyOptions {
   permissionRequest?: AgentPermissionRequest;
 }
 
-export function setupFinishNotification(params: SetupFinishNotificationParams): void {
+// A caller waits on a child through one armed notification per manager. Arming
+// again for the same child and caller, such as a follow-up or steering prompt
+// while the child still runs, replaces the earlier watch instead of adding
+// another one, so a run outcome is not reported once per prompt the caller sent.
+// The identity is the (child, caller) pair owned by this manager instance, so
+// distinct parents keep their own notifications and a new run after a terminal
+// outcome arms a fresh watch. This bounds the subscriptions; it is not
+// exactly-once run-id delivery. A notification already in flight when the watch
+// is replaced still reaches the caller, and arming again while the child is
+// already in a terminal state re-reports that state.
+const armedFinishNotifications = new WeakMap<AgentManager, Map<string, () => void>>();
+
+export function setupFinishNotification(params: SetupFinishNotificationParams): () => void {
   const {
     agentManager,
     agentStorage,
@@ -469,10 +482,20 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   let unsubscribe: (() => void) | null = null;
   let notificationQueue = Promise.resolve();
 
+  const armedByManager =
+    armedFinishNotifications.get(agentManager) ?? new Map<string, () => void>();
+  armedFinishNotifications.set(agentManager, armedByManager);
+  const armedKey = JSON.stringify([childAgentId, callerAgentId]);
+  armedByManager.get(armedKey)?.();
+  armedByManager.set(armedKey, stop);
+
   function stop(): void {
     if (stopped) return;
     stopped = true;
     unsubscribe?.();
+    if (armedByManager.get(armedKey) === stop) {
+      armedByManager.delete(armedKey);
+    }
   }
 
   async function notify(
@@ -497,6 +520,14 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
       lastAssistantMessage,
       permissionRequest,
     });
+    const event = (
+      {
+        finished: "completion",
+        errored: "error",
+        "needs permission": "permission",
+        "was closed": "error",
+      } as const
+    )[reason];
 
     await agentManager.runPromptAdmission((admissionTicket) =>
       sendPromptToAgent({
@@ -504,6 +535,14 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
         agentStorage,
         agentId: callerAgentId,
         prompt: formatSystemNotificationPrompt(body),
+        runOptions: {
+          clientMessageId: randomUUID(),
+          agentOrigin: {
+            agentId: childAgentId,
+            eventId: randomUUID(),
+            event,
+          },
+        },
         activeTurnBehavior: "steer",
         unarchive: false,
         admissionTicket,
@@ -596,11 +635,12 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   const childSnapshot = agentManager.getAgent(childAgentId);
   if (!childSnapshot || childSnapshot.lifecycle === "closed") {
     stop();
-    return;
+    return stop;
   }
   if (childSnapshot.lifecycle === "running") {
     hasSeenRunning = true;
   } else if (childSnapshot.lifecycle === "error") {
     notifySafely("errored");
   }
+  return stop;
 }

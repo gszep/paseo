@@ -368,8 +368,23 @@ export interface AgentTaskItem {
   activeForm?: string;
 }
 
+/** Stamped by trusted agent ingress, never inferred from message text. */
+export interface AgentMessageOrigin {
+  agentId: string;
+  eventId: string;
+  event: "prompt" | "completion" | "error" | "permission";
+  /** Explicit sender escalation. Permissions and errors always remain visible. */
+  requiresAttention?: boolean;
+}
+
 export type AgentTimelineItem =
-  | { type: "user_message"; text: string; messageId?: string; clientMessageId?: string }
+  | {
+      type: "user_message";
+      text: string;
+      messageId?: string;
+      clientMessageId?: string;
+      agentOrigin?: AgentMessageOrigin;
+    }
   | { type: "assistant_message"; text: string; messageId?: string }
   | { type: "reasoning"; text: string }
   | ToolCallTimelineItem
