@@ -23,6 +23,47 @@ import { timelineItemIdentity } from "@getpaseo/protocol/timeline-identity";
 
 type CanonicalToolStatus = "running" | "completed" | "failed" | "canceled";
 
+it("preserves distinct coordination payloads sharing origin and client correlation while deduplicating exact echoes", () => {
+  const timestamp = new Date("2026-10-24T00:00:00Z");
+  const agentOrigin = { agentId: "worker", eventId: "operation", event: "completion" as const };
+  const first = createUserMessage({
+    messageId: "native-first",
+    clientMessageId: "shared",
+    text: "Original payload",
+    timestamp,
+    agentOrigin,
+  });
+  const second = createUserMessage({
+    messageId: "native-second",
+    clientMessageId: "shared",
+    text: "Different provider payload",
+    timestamp,
+    agentOrigin,
+  });
+  const rows = upsertUserMessage([first], second);
+  expect(rows).toEqual([first, second]);
+  expect(rows.map((row) => row.id)).toEqual(["native-first", "native-second"]);
+  expect(upsertUserMessage(upsertUserMessage(rows, { ...first }), { ...second })).toEqual(rows);
+  const replay = hydrateStreamState(
+    [first, second, first, second].map((row) => ({
+      timestamp,
+      event: {
+        type: "timeline" as const,
+        provider: "opencode" as const,
+        item: {
+          type: "user_message" as const,
+          messageId: row.messageId,
+          clientMessageId: row.clientMessageId,
+          text: row.text,
+          agentOrigin,
+        },
+      },
+    })),
+    { source: "canonical" },
+  );
+  expect(replay).toEqual(rows);
+});
+
 it.each(["different text", "callback text"])(
   "does not merge human %s with a callback sharing its client ID",
   (text) => {

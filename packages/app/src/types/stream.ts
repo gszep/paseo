@@ -210,6 +210,8 @@ function matchesUserMessage(
 ): boolean {
   // A client-chosen correlation ID is not provenance. Never reconcile a human
   // row into a coordination row, including identical text and delayed echoes.
+  // Even the same operation can have distinct provider records: suppress only
+  // exact payload echoes, matching the manager's reconciliation boundary.
   if (existing.agentOrigin || incoming.agentOrigin) {
     const a = existing.agentOrigin;
     const b = incoming.agentOrigin;
@@ -219,7 +221,8 @@ function matchesUserMessage(
       a.agentId !== b.agentId ||
       a.eventId !== b.eventId ||
       a.event !== b.event ||
-      a.requiresAttention !== b.requiresAttention
+      a.requiresAttention !== b.requiresAttention ||
+      existing.text !== incoming.text
     )
       return false;
   }

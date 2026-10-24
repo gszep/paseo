@@ -219,6 +219,69 @@ test.each([
   },
 );
 
+test.each([390, 1280])(
+  "same-origin differing payloads remain independently inspectable after echoes and remount at %ipx",
+  async (width) => {
+    await page.viewport(width, 900);
+    const agentOrigin = { agentId: "worker", eventId: "operation", event: "completion" as const };
+    const firstInput = {
+      messageId: "native-first",
+      clientMessageId: "shared",
+      text: "Original payload",
+      timestamp,
+      agentOrigin,
+    };
+    const secondInput = {
+      ...firstInput,
+      messageId: "native-second",
+      text: "Different provider payload",
+    };
+    const first = createUserMessage(firstInput);
+    const second = createUserMessage(secondInput);
+    const rows = upsertUserMessage([first], second);
+    expect(rows.map((row) => row.id)).toEqual(["native-first", "native-second"]);
+    mount({ streamItems: rows });
+    const collapsed = container.querySelectorAll<HTMLElement>(
+      '[aria-label="Show agent coordination"]',
+    );
+    expect(collapsed).toHaveLength(2);
+    expect(container.textContent).not.toContain(first.text);
+    expect(container.textContent).not.toContain(second.text);
+    await userEvent.click(collapsed[0]);
+    expect(container.textContent).toContain(first.text);
+    expect(container.textContent).not.toContain(second.text);
+    await userEvent.click(
+      container.querySelector<HTMLElement>('[aria-label="Show agent coordination"]')!,
+    );
+    expect(container.textContent).toContain(second.text);
+    mount({
+      streamItems: upsertUserMessage(
+        upsertUserMessage(rows, createUserMessage(firstInput)),
+        createUserMessage(secondInput),
+      ),
+    });
+    expect(container.querySelectorAll('[aria-label="Hide agent coordination"]')).toHaveLength(2);
+    expect(container.textContent).toContain(first.text);
+    expect(container.textContent).toContain(second.text);
+    act(() => root!.unmount());
+    root = undefined;
+    container.remove();
+    const replay = upsertUserMessage(
+      [createUserMessage(firstInput)],
+      createUserMessage(secondInput),
+    );
+    expect(replay.map((row) => row.id)).toEqual(rows.map((row) => row.id));
+    mount({ streamItems: replay });
+    const remounted = container.querySelectorAll<HTMLElement>(
+      '[aria-label="Show agent coordination"]',
+    );
+    expect(remounted).toHaveLength(2);
+    await userEvent.click(remounted[1]);
+    expect(container.textContent).toContain(second.text);
+    expect(container.textContent).not.toContain(first.text);
+  },
+);
+
 test("reveals a loaded target before the normal viewport scrolls and keeps its stable identity on prepend", async () => {
   const items = Array.from({ length: 60 }, (_, index) => user(`row-${index}`));
   mount({ streamItems: items, targetItemId: "row-5" });
