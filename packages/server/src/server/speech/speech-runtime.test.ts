@@ -90,6 +90,43 @@ describe("createSpeechService readiness", () => {
     initializeLocalSpeechServicesMock.mockReset();
   });
 
+  it.each([true, false])(
+    "initializes selected Deepgram STT only when configured (credentials=%s), keeping TTS unchanged",
+    async (configured) => {
+      const tts = createStubTts("local");
+      initializeLocalSpeechServicesMock.mockResolvedValue({
+        turnDetectionService: null,
+        sttService: null,
+        ttsService: tts,
+        dictationSttService: null,
+        localVoiceTtsProvider: tts,
+        localModelConfig: null,
+        availability: { configured: false, modelsDir: null, missingModelIds: [] },
+        cleanup: () => undefined,
+      });
+      const speechConfig = createSpeechConfig({
+        dictationStt: { provider: "deepgram", explicit: true },
+        voiceStt: { provider: "deepgram", explicit: true },
+        voiceTurnDetection: { provider: "local", explicit: false, enabled: false },
+        voiceTts: { provider: "local", explicit: false },
+      });
+      if (configured)
+        speechConfig.deepgram = {
+          apiKey: "fixture-key",
+          voice: { model: "nova-3" },
+          dictation: { model: "nova-3" },
+        };
+      const service = createSpeechService({ logger: pino({ level: "silent" }), speechConfig });
+      service.start();
+      await service.ready;
+      expect(service.resolveDictationStt()?.id ?? null).toBe(configured ? "deepgram" : null);
+      expect(service.resolveStt()?.id ?? null).toBe(configured ? "deepgram" : null);
+      expect(service.resolveTts()).toBe(tts);
+      expect(service.getReadiness().dictation.available).toBe(configured);
+      await service.stop();
+    },
+  );
+
   it("keeps voice feature available when only dictation is enabled and ready", async () => {
     const dictationStt = createStubStt("dictation-local");
 

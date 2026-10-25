@@ -18,6 +18,7 @@ import {
 import type { SpeechToTextProvider, TextToSpeechProvider } from "./speech-provider.js";
 import type { RequestedSpeechProviders } from "./speech-types.js";
 import type { TurnDetectionProvider } from "./turn-detection-provider.js";
+import { DeepgramSTT } from "./providers/deepgram/stt.js";
 
 const SPEECH_RUNTIME_MONITOR_INTERVAL_MS = 3000;
 
@@ -522,6 +523,19 @@ export function createSpeechService(params: {
     sttService = nextOpenAiSpeech.sttService;
     ttsService = nextOpenAiSpeech.ttsService;
     dictationSttService = nextOpenAiSpeech.dictationSttService;
+    const deepgram = speechConfig?.deepgram;
+    if (
+      deepgram?.voice &&
+      providers.voiceStt.provider === "deepgram" &&
+      providers.voiceStt.enabled !== false
+    )
+      sttService = new DeepgramSTT({ apiKey: deepgram.apiKey, ...deepgram.voice });
+    if (
+      deepgram?.dictation &&
+      providers.dictationStt.provider === "deepgram" &&
+      providers.dictationStt.enabled !== false
+    )
+      dictationSttService = new DeepgramSTT({ apiKey: deepgram.apiKey, ...deepgram.dictation });
     localModelConfig = nextLocalSpeech.localModelConfig;
     localVoiceTtsProvider = nextLocalSpeech.localVoiceTtsProvider;
     localCleanup = nextLocalSpeech.cleanup;

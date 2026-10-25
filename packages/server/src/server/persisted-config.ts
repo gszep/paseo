@@ -73,6 +73,10 @@ const LocalSpeechProviderSchema = z
 
 const ProvidersSchema = z
   .object({
+    deepgram: z
+      .object({ apiKey: z.string().trim().min(1).optional() })
+      .strict()
+      .optional(),
     openai: OpenAiProviderSchema.optional(),
     local: LocalSpeechProviderSchema.optional(),
   })
@@ -101,12 +105,23 @@ const SpeechProviderIdSchema = z
   .toLowerCase()
   .pipe(z.enum(["openai", "local"]));
 
+const SpeechSttProviderIdSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .pipe(z.enum(["openai", "local", "deepgram"]));
+const SpeechLanguageHintsSchema = z
+  .array(z.string().regex(/^[a-z]{2}(?:-[A-Za-z0-9]+)*$/))
+  .max(8)
+  .optional();
+
 const FeatureDictationSchema = z
   .object({
     enabled: z.boolean().optional(),
     stt: z
       .object({
-        provider: SpeechProviderIdSchema.optional(),
+        provider: SpeechSttProviderIdSchema.optional(),
+        languageHints: SpeechLanguageHintsSchema,
         model: z.string().min(1).optional(),
         language: z.string().trim().min(1).optional(),
         confidenceThreshold: z.number().optional(),
@@ -128,7 +143,8 @@ const FeatureVoiceModeSchema = z
       .optional(),
     stt: z
       .object({
-        provider: SpeechProviderIdSchema.optional(),
+        provider: SpeechSttProviderIdSchema.optional(),
+        languageHints: SpeechLanguageHintsSchema,
         model: z.string().min(1).optional(),
         language: z.string().trim().min(1).optional(),
       })

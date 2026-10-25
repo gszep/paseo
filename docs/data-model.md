@@ -383,6 +383,70 @@ OpenAI speech can be configured under `providers.openai`. STT and TTS resolve in
 
 `providers.openai.stt` is used for both composer dictation and voice mode speech-to-text; `providers.openai.tts` is used for voice mode text-to-speech. The equivalent env vars are `OPENAI_STT_API_KEY`/`OPENAI_STT_BASE_URL` and `OPENAI_TTS_API_KEY`/`OPENAI_TTS_BASE_URL`. Each feature falls back to `providers.openai.apiKey`/`providers.openai.baseUrl`, then `OPENAI_API_KEY`/`OPENAI_BASE_URL`, when its own fields are unset. These settings apply only to Paseo OpenAI speech features, not to Codex or other OpenAI-backed tools.
 
+Deepgram is an opt-in STT provider for dictation and voice mode, not TTS or turn
+detection. Set the selected feature's `stt.provider` to `deepgram` and its model to
+`nova-3`. For code-switching, set `stt.language` to `multi`; optional
+`stt.languageHints` such as `["en", "ja"]` are user preferences, not global defaults.
+The provider sends repeated `language_hint` parameters to V1 Listen. It does not
+translate, romanize, apply text replacements or send the generic transcription
+prompt as instructions. Provider transcript fragments are kept in audio order;
+future learning corrections must not overwrite them.
+
+The adapter uses mono PCM16LE at 24 kHz; existing audio managers resample input.
+Each explicit commit finishes its V1 socket with `CloseStream` and waits for final
+results, metadata and normal closure. Later segments are queued and use fresh
+connections, never replaying audio after a transport failure. `speech_final` is
+not a Paseo commit. V1 `Finalize` can omit a `from_finalize` response when no audio
+remains buffered, so it is not used as an unambiguous per-segment acknowledgement.
+Flux's V2 turn-taking protocol is a different integration, not a model or endpoint
+substitution here. Protocol fixtures do not establish transcription quality.
+
+#### Private speech credentials
+
+Deepgram resolves `providers.deepgram.apiKey` before `DEEPGRAM_API_KEY` in the
+daemon's environment. A shell export in a separate CLI process does not change
+the running supervisor's environment. Credential presence, management API
+acceptance, STT permissions and recognition quality are separate checks.
+
+Use your own private terminal, not a chat, command argument, log or issue:
+
+```sh
+paseo speech credentials verify --provider deepgram --secret --home "$HOME/.paseo"
+```
+
+This explicitly requests one bounded GET to Deepgram's `/v1/projects`, without
+audio, token creation or purchases. It discards the response body and prints only
+presence/acceptance and scope. HTTP 403 or a network error is inconclusive, not
+proof of an invalid key. The command does not save the key or contact the daemon.
+Use `status` instead of `verify` for presence only, without any network request.
+Both accept `--stdin` instead of `--secret` for a pipe from your own secret
+management tooling; never place the key itself in the command line.
+
+Once the installed daemon supports this configuration schema, bind it through
+the existing private atomic config writer:
+
+```sh
+paseo daemon config set providers.deepgram.apiKey --secret --no-apply --home "$HOME/.paseo"
+paseo speech credentials status --provider deepgram --home "$HOME/.paseo"
+```
+
+`--stdin --string` is the programmatic alternative to `--secret`. The writer uses
+private directory/file modes (0700/0600 where supported), preserves other config
+fields and returns no secret. `--no-apply` performs no daemon IPC or reload.
+Do not save new provider fields into an older daemon's strict configuration:
+even a save-only edit can make its next config read fail. A rebuilt candidate CLI
+can verify a prospective key privately before installation without saving it.
+
+Speech services are created at startup, not replaced by mutable-config reload.
+Saving a credential neither enables Deepgram nor changes the selected provider;
+applying a speech change requires the installation's supported restart procedure.
+Normal runtime ownership/admission rules still apply.
+
+Protocol references: [Nova-3 language prompting](https://developers.deepgram.com/docs/nova-3-language-prompting),
+[V1 CloseStream](https://developers.deepgram.com/docs/close-stream),
+[V1 Finalize](https://developers.deepgram.com/docs/finalize),
+[KeepAlive](https://developers.deepgram.com/docs/audio-keep-alive).
+
 Paseo uses these paths under the configured OpenAI base URL:
 
 - dictation STT: `/v1/audio/transcriptions`

@@ -6,10 +6,38 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { loadConfig, resolveBundledWebUiDistDir, resolveConfigFromPersisted } from "./config.js";
 import { loadPersistedConfig } from "./persisted-config.js";
+import { daemonLaunchEnvironment } from "./config-environment.js";
 
 const roots: string[] = [];
 
 describe("server config", () => {
+  test("managed Deepgram credentials reach the actual daemon resolver without overriding user-owned EN/JA preferences", () => {
+    const home = "/fixture/deepgram-home";
+    const env = daemonLaunchEnvironment({
+      env: { DEEPGRAM_API_KEY: "fixture-key", PASEO_DICTATION_LANGUAGE: "en" },
+      home,
+      mode: "managed",
+    });
+    const stt = {
+      provider: "deepgram" as const,
+      model: "nova-3",
+      language: "multi",
+      languageHints: ["en", "ja"],
+    };
+    const config = resolveConfigFromPersisted(
+      home,
+      { features: { dictation: { stt }, voiceMode: { stt } } },
+      { env },
+    );
+    expect(config.speech?.deepgram).toEqual({
+      apiKey: "fixture-key",
+      dictation: { model: "nova-3", languageHints: ["en", "ja"] },
+      voice: { model: "nova-3", languageHints: ["en", "ja"] },
+    });
+    expect(config.speech?.sttLanguages).toEqual({ dictation: "multi", voice: "multi" });
+    expect(config.speech?.providers.voiceTts.provider).toBe("local");
+  });
+
   afterEach(async () => {
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
   });
