@@ -8,6 +8,7 @@ import {
 } from "@getpaseo/server/configuration";
 import { connectToDaemon } from "../../utils/client.js";
 import { withOutput, type CommandOptions } from "../../output/index.js";
+import { readPrivateInput } from "../../utils/private-input.js";
 
 function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
@@ -90,21 +91,49 @@ export function daemonConfigCommand(): Command {
       });
     }),
   );
-  addLocalDaemonOptions(config.command("set <path> <value>"))
+  addLocalDaemonOptions(config.command("set <path> [value]"))
     .option("--string", "Interpret value literally as a string")
+    .option("--stdin", "Read the value privately from standard input, never argv")
+    .option("--secret", "Read a string from a masked local terminal prompt")
+    .option("--no-apply", "Save only; do not ask a running daemon to reload")
     .action(
-      withOutput(async (field: string, raw: string, options: CommandOptions, _command: Command) => {
-        let value: unknown = raw;
-        if (!options.string) {
-          try {
-            value = JSON.parse(raw);
-          } catch {
-            /* Unquoted input is a string. */
+      withOutput(
+        async (
+          field: string,
+          raw: string | undefined,
+          options: CommandOptions,
+          _command: Command,
+        ) => {
+          const privateInput = Boolean(options.stdin || options.secret);
+          if (privateInput && raw !== undefined)
+            throw new Error("Do not combine a value argument with private input");
+          if (privateInput)
+            raw = await readPrivateInput({ stdin: options.stdin, secret: options.secret });
+          if (raw === undefined) throw new Error("Provide a value, --stdin or --secret");
+          let value: unknown = raw;
+          if (!options.string && !options.secret) {
+            try {
+              value = JSON.parse(raw);
+            } catch {
+              /* Unquoted input is a string. */
+            }
           }
-        }
-        editPersistedConfig(homeOf(options), field, { value });
-        return applySaved(homeOf(options), options);
-      }),
+          if (privateInput) {
+            try {
+              editPersistedConfig(homeOf(options), field, { value });
+            } catch {
+              throw new Error("Private configuration update failed; inspect configuration locally");
+            }
+          } else editPersistedConfig(homeOf(options), field, { value });
+          if (options.apply === false)
+            return result({
+              action: "saved",
+              applied: false,
+              message: "Saved only; running daemon configuration was not changed",
+            });
+          return applySaved(homeOf(options), options);
+        },
+      ),
     );
   addLocalDaemonOptions(config.command("unset <path>")).action(
     withOutput(async (field: string, options: CommandOptions, _command: Command) => {

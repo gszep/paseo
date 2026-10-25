@@ -4,6 +4,7 @@ import type { PersistedConfig } from "../persisted-config.js";
 import type { PaseoOpenAIConfig, PaseoSpeechConfig } from "../bootstrap.js";
 import { resolveLocalSpeechConfig } from "./providers/local/config.js";
 import { resolveOpenAiSpeechConfig } from "./providers/openai/config.js";
+import { resolveDeepgramSpeechConfig } from "./providers/deepgram/config.js";
 import {
   SpeechProviderIdSchema,
   type RequestedSpeechProvider,
@@ -38,9 +39,15 @@ const OptionalBooleanFlagSchema = z
 
 const RequestedSpeechProvidersSchema = z.object({
   dictationStt: OptionalSpeechProviderSchema.default("local"),
-  voiceTurnDetection: OptionalSpeechProviderSchema.default("local"),
+  voiceTurnDetection: OptionalSpeechProviderSchema.refine(
+    (value) => value !== "deepgram",
+    "Deepgram is an STT provider only",
+  ).default("local"),
   voiceStt: OptionalSpeechProviderSchema.default("local"),
-  voiceTts: OptionalSpeechProviderSchema.default("local"),
+  voiceTts: OptionalSpeechProviderSchema.refine(
+    (value) => value !== "deepgram",
+    "Deepgram is an STT provider only",
+  ).default("local"),
 });
 
 function resolveOptionalBooleanFlag(value: unknown): boolean {
@@ -168,12 +175,18 @@ export function resolveSpeechConfig(params: {
     persisted: params.persisted,
     providers,
   });
+  const deepgram = resolveDeepgramSpeechConfig({
+    ...params,
+    providers,
+    languages: local.sttLanguages,
+  });
 
   return {
     openai,
     speech: {
       providers,
       sttLanguages: local.sttLanguages,
+      ...(deepgram ? { deepgram } : {}),
       ...(local.local ? { local: local.local } : {}),
     },
   };

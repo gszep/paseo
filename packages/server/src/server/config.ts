@@ -25,6 +25,8 @@ import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { mergeHostnames, parseHostnamesEnv, type HostnamesConfig } from "./hostnames.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 
+export { resolveDeepgramApiKey } from "./speech/providers/deepgram/config.js";
+
 export {
   loadPersistedConfig,
   readPersistedConfig,

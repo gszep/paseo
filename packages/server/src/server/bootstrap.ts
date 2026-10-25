@@ -126,6 +126,7 @@ import { createWorkspaceProvisioningService } from "./session/workspace-provisio
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
+import type { DeepgramSpeechConfig } from "./speech/providers/deepgram/config.js";
 import type { LocalSpeechProviderConfig } from "./speech/providers/local/config.js";
 import type { RequestedSpeechProviders } from "./speech/speech-types.js";
 import { createSpeechService } from "./speech/speech-runtime.js";
@@ -365,6 +366,7 @@ export interface PaseoSpeechSttLanguages {
 }
 
 export interface PaseoSpeechConfig {
+  deepgram?: DeepgramSpeechConfig;
   providers: RequestedSpeechProviders;
   sttLanguages?: PaseoSpeechSttLanguages;
   local?: PaseoLocalSpeechConfig;
