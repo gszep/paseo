@@ -66,6 +66,8 @@ export class OpenCodeV2Session implements AgentSession {
   private models: ModelInfo[] = [];
   private usage: AgentUsage | undefined;
   private environment: Record<string, string> | undefined;
+  private initializing = false;
+  private connecting = false;
   constructor(
     private readonly connection: V2Connection,
     private info: SessionInfo,
@@ -80,10 +82,11 @@ export class OpenCodeV2Session implements AgentSession {
       this.emit(event),
     );
     this.children = new SessionChildren({
+      signal: this.abort.signal,
       client: connection.client,
       id: info.id,
       emit: (event) => this.emit(event),
-      reconcilePermissions: (id) => this.permissions.reconcile(id),
+      reconcilePermissions: (id) => this.permissions.reconcile(id, this.abort.signal),
       bindChild,
     });
     this.turns = new SessionTurns({
@@ -112,6 +115,40 @@ export class OpenCodeV2Session implements AgentSession {
     return this.connection.client;
   }
   async initialize(launch?: AgentLaunchContext) {
+    this.initializing = true;
+    try {
+      await this.initializeSession(launch);
+    } catch (error) {
+      // The existing first-connection deadline must cancel the reads that
+      // attach's close() waits for, not leave a failed initialization retained.
+      this.abort.abort(error);
+      throw error;
+    } finally {
+      this.initializing = false;
+    }
+  }
+  private async phase<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+    if (!this.initializing && !this.connecting) return operation();
+    const started = performance.now();
+    const fields = { nativeSessionId: this.id, phase };
+    this.logger.debug(fields, "OpenCode initialization phase started");
+    try {
+      const result = await operation();
+      this.logger.debug(
+        { ...fields, elapsedMs: Math.round(performance.now() - started) },
+        "OpenCode initialization phase completed",
+      );
+      return result;
+    } catch (error) {
+      // Phase/timing only: never log transcript, environment, MCP config or bodies.
+      this.logger.warn(
+        { ...fields, elapsedMs: Math.round(performance.now() - started) },
+        "OpenCode initialization phase failed",
+      );
+      throw error;
+    }
+  }
+  private async initializeSession(launch?: AgentLaunchContext) {
     void this.connection.exited.then((error) => {
       if (this.closed) return;
       this.abort.abort(error);
@@ -119,52 +156,76 @@ export class OpenCodeV2Session implements AgentSession {
       return undefined;
     });
     const location = { directory: this.config.cwd };
-    await waitForLocationReady({ client: this.client, location, signal: this.abort.signal });
+    await this.phase("location", () =>
+      waitForLocationReady({ client: this.client, location, signal: this.abort.signal }),
+    );
     if (this.requiresPaseoPlugin)
-      await awaitPaseoPlugin({ client: this.client, location, signal: this.abort.signal });
+      await this.phase("paseo-plugin", () =>
+        awaitPaseoPlugin({ client: this.client, location, signal: this.abort.signal }),
+      );
     // OpenCode runs session shells with these variables as the whole environment, not
     // an overlay on its own, so they must carry the daemon's inherited environment.
     this.environment = launch?.env ? { ...inheritedEnvironment(), ...launch.env } : undefined;
     for (const [server, config] of Object.entries(this.config.mcpServers ?? {})) {
-      await this.client.mcp.add({
-        server,
-        location,
-        config:
-          config.type === "stdio"
-            ? {
-                type: "local",
-                command: [config.command, ...(config.args ?? [])],
-                environment: config.env,
-                codemode: false,
-              }
-            : {
-                type: "remote",
-                url: config.url,
-                headers: config.headers,
-                oauth: false,
-                codemode: false,
-              },
-      });
-      await this.awaitMcp(server);
+      await this.phase("mcp-registration", () =>
+        this.client.mcp.add(
+          {
+            server,
+            location,
+            config:
+              config.type === "stdio"
+                ? {
+                    type: "local",
+                    command: [config.command, ...(config.args ?? [])],
+                    environment: config.env,
+                    codemode: false,
+                  }
+                : {
+                    type: "remote",
+                    url: config.url,
+                    headers: config.headers,
+                    oauth: false,
+                    codemode: false,
+                  },
+          },
+          { signal: this.abort.signal },
+        ),
+      );
+      await this.phase("mcp-ready", () => this.awaitMcp(server));
     }
     // Forks copy instruction entries. Remove the retired system-role transport
     // before any model step, including sessions with no local prompt receipts.
-    await this.client.session.instructions.entry.remove({
-      sessionID: this.id,
-      key: "chi-human-prompts",
-    });
+    await this.phase("instructions-remove", () =>
+      this.client.session.instructions.entry.remove(
+        {
+          sessionID: this.id,
+          key: "chi-human-prompts",
+        },
+        { signal: this.abort.signal },
+      ),
+    );
     const system = composeSystemPromptParts(
       this.config.systemPrompt,
       this.config.daemonAppendSystemPrompt,
     );
     if (system)
-      await this.client.session.instructions.entry.put({
-        sessionID: this.id,
-        key: "paseo",
-        value: system,
-      });
-    this.modes = modesFromV2((await this.client.agent.list({ location })).data);
-    this.timeline.messages(await messages(this.client, this.id));
+      await this.phase("instructions-put", () =>
+        this.client.session.instructions.entry.put(
+          {
+            sessionID: this.id,
+            key: "paseo",
+            value: system,
+          },
+          { signal: this.abort.signal },
+        ),
+      );
+    this.modes = modesFromV2(
+      (
+        await this.phase("agent-metadata", () =>
+          this.client.agent.list({ location }, { signal: this.abort.signal }),
+        )
+      ).data,
+    );
     let ready!: () => void;
     let fail!: (error: unknown) => void;
     const first = new Promise<void>((resolve, reject) => {
@@ -172,11 +233,12 @@ export class OpenCodeV2Session implements AgentSession {
       fail = reject;
     });
     this.stream = this.consume(ready, fail);
-    await raceProviderRefreshAbort(
-      AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
-      first,
+    await this.phase("first-connected", () =>
+      raceProviderRefreshAbort(
+        AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]),
+        first,
+      ),
     );
-    await this.children.reconcile(this.id);
   }
   subscribe(callback: (event: AgentStreamEvent) => void) {
     this.listeners.add(callback);
@@ -208,7 +270,7 @@ export class OpenCodeV2Session implements AgentSession {
   }
   async *streamHistory() {
     const history = new V2Timeline(false);
-    yield* history.messages(await messages(this.client, this.id));
+    yield* history.messages(await messages(this.client, this.id, this.abort.signal));
   }
   async getRuntimeInfo() {
     await this.reconcile();
@@ -330,10 +392,14 @@ export class OpenCodeV2Session implements AgentSession {
     await this.permissions.respondToPermission(requestId, response);
   }
   private async reconcileSnapshot() {
+    this.abort.signal.throwIfAborted();
     const [info, history] = await Promise.all([
-      this.client.session.get({ sessionID: this.id }),
-      messages(this.client, this.id),
+      this.phase("session-metadata", () =>
+        this.client.session.get({ sessionID: this.id }, { signal: this.abort.signal }),
+      ),
+      this.phase("history", () => messages(this.client, this.id, this.abort.signal)),
     ]);
+    this.abort.signal.throwIfAborted();
     this.info = info;
     this.history = history;
     const usage = usageFromV2({ session: info, history, models: this.models });
@@ -343,8 +409,11 @@ export class OpenCodeV2Session implements AgentSession {
       // therefore clear an invalidated measurement without a protocol change.
       this.emit({ type: "usage_updated", provider: "opencode", usage });
     }
-    for (const event of this.timeline.messages(history)) this.emitTimeline(event);
-    await this.permissions.reconcile(this.id);
+    for (const event of this.timeline.messages(history)) {
+      this.abort.signal.throwIfAborted();
+      this.emitTimeline(event);
+    }
+    await this.phase("permissions", () => this.permissions.reconcile(this.id, this.abort.signal));
   }
   private async reconcile() {
     this.dirty = true;
@@ -358,18 +427,33 @@ export class OpenCodeV2Session implements AgentSession {
     }
   }
   private async reconcileConnection() {
+    this.connecting = true;
+    try {
+      await this.reconcileConnectedSession();
+    } finally {
+      this.connecting = false;
+    }
+  }
+  private async reconcileConnectedSession() {
     // OpenCode's session environment is process-local. Restore this exact binding
     // on every connection before observing recovered execution or reconciling it.
     if (this.environment)
-      await this.client.session.environment({ sessionID: this.id, variables: this.environment });
+      await this.phase("environment", () =>
+        this.client.session.environment(
+          { sessionID: this.id, variables: this.environment! },
+          { signal: this.abort.signal },
+        ),
+      );
     // Model limits are location-scoped metadata. Refresh on connection, not on
     // each streamed token or native step. Unknown limits must not prevent resume.
     this.models = [];
     try {
       this.models = (
-        await this.client.model.list(
-          { location: { directory: this.config.cwd } },
-          { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(10_000)]) },
+        await this.phase("model-metadata", () =>
+          this.client.model.list(
+            { location: { directory: this.config.cwd } },
+            { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(10_000)]) },
+          ),
         )
       ).data;
     } catch (error) {
@@ -380,8 +464,10 @@ export class OpenCodeV2Session implements AgentSession {
       );
     }
     await this.reconcile();
-    await this.children.reconcile(this.id);
-    const active = await this.client.session.active();
+    await this.phase("children", () => this.children.reconcile(this.id));
+    const active = await this.phase("active-state", () =>
+      this.client.session.active({ signal: this.abort.signal }),
+    );
     if (active[this.id]) this.turns.observeActiveTurn();
   }
   private scheduleReconcile() {

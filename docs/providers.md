@@ -117,6 +117,15 @@ Pi RPC extension UI dialog requests (`select`, `input`, `editor`, `confirm`) are
 
 OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than the tested 2.0.10 SDK at runtime selection. Runtime selection uses the configured command and environment and lasts until provider configuration reload. Keep upstream SDK types inside the version-specific adapter. OpenCode owns storage migration; a missing native session must fail resume rather than create a replacement. V2 has no native archive/unarchive operation: archiving affects Paseo only. V1 retains native archiving.
 
+V2 connects its event stream before acquiring the initial complete history; it
+does not prefetch and discard another full copy first. Keep ordered cursor paging
+and the child census intact. A failed initialization cancels its owned acquisition
+requests before cleanup releases the binding, so a retry can resume the same native
+session. Initialization/connection phase logs report identifiers and elapsed time,
+never transcript, MCP configuration or environment contents. Use those phases to
+distinguish location/plugin/MCP readiness, model metadata, history, permissions and
+children; a UI timeout alone does not identify the slow phase.
+
 V2 shell environments are per native session and process-local, not per directory.
 Rebind the full inherited environment with that agent's identity on each event-stream
 connection, including reconnects. The bridge's tool binding is a separate session map.

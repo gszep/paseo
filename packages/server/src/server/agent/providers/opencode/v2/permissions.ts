@@ -33,11 +33,19 @@ export class SessionPermissions {
   list() {
     return [...this.pending.values()];
   }
-  async respondToPermission(requestId: string, response: AgentPermissionResponse) {
+  async respondToPermission(
+    requestId: string,
+    response: AgentPermissionResponse,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
     const form = this.forms.get(requestId);
     if (form) {
       if (response.behavior === "deny")
-        await this.client.session.form.cancel({ sessionID: form.sessionID, formID: form.id });
+        await this.client.session.form.cancel(
+          { sessionID: form.sessionID, formID: form.id },
+          ...(signal ? ([{ signal }] as const) : []),
+        );
       else {
         const raw = response.updatedInput?.answers;
         const answer: Record<string, FormValue> = {};
@@ -49,28 +57,37 @@ export class SessionPermissions {
           const normalized = formAnswer(field, value);
           if (normalized !== undefined) answer[field.key] = normalized;
         }
-        await this.client.session.form.reply({
-          sessionID: form.sessionID,
-          formID: form.id,
-          answer,
-        });
+        await this.client.session.form.reply(
+          {
+            sessionID: form.sessionID,
+            formID: form.id,
+            answer,
+          },
+          ...(signal ? ([{ signal }] as const) : []),
+        );
       }
       this.forms.delete(requestId);
     } else {
-      await this.client.permission.reply({
-        sessionID: this.permissionOwners.get(requestId) ?? this.id,
-        requestID: requestId,
-        decision: permissionReply(response),
-      });
+      await this.client.permission.reply(
+        {
+          sessionID: this.permissionOwners.get(requestId) ?? this.id,
+          requestID: requestId,
+          decision: permissionReply(response),
+        },
+        ...(signal ? ([{ signal }] as const) : []),
+      );
     }
+    signal?.throwIfAborted();
     this.resolvePending(requestId, response);
   }
-  async reconcile(sessionID: string) {
+  async reconcile(sessionID: string, signal?: AbortSignal) {
     const [permissions, forms] = await Promise.all([
-      this.client.permission.list({ sessionID }),
-      this.client.session.form.list({ sessionID }),
+      this.client.permission.list({ sessionID }, { signal }),
+      this.client.session.form.list({ sessionID }, { signal }),
     ]);
+    signal?.throwIfAborted();
     for (const request of permissions) {
+      signal?.throwIfAborted();
       if (this.pending.has(request.id)) continue;
       const pending: AgentPermissionRequest = {
         id: request.id,
@@ -87,10 +104,11 @@ export class SessionPermissions {
       this.pending.set(request.id, pending);
       this.permissionOwners.set(request.id, sessionID);
       if (!this.config.toolPolicy && this.config.featureValues?.["auto_accept"] === true)
-        await this.respondToPermission(request.id, { behavior: "allow" });
+        await this.respondToPermission(request.id, { behavior: "allow" }, signal);
       else this.emit({ type: "permission_requested", provider: "opencode", request: pending });
     }
     for (const form of forms) {
+      signal?.throwIfAborted();
       if (this.pending.has(form.id)) continue;
       const pending: AgentPermissionRequest = {
         id: form.id,

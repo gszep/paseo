@@ -21,6 +21,169 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
+  test.each(["history", "permissions", "children"])(
+    "first-connection timeout cancels stalled %s, releases failed initialization, and allows same-session retry",
+    async (phase) => {
+      const harness = new V2Harness();
+      harness.history.push({
+        type: "user",
+        id: "existing",
+        text: "private-history-canary",
+        time: { created: 1 },
+      });
+      const deadlines: Array<{ ms: number; controller: AbortController }> = [];
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+        const controller = new AbortController();
+        deadlines.push({ ms, controller });
+        return controller.signal;
+      });
+      const subscribe = harness.api.event.subscribe;
+      let connected = false,
+        stall = true,
+        pending = false;
+      let heldSignal: AbortSignal | undefined;
+      let release!: () => void;
+      harness.api.event.subscribe = async function* (options) {
+        for await (const event of subscribe(options)) {
+          if (event.type === "server.connected") connected = true;
+          yield event;
+        }
+      };
+      async function hold(options?: { signal?: AbortSignal }) {
+        if (connected && stall) {
+          pending = true;
+          heldSignal = options?.signal;
+          await new Promise<void>((resolve, reject) => {
+            release = resolve;
+            options?.signal?.addEventListener("abort", () => reject(options.signal!.reason), {
+              once: true,
+            });
+          });
+        }
+      }
+      const list = vi
+        .spyOn(harness.api.message, "list")
+        .mockImplementation(async (_input, options) => {
+          if (phase === "history") await hold(options);
+          return { data: [...harness.history], cursor: {} };
+        });
+      const permissions = vi
+        .spyOn(harness.api.permission, "list")
+        .mockImplementation(async (_input, options) => {
+          if (phase === "permissions") await hold(options);
+          return [];
+        });
+      const children = vi
+        .spyOn(harness.api.session, "list")
+        .mockImplementation(async (_input, options) => {
+          if (phase === "children") await hold(options);
+          return { data: [], cursor: {} };
+        });
+      const remove = vi.spyOn(harness.api.session, "remove");
+      const acquire = vi.spyOn(harness.runtime, "acquire");
+      const logger = createTestLogger();
+      const warnings = vi.spyOn(logger, "warn");
+      const debug = vi.spyOn(logger, "debug");
+      const client = new OpenCodeV2AgentClient({ logger, runtime: harness.runtime });
+      const handle = {
+        provider: "opencode",
+        sessionId: "session",
+        metadata: { cwd: "/tmp/project" },
+      };
+      let outcome = "pending";
+      const first = client.resumeSession(handle).then(
+        () => {
+          outcome = "resolved";
+          return undefined;
+        },
+        () => {
+          outcome = "rejected";
+        },
+      );
+      try {
+        await vi.waitFor(() => expect(pending).toBe(true));
+        deadlines
+          .findLast((entry) => entry.ms === 30_000)!
+          .controller.abort(new DOMException("fixture deadline", "TimeoutError"));
+        await vi.waitFor(() => expect(outcome).toBe("rejected"), { timeout: 200 });
+        expect(heldSignal?.aborted).toBe(true);
+        expect(remove).not.toHaveBeenCalled();
+        stall = false;
+        const resumed = await client.resumeSession(handle);
+        expect(acquire).toHaveBeenCalledTimes(2);
+        expect(resumed.describePersistence().sessionId).toBe("session");
+        await resumed.close();
+        expect(
+          warnings.mock.calls.some(
+            ([fields]) =>
+              typeof fields === "object" &&
+              fields !== null &&
+              Reflect.get(fields, "phase") === phase,
+          ),
+        ).toBe(true);
+        expect(JSON.stringify([...warnings.mock.calls, ...debug.mock.calls])).not.toContain(
+          "private-history-canary",
+        );
+      } finally {
+        stall = false;
+        release?.();
+        await first;
+        timeout.mockRestore();
+        list.mockRestore();
+        permissions.mockRestore();
+        children.mockRestore();
+      }
+    },
+  );
+
+  test("initial connection reads one complete ordered parent history and one child census", async () => {
+    const harness = new V2Harness();
+    const history = Array.from({ length: 205 }, (_, index) => ({
+      type: "user" as const,
+      id: `message-${index}`,
+      text: `literal-${index}`,
+      time: { created: index + 1 },
+    }));
+    const pages: number[] = [];
+    vi.spyOn(harness.api.message, "list").mockImplementation(async (input) => {
+      const start = input.cursor ? Number(input.cursor) : 0;
+      pages.push(start);
+      expect(input.limit).toBe(100);
+      expect(input.order).toBe(start ? undefined : "asc");
+      return {
+        data: history.slice(start, start + 100),
+        cursor: start + 100 < history.length ? { next: String(start + 100) } : {},
+      };
+    });
+    const children = vi.spyOn(harness.api.session, "list");
+    const client = new OpenCodeV2AgentClient({
+      logger: createTestLogger(),
+      runtime: harness.runtime,
+    });
+    const session = await client.resumeSession({
+      provider: "opencode",
+      sessionId: "session",
+      metadata: { cwd: "/tmp/project" },
+    });
+    try {
+      expect(pages).toEqual([0, 100, 200]);
+      expect(children).toHaveBeenCalledTimes(1);
+      const events = [];
+      for await (const event of session.streamHistory()) events.push(event);
+      expect(
+        events.filter((event) => event.type === "timeline").map((event) => event.item),
+      ).toEqual(
+        history.map((message) => ({
+          type: "user_message",
+          messageId: message.id,
+          text: message.text,
+        })),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   test("coordination origin persists on new prompts and projects identically on live/replay/pinned reads", async () => {
     const harness = new V2Harness();
     const prompt = vi.spyOn(harness.api.session, "prompt");
@@ -286,7 +449,10 @@ describe("OpenCode v2 resume configuration", () => {
       metadata: { cwd: "/tmp/project" },
     });
     try {
-      expect(remove).toHaveBeenCalledWith({ sessionID: harness.info.id, key: "chi-human-prompts" });
+      expect(remove).toHaveBeenCalledWith(
+        { sessionID: harness.info.id, key: "chi-human-prompts" },
+        { signal: expect.any(AbortSignal) },
+      );
       expect(entries.has("chi-human-prompts")).toBe(false);
     } finally {
       await session.close();
@@ -482,7 +648,7 @@ describe("OpenCode v2 resume configuration", () => {
       sessionID: harness.info.id,
       variables: expect.objectContaining({ ...settings.env, ...launch.env }),
     };
-    expect(environment).toHaveBeenLastCalledWith(expected);
+    expect(environment).toHaveBeenLastCalledWith(expected, { signal: expect.any(AbortSignal) });
     const handle = session.describePersistence();
     await session.close();
     const resumedClient = new OpenCodeV2AgentClient({
@@ -495,14 +661,17 @@ describe("OpenCode v2 resume configuration", () => {
       env: { PASEO_AGENT_ID: "child", PASEO_AGENT_CWD: "/fixture/child" },
     });
     try {
-      expect(environment).toHaveBeenLastCalledWith({
-        sessionID: harness.info.id,
-        variables: expect.objectContaining({
-          ...settings.env,
-          PASEO_AGENT_ID: "child",
-          PASEO_AGENT_CWD: "/fixture/child",
-        }),
-      });
+      expect(environment).toHaveBeenLastCalledWith(
+        {
+          sessionID: harness.info.id,
+          variables: expect.objectContaining({
+            ...settings.env,
+            PASEO_AGENT_ID: "child",
+            PASEO_AGENT_CWD: "/fixture/child",
+          }),
+        },
+        { signal: expect.any(AbortSignal) },
+      );
       expect(process.env.PATH).toBe(originalPath);
       expect(settings.env.PASEO_AGENT_ID).toBe("stale-parent");
       expect(harness.prompts).toEqual([]);

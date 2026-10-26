@@ -10,6 +10,7 @@ import { messages } from "./history.js";
 
 import type { V2Api } from "./api.js";
 interface ChildrenOptions {
+  signal?: AbortSignal;
   client: V2Api;
   id: string;
   emit(event: AgentStreamEvent): void;
@@ -34,17 +35,25 @@ export class SessionChildren {
       this.children.has(event.data.sessionID)
     ) {
       await this.reconcileChild(
-        await this.options.client.session.get({ sessionID: event.data.sessionID }),
+        await this.options.client.session.get(
+          { sessionID: event.data.sessionID },
+          { signal: this.options.signal },
+        ),
       );
     }
   }
   async reconcile(parentID: string) {
     let cursor: string | undefined;
     do {
-      const page = await this.options.client.session.list({
-        ...(cursor ? { cursor } : { parentID }),
-        limit: 100,
-      });
+      this.options.signal?.throwIfAborted();
+      const page = await this.options.client.session.list(
+        {
+          ...(cursor ? { cursor } : { parentID }),
+          limit: 100,
+        },
+        { signal: this.options.signal },
+      );
+      this.options.signal?.throwIfAborted();
       for (const child of page.data) {
         await this.reconcileChild(child);
         await this.reconcile(child.id);
@@ -53,6 +62,7 @@ export class SessionChildren {
     } while (cursor);
   }
   private async reconcileChild(info: SessionInfo) {
+    this.options.signal?.throwIfAborted();
     await this.options.reconcilePermissions(info.id);
     let timeline = this.children.get(info.id);
     if (!timeline) {
@@ -60,7 +70,8 @@ export class SessionChildren {
       this.children.set(info.id, timeline);
       this.options.bindChild?.(info.id);
     }
-    const active = await this.options.client.session.active();
+    const active = await this.options.client.session.active({ signal: this.options.signal });
+    this.options.signal?.throwIfAborted();
     let status: "running" | "failed" | "canceled" | "completed" = "completed";
     if (active[info.id]) status = "running";
     else if (info.outcome === "failed") status = "failed";
@@ -79,7 +90,9 @@ export class SessionChildren {
       this.childStates.set(info.id, signature);
       this.options.emit({ type: "provider_subagent", provider: "opencode", event: presentation });
     }
-    for (const event of timeline.messages(await messages(this.options.client, info.id))) {
+    for (const event of timeline.messages(
+      await messages(this.options.client, info.id, this.options.signal),
+    )) {
       if (event.type === "timeline")
         this.options.emit({
           type: "provider_subagent",
