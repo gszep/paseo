@@ -63,18 +63,21 @@ npm start
 
 - LLM integration (OpenAI GPT-4)
 - Agent orchestrator
-- Speech-to-Text (Deepgram)
 - Text-to-Speech (OpenAI)
 - Audio streaming
 - UI polish
 
 See [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md) for complete details.
 
+For implemented speech providers (local/OpenAI and opt-in Deepgram Nova-3 STT),
+private credential setup and restart requirements, use the current
+[speech configuration documentation](../../docs/data-model.md#private-speech-credentials),
+not the historical phase checklist above.
+
 ## Environment Variables
 
 ```bash
 OPENAI_API_KEY=your-openai-key-here      # GPT-4 and TTS
-DEEPGRAM_API_KEY=your-deepgram-key-here  # Streaming STT
 STT_MODEL=whisper-1        # Optional: override to gpt-4o-transcribe, etc.
 STT_CONFIDENCE_THRESHOLD=-3.0  # Optional: reject low-confidence clips
 STT_DEBUG_AUDIO_DIR=.stt-debug # Optional: persist raw dictation audio for debugging

@@ -31,6 +31,31 @@ const assistant = {
   ],
 };
 
+test("pinned coordination and native child callbacks retain provenance without rewriting evidence", () => {
+  const agentOrigin = { agentId: "worker", eventId: "operation", event: "prompt" };
+  const bytes = [
+    envelope({ ...user, metadata: { paseoAgentOrigin: agentOrigin } }, 0),
+    envelope(
+      {
+        id: "callback",
+        type: "synthetic",
+        time: { created: 1 },
+        text: "full child result",
+        metadata: { source: "subagent", childID: "native-child", state: "completed" },
+      },
+      1,
+    ),
+  ];
+  const before = [...bytes];
+  const entries = pinnedTimelineEntries(bytes, 0);
+  expect(entries[0].items[0]).toMatchObject({ agentOrigin });
+  expect(entries[1].items[0]).toMatchObject({
+    text: "full child result",
+    agentOrigin: { agentId: "native-child", eventId: "callback", event: "completion" },
+  });
+  expect(bytes).toEqual(before);
+});
+
 test("uses ordinary V2 rows with exact native IDs, explicit historical time and immutable bytes", () => {
   const bytes = [
     envelope(user, 27),

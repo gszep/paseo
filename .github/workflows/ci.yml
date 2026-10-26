@@ -80,8 +80,8 @@ jobs:
 
   format:
     name: format
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.format != 'false') }}
+    needs: [changes, cli-tests-3]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.format != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,8 +100,8 @@ jobs:
 
   lint:
     name: lint
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
+    needs: [changes, relay-tests]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -136,8 +136,9 @@ jobs:
   typecheck:
     name: typecheck
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.quality != 'false') }}
+    # Playwright 1.58.2 supports 24.04, not the moving latest image (26.04).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -179,7 +180,7 @@ jobs:
   server-tests-ubuntu:
     name: server-tests (ubuntu-latest, opencode-ai@1.14.46)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     # Static names also exist when job-level draft/docs gating skips execution.
     env:
@@ -231,8 +232,8 @@ jobs:
 
   server-tests-ubuntu-v2:
     name: server-tests (ubuntu-latest, @opencode/cli@2.0.10)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
+    needs: [changes, typecheck]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: ubuntu-latest
     env:
       OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
@@ -240,8 +241,8 @@ jobs:
 
   server-tests-windows:
     name: server-tests (windows-latest, opencode-ai@1.14.46)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
+    needs: [changes, server-tests-ubuntu]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
       OPENCODE_PACKAGE: "opencode-ai@1.14.46"
@@ -251,8 +252,8 @@ jobs:
 
   server-tests-windows-v2:
     name: server-tests (windows-latest, @opencode/cli@2.0.10)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
+    needs: [changes, server-tests-windows]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false') }}
     runs-on: windows-latest
     env:
       OPENCODE_PACKAGE: "@opencode/cli@2.0.10"
@@ -261,8 +262,8 @@ jobs:
 
   desktop-tests-ubuntu:
     name: desktop-tests (ubuntu-latest)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
+    needs: [changes, server-tests-ubuntu-v2]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -337,8 +338,8 @@ jobs:
 
   desktop-tests-windows:
     name: desktop-tests (windows-latest)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
+    needs: [changes, server-tests-windows-v2]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.desktop != 'false') }}
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
@@ -347,9 +348,9 @@ jobs:
 
   app-tests:
     name: app-tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
-    runs-on: ubuntu-latest
+    needs: [changes, desktop-tests-ubuntu]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.app != 'false') }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -379,8 +380,8 @@ jobs:
 
   sdk-tests:
     name: sdk-tests
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
+    needs: [changes, desktop-tests-windows]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.sdk != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -428,9 +429,9 @@ jobs:
 
   playwright-1:
     name: playwright (shard 1/4)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    needs: [changes, app-tests]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_SHARD: "1/4"
       PLAYWRIGHT_ARTIFACT: "1"
@@ -479,9 +480,9 @@ jobs:
 
   playwright-2:
     name: playwright (shard 2/4)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    needs: [changes, sdk-tests]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_SHARD: "2/4"
       PLAYWRIGHT_ARTIFACT: "2"
@@ -489,9 +490,9 @@ jobs:
 
   playwright-3:
     name: playwright (shard 3/4)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    needs: [changes, playwright-1]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_SHARD: "3/4"
       PLAYWRIGHT_ARTIFACT: "3"
@@ -499,9 +500,9 @@ jobs:
 
   playwright-4:
     name: playwright (shard 4/4)
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
-    runs-on: ubuntu-latest
+    needs: [changes, playwright-2]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.browser != 'false') }}
+    runs-on: ubuntu-24.04
     env:
       PLAYWRIGHT_SHARD: "4/4"
       PLAYWRIGHT_ARTIFACT: "4"
@@ -509,8 +510,8 @@ jobs:
 
   relay-tests:
     name: relay-tests
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
+    needs: [changes, cli-tests-2]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || (!github.event.pull_request.draft && needs.changes.outputs.docs-only != 'true')) && (needs.changes.outputs.full != 'false' || needs.changes.outputs.relay != 'false') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -537,8 +538,8 @@ jobs:
 
   cli-tests-1:
     name: cli-tests (shard 1/3)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    needs: [changes, playwright-3]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -580,8 +581,8 @@ jobs:
 
   cli-tests-2:
     name: cli-tests (shard 2/3)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    needs: [changes, playwright-4]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"
@@ -593,8 +594,8 @@ jobs:
 
   cli-tests-3:
     name: cli-tests (shard 3/3)
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
+    needs: [changes, cli-tests-1]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.full != 'false' || needs.changes.outputs.cli != 'false') }}
     runs-on: ubuntu-latest
     env:
       PASEO_LOCAL_SPEECH_AUTO_DOWNLOAD: "0"

@@ -169,6 +169,16 @@ export class SessionTurns {
           }
         : {}),
       metadata: {
+        ...(options?.agentOrigin
+          ? {
+              paseoAgentOrigin: {
+                agentId: options.agentOrigin.agentId,
+                eventId: options.agentOrigin.eventId,
+                event: options.agentOrigin.event,
+                ...(options.agentOrigin.requiresAttention ? { requiresAttention: true } : {}),
+              },
+            }
+          : {}),
         ...(options?.clientMessageId ? { paseoClientMessageId: options.clientMessageId } : {}),
         ...(output ? { paseoOutputSchema: output.schema } : {}),
       },

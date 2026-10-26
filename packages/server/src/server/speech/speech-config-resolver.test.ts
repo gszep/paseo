@@ -6,6 +6,89 @@ import { PersistedConfigSchema } from "../persisted-config.js";
 import { resolveSpeechConfig } from "./speech-config-resolver.js";
 
 describe("resolveSpeechConfig", () => {
+  test("selects Deepgram Nova-3 independently for dictation and voice with user-owned multilingual hints", () => {
+    const persisted = PersistedConfigSchema.parse({
+      providers: { deepgram: { apiKey: "fixture-config-key" } },
+      features: {
+        dictation: {
+          stt: {
+            provider: "deepgram",
+            model: "nova-3",
+            language: "multi",
+            languageHints: ["en", "ja"],
+          },
+        },
+        voiceMode: { stt: { provider: "deepgram", language: "ja" } },
+      },
+    });
+    const result = resolveSpeechConfig({
+      paseoHome: "/fixture",
+      persisted,
+      env: { DEEPGRAM_API_KEY: "fixture-env-key" },
+    });
+    expect(result.speech.deepgram).toEqual({
+      apiKey: "fixture-config-key",
+      dictation: { model: "nova-3", languageHints: ["en", "ja"] },
+      voice: { model: "nova-3" },
+    });
+    expect(result.speech.sttLanguages).toEqual({ dictation: "multi", voice: "ja" });
+    expect(result.speech.providers.voiceTts.provider).toBe("local");
+    expect(result.speech.providers.voiceTurnDetection.provider).toBe("local");
+  });
+
+  test("missing Deepgram credentials keep the selection unavailable instead of selecting OpenAI/local", () => {
+    const result = resolveSpeechConfig({
+      paseoHome: "/fixture",
+      env: { OPENAI_API_KEY: "fixture-key" },
+      persisted: PersistedConfigSchema.parse({
+        features: { dictation: { stt: { provider: "deepgram" } } },
+      }),
+    });
+    expect(result.speech.providers.dictationStt.provider).toBe("deepgram");
+    expect(result.speech.deepgram).toBeUndefined();
+  });
+
+  test("environment credential fallback does not impose language hints on other users", () => {
+    const result = resolveSpeechConfig({
+      paseoHome: "/fixture",
+      env: { DEEPGRAM_API_KEY: "fixture-key", PASEO_DICTATION_STT_PROVIDER: "deepgram" },
+      persisted: PersistedConfigSchema.parse({}),
+    });
+    expect(result.speech.deepgram).toEqual({
+      apiKey: "fixture-key",
+      dictation: { model: "nova-3" },
+    });
+    expect(result.speech.sttLanguages?.dictation).toBe("en");
+  });
+
+  test.each([{ model: "flux-general-multi" }, { language: "en", languageHints: ["en", "ja"] }])(
+    "rejects incompatible Deepgram options %j",
+    (options) => {
+      expect(() =>
+        resolveSpeechConfig({
+          paseoHome: "/fixture",
+          env: {},
+          persisted: PersistedConfigSchema.parse({
+            features: { dictation: { stt: { provider: "deepgram", ...options } } },
+          }),
+        }),
+      ).toThrow(/Deepgram/);
+    },
+  );
+
+  test.each(["PASEO_VOICE_TTS_PROVIDER", "PASEO_VOICE_TURN_DETECTION_PROVIDER"])(
+    "does not register Deepgram for %s",
+    (key) => {
+      expect(() =>
+        resolveSpeechConfig({
+          paseoHome: "/fixture",
+          env: { [key]: "deepgram" },
+          persisted: PersistedConfigSchema.parse({}),
+        }),
+      ).toThrow();
+    },
+  );
+
   test("resolves local-first defaults without env overrides", () => {
     const paseoHome = "/tmp/paseo-home";
     const persisted = PersistedConfigSchema.parse({});

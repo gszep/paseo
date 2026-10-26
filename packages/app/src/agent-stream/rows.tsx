@@ -1,5 +1,6 @@
-import React, { useCallback, useMemo, type ComponentProps, type ReactNode } from "react";
-import { View } from "react-native";
+import React, { useCallback, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import { Text, View } from "react-native";
+import { Button } from "@/components/ui/button";
 import { StyleSheet } from "react-native-unistyles";
 import { MAX_CONTENT_WIDTH } from "@/constants/layout";
 import {
@@ -104,6 +105,7 @@ export function useStreamRowRenderer({
       const item = layout.item;
       switch (item.kind) {
         case "user_message":
+          if (item.agentOrigin) return <AgentCoordinationRow key={item.id} item={item} />;
           return renderUserMessage(layout);
         case "assistant_message":
           return renderAssistantMessage(layout);
@@ -221,6 +223,41 @@ function ThoughtSlot({
   );
 }
 
+function AgentCoordinationRow({ item }: { item: Extract<StreamItem, { kind: "user_message" }> }) {
+  const [expanded, setExpanded] = useState(false);
+  const accessibilityState = useMemo(() => ({ expanded }), [expanded]);
+  const toggleExpanded = useCallback(() => setExpanded((value) => !value), []);
+  const origin = item.agentOrigin!;
+  const quiet =
+    !origin.requiresAttention && (origin.event === "prompt" || origin.event === "completion");
+  return (
+    <View style={styles.coordination}>
+      {quiet ? (
+        <Button
+          variant="ghost"
+          accessibilityLabel={expanded ? "Hide agent coordination" : "Show agent coordination"}
+          accessibilityState={accessibilityState}
+          onPress={toggleExpanded}
+        >
+          {expanded ? "Hide agent coordination" : "Show agent coordination"}
+        </Button>
+      ) : (
+        <Text style={styles.coordinationLabel}>Agent coordination · action required</Text>
+      )}
+      {(!quiet || expanded) && (
+        <>
+          <Text selectable style={styles.coordinationLabel}>
+            {origin.agentId} · {origin.event}
+          </Text>
+          <Text selectable style={styles.coordinationText}>
+            {item.text}
+          </Text>
+        </>
+      )}
+    </View>
+  );
+}
+
 export function StreamItemWrapper({
   gapBelow,
   children,
@@ -243,6 +280,18 @@ export function StreamItemWrapper({
 }
 
 const styles = StyleSheet.create((theme) => ({
+  coordination: {
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+  },
+  coordinationLabel: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  coordinationText: {
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.content,
+  },
   row: {
     width: "100%",
     maxWidth: MAX_CONTENT_WIDTH,

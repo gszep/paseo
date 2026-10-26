@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import test from "node:test";
+import { createHash } from "node:crypto";
+import { compileFunction } from "node:vm";
 
 const root = new URL("../", import.meta.url);
 const read = (file) => readFileSync(new URL(file, root), "utf8");
@@ -30,6 +32,195 @@ function jobs(text = source) {
   );
 }
 
+// The changes job runs these contracts before dependency installation. Parse
+// the workflow's scalar/inline-list needs and scalar if fields without a YAML
+// package; reject unsupported shapes instead of silently missing an edge.
+function schedulingJobs() {
+  return new Map(
+    [...jobs()]
+      .filter(([id]) => id !== "changes")
+      .map(([id, block]) => {
+        const dependencies = [...block.matchAll(/^    needs: (.+)$/gm)];
+        const conditions = [...block.matchAll(/^    if: (.+)$/gm)];
+        assert.equal(dependencies.length, 1, `${id}: one needs field`);
+        assert.equal(conditions.length, 1, `${id}: one condition`);
+        const raw = dependencies[0][1];
+        assert.match(raw, /^(?:[\w-]+|\[[\w-]+(?:, [\w-]+)*\])$/);
+        const needs = raw.startsWith("[") ? raw.slice(1, -1).split(", ") : [raw];
+        assert.equal(new Set(needs).size, needs.length, `${id}: duplicate dependency`);
+        const condition = conditions[0][1];
+        assert.ok(condition.startsWith("${{ ") && condition.endsWith(" }}"));
+        // These are trusted, reviewed workflow expressions, not event-provided code.
+        // The existing expression subset is JS-compatible except the hyphenated key.
+        const evaluate = compileFunction(
+          `return (${condition.slice(4, -3).replaceAll(".docs-only", '["docs-only"]')});`,
+          ["needs", "github", "cancelled"],
+        );
+        return [id, { needs, condition, evaluate }];
+      }),
+  );
+}
+
+const chains = [
+  [
+    "typecheck",
+    "server-tests-ubuntu-v2",
+    "desktop-tests-ubuntu",
+    "app-tests",
+    "playwright-1",
+    "playwright-3",
+    "cli-tests-1",
+    "cli-tests-3",
+    "format",
+  ],
+  [
+    "server-tests-ubuntu",
+    "server-tests-windows",
+    "server-tests-windows-v2",
+    "desktop-tests-windows",
+    "sdk-tests",
+    "playwright-2",
+    "playwright-4",
+    "cli-tests-2",
+    "relay-tests",
+    "lint",
+  ],
+];
+
+test("parsed job DAG has width exactly two, independent of terminal job outcomes", () => {
+  const graph = schedulingJobs();
+  assert.equal(graph.size, 19);
+  assert.deepEqual([...graph.keys()].sort(), chains.flat().sort());
+  const ancestors = new Map();
+  function visit(id, visiting = new Set()) {
+    if (id === "changes") return new Set();
+    assert.ok(graph.has(id), `unknown dependency: ${id}`);
+    assert.ok(!visiting.has(id), `dependency cycle: ${id}`);
+    if (ancestors.has(id)) return ancestors.get(id);
+    const next = new Set(visiting).add(id);
+    const reached = new Set(graph.get(id).needs);
+    for (const dependency of graph.get(id).needs)
+      for (const ancestor of visit(dependency, next)) reached.add(ancestor);
+    ancestors.set(id, reached);
+    return reached;
+  }
+  for (const chain of chains)
+    for (const [index, id] of chain.entries()) {
+      assert.deepEqual(graph.get(id).needs, index ? ["changes", chain[index - 1]] : ["changes"]);
+      visit(id);
+    }
+  const incomparable = (a, b) => !ancestors.get(a).has(b) && !ancestors.get(b).has(a);
+  const ids = [...graph.keys()];
+  assert.ok(incomparable(chains[0][0], chains[1][0]), "both lanes can start; not one serial chain");
+  // Any simultaneously running set is an antichain. No antichain of size three
+  // proves the two-job bound for every success/failure/skip completion ordering.
+  for (let a = 0; a < ids.length; a++)
+    for (let b = a + 1; b < ids.length; b++)
+      for (let c = b + 1; c < ids.length; c++)
+        assert.ok(
+          !(
+            incomparable(ids[a], ids[b]) &&
+            incomparable(ids[a], ids[c]) &&
+            incomparable(ids[b], ids[c])
+          ),
+          `${ids[a]}, ${ids[b]}, ${ids[c]} escape the budget`,
+        );
+});
+
+test("browser-bearing Linux jobs use the supported Playwright runner image", () => {
+  for (const id of [
+    "typecheck",
+    "app-tests",
+    "desktop-tests-ubuntu",
+    ...[1, 2, 3, 4].map((shard) => `playwright-${shard}`),
+  ]) {
+    assert.match(jobs().get(id), /^    runs-on: ubuntu-24\.04$/m, id);
+  }
+});
+
+test("scheduling changes no names, steps, selection, resources, timeouts, triggers or cancellation policy", () => {
+  // Reviewed execution baseline includes the six browser-job runner pins.
+  // A future execution-policy change requires explicit baseline review.
+  const unchanged = source
+    .replace(/^    needs: .*\n/gm, "")
+    .replaceAll("!cancelled() && needs.changes.result == 'success' &&", "!cancelled() &&");
+  assert.equal(
+    createHash("sha256").update(unchanged).digest("hex"),
+    "efa9db0f70cda485cb38b03c4752301bde827f4c0c29460d784d9ea308842dd4",
+  );
+});
+
+function combinations(dimensions) {
+  let tuples = [[]];
+  for (const values of dimensions) {
+    const next = [];
+    for (const tuple of tuples) for (const value of values) next.push([...tuple, value]);
+    tuples = next;
+  }
+  return tuples;
+}
+
+test("selected successors survive failed/skipped predecessors, require successful changes, and stop on workflow cancellation", () => {
+  const graph = schedulingJobs();
+  const states = ["success", "failure", "skipped", "cancelled"];
+  const scenarios = combinations([
+    states,
+    states,
+    [false, true],
+    ["pull_request", "push", "merge_group", "schedule", "workflow_dispatch"],
+    [false, true],
+    ["true", "false", undefined],
+    ["true", "false", undefined],
+    ["true", "false", undefined],
+  ]);
+  for (const [id, job] of graph) {
+    const baseline = compileFunction(
+      `return (${job.condition.slice(4, -3).replace("needs.changes.result == 'success' && ", "").replaceAll(".docs-only", '["docs-only"]')});`,
+      ["needs", "github", "cancelled"],
+    );
+    for (const [
+      changes,
+      predecessor,
+      cancelled,
+      event,
+      draft,
+      full,
+      selected,
+      docsOnlyOutput,
+    ] of scenarios) {
+      const outputs = Object.fromEntries(
+        [
+          "format",
+          "quality",
+          "server",
+          "desktop",
+          "app",
+          "sdk",
+          "browser",
+          "relay",
+          "cli",
+          "docs-only",
+        ].map((key) => [key, selected]),
+      );
+      outputs.full = full;
+      outputs["docs-only"] = docsOnlyOutput;
+      const needs = Object.fromEntries(
+        job.needs.map((dependency) => [
+          dependency,
+          { result: dependency === "changes" ? changes : predecessor, outputs },
+        ]),
+      );
+      const github = { event_name: event, event: { pull_request: { draft } } };
+      const expected = changes === "success" && baseline(needs, github, () => cancelled);
+      assert.equal(
+        job.evaluate(needs, github, () => cancelled),
+        expected,
+        `${id}/${changes}/${predecessor}/${cancelled}/${event}/${draft}/${full}/${selected}/${docsOnlyOutput}`,
+      );
+    }
+  }
+});
+
 test("all required names remain static, with fail-open gating and no workflow path filters", () => {
   const trigger = source.split("jobs:")[0];
   assert.match(trigger, /merge_group:/);
@@ -41,7 +232,7 @@ test("all required names remain static, with fail-open gating and no workflow pa
   for (const name of contexts) assert.ok(source.includes(`    name: ${name}\n`), name);
   for (const [id, block] of jobs()) {
     if (id === "changes") continue;
-    assert.match(block, /needs: changes/);
+    assert.ok(schedulingJobs().get(id).needs.includes("changes"));
     assert.match(block, /!cancelled\(\)/);
     assert.match(block, /needs\.changes\.outputs\.full != 'false'/);
     if (/^(server-tests|app-tests|sdk-tests|cli-tests)/.test(id)) {

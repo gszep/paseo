@@ -12,6 +12,13 @@ import type {
 // unknown avoids zod-aot's recursive z.json() object-codegen regression.
 export const JsonWireValueSchema = z.unknown() as z.ZodType<JsonValue>;
 
+export const AgentMessageOriginSchema = z.object({
+  agentId: z.string().min(1),
+  eventId: z.string().min(1),
+  event: z.enum(["prompt", "completion", "error", "permission"]),
+  requiresAttention: z.boolean().optional(),
+});
+
 const UnknownValueSchema = z.union([
   z.null(),
   z.boolean(),
@@ -146,6 +153,7 @@ export const AgentTimelineItemPayloadSchema: z.ZodType<AgentTimelineItem, unknow
     text: z.string(),
     messageId: z.string().optional(),
     clientMessageId: z.string().optional(),
+    agentOrigin: AgentMessageOriginSchema.optional(),
   }),
   z.object({
     type: z.literal("assistant_message"),

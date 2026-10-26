@@ -81,7 +81,6 @@ import {
   type PendingForegroundRun,
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
-import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
@@ -657,9 +656,6 @@ function buildExplicitTimelineSeedForRegister(
 function buildImportedTimelineRows(entries: readonly ImportedTimelineEntry[]): AgentTimelineRow[] {
   const rows: AgentTimelineRow[] = [];
   for (const entry of entries) {
-    if (entry.item.type === "user_message" && isSystemInjectedEnvelope(entry.item.text)) {
-      continue;
-    }
     rows.push({
       seq: rows.length + 1,
       timestamp: entry.timestamp ?? new Date().toISOString(),
@@ -2600,13 +2596,16 @@ export class AgentManager {
    * broadcast like normal timeline events.
    */
   tryRunOutOfBand(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): boolean {
+    this.assertPromptIdentity(agentId, prompt, options);
     const agent = this.requireSessionAgent(agentId);
     const handler = agent.session.tryHandleOutOfBand?.(prompt);
     if (!handler) {
       return false;
     }
     if (options?.clientMessageId) {
-      this.recordSubmittedPrompt(agent, prompt, options.clientMessageId);
+      this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, {
+        agentOrigin: options.agentOrigin,
+      });
       this.emitState(agent);
     }
     const dispatch = (event: AgentStreamEvent): void => {
@@ -2686,6 +2685,7 @@ export class AgentManager {
     const { agent, agentId, pendingRun, prompt, options } = params;
     try {
       const start = () => {
+        this.assertPromptIdentity(agentId, prompt, options);
         if (pendingRun.settled || this.agents.get(agentId) !== agent)
           throw new Error(`Agent ${agentId} run was canceled before its turn started`);
         if (!this.chi) return agent.session.startTurn(prompt, options);
@@ -2755,6 +2755,7 @@ export class AgentManager {
     options?: AgentRunOptions,
   ): AsyncGenerator<AgentStreamEvent> {
     const existingAgent = this.requireSessionAgent(agentId);
+    this.assertPromptIdentity(agentId, prompt, options);
     this.logger.trace(
       {
         agentId,
@@ -2789,6 +2790,13 @@ export class AgentManager {
     agent.lastError = undefined;
 
     const pendingRun = this.runs.createPendingRun(agentId);
+    if (options?.clientMessageId)
+      pendingRun.submittedPrompt = {
+        type: "user_message",
+        text: submittedPromptText(prompt),
+        clientMessageId: options.clientMessageId,
+        ...(options.agentOrigin ? { agentOrigin: options.agentOrigin } : {}),
+      };
 
     const streamForwarder = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
@@ -2823,11 +2831,14 @@ export class AgentManager {
             (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
               event.type === "timeline" &&
               event.item.type === "user_message" &&
-              event.item.clientMessageId === options.clientMessageId,
+              event.item.clientMessageId === options.clientMessageId &&
+              event.item.text === submittedPromptText(prompt) &&
+              isDeepStrictEqual(event.item.agentOrigin, options.agentOrigin),
           )
         : undefined;
       if (options?.clientMessageId) {
         this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, {
+          agentOrigin: options.agentOrigin,
           messageId: options.clientMessageId,
           turnId,
           providerMessageId:
@@ -2951,6 +2962,7 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
+    this.assertPromptIdentity(agentId, prompt, options);
     const snapshot = this.requireAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
@@ -2989,12 +3001,13 @@ export class AgentManager {
       return { status: "unavailable" };
     }
     const result = await this.runSteerAdmission(agent, expectedTurnId, async () => {
+      this.assertPromptIdentity(agentId, prompt, options);
       const admission = await agent.session.steerActiveTurn!(prompt, {
         ...options,
         expectedTurnId,
       });
       if (admission.status === "accepted") {
-        await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
+        await this.recordAcceptedSteer(agent, prompt, options, expectedTurnId);
       }
       return admission;
     });
@@ -3019,12 +3032,13 @@ export class AgentManager {
 
     const result = agent.session.steerActiveTurn
       ? await this.runSteerAdmission(agent, expectedTurnId, async () => {
+          this.assertPromptIdentity(agentId, prompt, options);
           const admission = await agent.session.steerActiveTurn!(prompt, {
             ...options,
             expectedTurnId,
           });
           if (admission.status === "accepted") {
-            await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
+            await this.recordAcceptedSteer(agent, prompt, options, expectedTurnId);
           }
           return admission;
         })
@@ -3128,13 +3142,15 @@ export class AgentManager {
   private async recordAcceptedSteer(
     agent: ActiveManagedAgent,
     prompt: AgentPromptInput,
-    clientMessageId: string | undefined,
+    options: AgentRunOptions | undefined,
     expectedTurnId: string,
   ): Promise<void> {
+    const clientMessageId = options?.clientMessageId;
     if (!clientMessageId) {
       return;
     }
     this.recordSubmittedPrompt(agent, prompt, clientMessageId, {
+      agentOrigin: options?.agentOrigin,
       messageId: clientMessageId,
       turnId: expectedTurnId,
     });
@@ -4267,9 +4283,6 @@ export class AgentManager {
     for await (const rawEvent of agent.session.streamHistory()) {
       const event = limitAgentStreamEventContent(rawEvent);
       if (event.type === "timeline") {
-        if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
-          continue;
-        }
         historyEvents.push(event);
       } else if (event.type === "provider_subagent") {
         providerSubagentEvents.push(event);
@@ -4336,9 +4349,6 @@ export class AgentManager {
           continue;
         }
         if (event.type !== "timeline") {
-          continue;
-        }
-        if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
           continue;
         }
         const row = this.recordTimeline(
@@ -4651,12 +4661,6 @@ export class AgentManager {
   }): Promise<void> {
     const { agent, event, options, flags } = params;
 
-    if (event.item.type === "user_message" && isSystemInjectedEnvelope(event.item.text)) {
-      flags.shouldDispatchEvent = false;
-      flags.shouldNotifyWaiters = false;
-      return;
-    }
-
     if (
       event.item.type === "user_message" &&
       event.item.clientMessageId &&
@@ -4924,12 +4928,42 @@ export class AgentManager {
     return event;
   }
 
+  /** Client IDs correlate deliveries, but cannot change an operation's ingress. */
+  assertPromptIdentity(agentId: string, prompt: AgentPromptInput, options?: AgentRunOptions): void {
+    if (!options?.clientMessageId) return;
+    const pending = this.runs.getPendingRun(agentId)?.submittedPrompt;
+    if (
+      pending?.clientMessageId === options.clientMessageId &&
+      (pending.text !== submittedPromptText(prompt) ||
+        !isDeepStrictEqual(pending.agentOrigin, options.agentOrigin))
+    ) {
+      throw new Error("Prompt identity conflicts with an existing operation");
+    }
+    const existing = this.timelineStore.getSubmittedUserMessage(agentId, options.clientMessageId);
+    if (
+      existing?.item.type === "user_message" &&
+      (existing.item.text !== submittedPromptText(prompt) ||
+        !isDeepStrictEqual(existing.item.agentOrigin, options.agentOrigin))
+    ) {
+      throw new Error("Prompt identity conflicts with an existing operation");
+    }
+  }
+
   private recordSubmittedPrompt(
     agent: ActiveManagedAgent,
     prompt: AgentPromptInput,
     clientMessageId: string,
-    options?: { messageId?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      messageId?: string;
+      providerMessageId?: string;
+      turnId?: string;
+      agentOrigin?: AgentRunOptions["agentOrigin"];
+    },
   ): void {
+    this.assertPromptIdentity(agent.id, prompt, {
+      clientMessageId,
+      agentOrigin: options?.agentOrigin,
+    });
     if (this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId)) {
       return;
     }
@@ -4939,6 +4973,7 @@ export class AgentManager {
       type: "user_message",
       text: submittedPromptText(prompt),
       clientMessageId,
+      ...(options?.agentOrigin ? { agentOrigin: options.agentOrigin } : {}),
       ...(options?.messageId ? { messageId: options.messageId } : {}),
     };
     this.recordAndDispatchTimelineItem(agent.id, item, agent.provider, options?.turnId, options);
@@ -4954,6 +4989,7 @@ export class AgentManager {
     let existing = this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId);
     if (!existing) {
       this.recordSubmittedPrompt(agent, item.text, clientMessageId, {
+        agentOrigin: item.agentOrigin,
         messageId: clientMessageId,
         ...(messageId ? { providerMessageId: messageId } : {}),
         ...(turnId ? { turnId } : {}),
@@ -4961,6 +4997,14 @@ export class AgentManager {
       existing = this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId);
     }
     if (!existing || existing.item.type !== "user_message") return null;
+    // Only an exact operation echo may enrich or suppress its submitted row.
+    // A provider message with the same client ID but different ingress/text
+    // remains a separate visible record, never inheriting quiet presentation.
+    if (
+      existing.item.text !== item.text ||
+      !isDeepStrictEqual(existing.item.agentOrigin, item.agentOrigin)
+    )
+      return null;
     if (messageId) {
       const enriched = this.timelineStore.enrichSubmittedUserMessage(
         agent.id,

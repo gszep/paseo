@@ -1,8 +1,9 @@
 import React, { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, test } from "vitest";
-import { userEvent } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import type { StreamItem } from "@/types/stream";
+import { createUserMessage, upsertUserMessage } from "@/types/stream";
 import { ReadOnlyStreamView, type ReadOnlyStreamViewProps } from "./read-only-view";
 import { PROMPT_JUMP_TOP_INSET_PX } from "./prompt-jump-settle";
 import { HIGHLIGHT_CACHE_LIMIT, tokenizeToLines } from "@/utils/highlight-cache";
@@ -63,6 +64,223 @@ afterEach(() => {
   root = undefined;
   container?.remove();
 });
+
+test.each([390, 1280])(
+  "coordination is inspectable but collapsed across human turns and remount at %ipx",
+  async (width) => {
+    await page.viewport(width, 900);
+    const peer: StreamItem = {
+      kind: "user_message",
+      id: "peer",
+      text: "Full quiet peer payload",
+      timestamp,
+      agentOrigin: { agentId: "worker", eventId: "delivery-1", event: "prompt" },
+    };
+    const callback: StreamItem = {
+      ...peer,
+      id: "callback",
+      text: "Full deferred completion payload",
+      agentOrigin: { agentId: "worker", eventId: "delivery-2", event: "completion" },
+    };
+    const literal = { ...user("literal"), text: "<paseo-system>human literal</paseo-system>" };
+    mount({ streamItems: [peer] });
+    expect(container.textContent).not.toContain(peer.text);
+    // The completion is delivered after the next human turn, without changing
+    // either message's presentation origin.
+    mount({ streamItems: [peer, literal, callback] });
+    container.style.width = `${width}px`;
+    expect(container.textContent).toContain(literal.text);
+    expect(container.textContent).not.toContain(peer.text);
+    expect(container.textContent).not.toContain(callback.text);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Show agent coordination"]',
+    );
+    expect(button).not.toBeNull();
+    await userEvent.click(button!);
+    expect(container.textContent).toContain(peer.text);
+    expect(container.textContent).not.toContain(callback.text);
+    act(() => root!.unmount());
+    root = undefined;
+    container.remove();
+    mount({ streamItems: [peer, literal, callback] });
+    expect(container.textContent).not.toContain(peer.text);
+    expect(container.textContent).toContain(literal.text);
+  },
+);
+
+test.each(["error", "permission", "prompt"] as const)(
+  "agent %s requiring attention is never collapsed",
+  (event) => {
+    mount({
+      streamItems: [
+        {
+          kind: "user_message",
+          id: "attention",
+          text: "Action required payload",
+          timestamp,
+          agentOrigin: {
+            agentId: "worker",
+            eventId: "delivery-action",
+            event,
+            ...(event === "prompt" ? { requiresAttention: true } : {}),
+          },
+        },
+      ],
+    });
+    expect(container.textContent).toContain("Action required payload");
+    expect(container.querySelector('[aria-label="Show agent coordination"]')).toBeNull();
+  },
+);
+
+test.each([
+  [390, "Human text"],
+  [390, "Callback text"],
+  [1280, "Human text"],
+  [1280, "Callback text"],
+] as const)(
+  "client-ID collision keeps separate rows, selection and expansion at %ipx with %s",
+  async (width, humanText) => {
+    await page.viewport(width, 900);
+    const callbackInput = {
+      clientMessageId: "collision",
+      messageId: "native-callback",
+      text: "Callback text",
+      timestamp,
+      agentOrigin: { agentId: "worker", eventId: "server-event", event: "completion" as const },
+    };
+    const humanInput = {
+      clientMessageId: "collision",
+      messageId: "native-human",
+      text: humanText,
+      timestamp,
+    };
+    const callback = createUserMessage(callbackInput);
+    const human = createUserMessage(humanInput);
+    const items = upsertUserMessage([callback], human);
+    expect(callback.id).not.toBe(human.id);
+    mount({ streamItems: items, targetItemId: human.id });
+    await expect
+      .poll(
+        () =>
+          container.querySelector('[data-testid="referenced-history-item"] [aria-label="User"]')
+            ?.textContent,
+      )
+      .toContain(humanText);
+    const humanRow = container.querySelector<HTMLElement>(
+      '[data-testid="referenced-history-item"]',
+    )!;
+    expect(humanRow.querySelector('[aria-label="Show agent coordination"]')).toBeNull();
+    const humanBody = humanRow.querySelector('[aria-label="User"]')!;
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(humanBody);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    expect(selection.toString()).toContain(humanText);
+    expect(humanRow.contains(selection.anchorNode)).toBe(true);
+    const show = container.querySelector<HTMLElement>('[aria-label="Show agent coordination"]')!;
+    expect(show).not.toBeNull();
+    await userEvent.click(show);
+    expect(container.textContent).toContain("worker · completion");
+    expect(humanRow.textContent).toContain(humanText);
+    expect(humanRow.textContent).not.toContain("worker · completion");
+    selection.removeAllRanges();
+    selection.addRange(range);
+    // A delayed callback echo must not replace the human DOM or transfer its
+    // highlight/selection to the internal row, or reset that row's expansion.
+    mount({
+      streamItems: upsertUserMessage(items, createUserMessage(callbackInput)),
+      targetItemId: human.id,
+    });
+    expect(container.querySelector('[data-testid="referenced-history-item"]')).toBe(humanRow);
+    expect(container.querySelectorAll('[aria-label="Hide agent coordination"]')).toHaveLength(1);
+    expect(humanRow.textContent).toContain(humanText);
+    expect(humanRow.contains(selection.anchorNode)).toBe(true);
+    expect(selection.toString()).toContain(humanText);
+    selection.removeAllRanges();
+    act(() => root!.unmount());
+    root = undefined;
+    container.remove();
+    const replay = upsertUserMessage(
+      [createUserMessage(callbackInput)],
+      createUserMessage(humanInput),
+    );
+    expect(replay.map((row) => row.id)).toEqual(items.map((row) => row.id));
+    mount({ streamItems: replay, targetItemId: human.id });
+    await expect
+      .poll(
+        () =>
+          container.querySelector('[data-testid="referenced-history-item"] [aria-label="User"]')
+            ?.textContent,
+      )
+      .toContain(humanText);
+    expect(container.querySelectorAll('[aria-label="Show agent coordination"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain("worker · completion");
+  },
+);
+
+test.each([390, 1280])(
+  "same-origin differing payloads remain independently inspectable after echoes and remount at %ipx",
+  async (width) => {
+    await page.viewport(width, 900);
+    const agentOrigin = { agentId: "worker", eventId: "operation", event: "completion" as const };
+    const firstInput = {
+      messageId: "native-first",
+      clientMessageId: "shared",
+      text: "Original payload",
+      timestamp,
+      agentOrigin,
+    };
+    const secondInput = {
+      ...firstInput,
+      messageId: "native-second",
+      text: "Different provider payload",
+    };
+    const first = createUserMessage(firstInput);
+    const second = createUserMessage(secondInput);
+    const rows = upsertUserMessage([first], second);
+    expect(rows.map((row) => row.id)).toEqual(["native-first", "native-second"]);
+    mount({ streamItems: rows });
+    const collapsed = container.querySelectorAll<HTMLElement>(
+      '[aria-label="Show agent coordination"]',
+    );
+    expect(collapsed).toHaveLength(2);
+    expect(container.textContent).not.toContain(first.text);
+    expect(container.textContent).not.toContain(second.text);
+    await userEvent.click(collapsed[0]);
+    expect(container.textContent).toContain(first.text);
+    expect(container.textContent).not.toContain(second.text);
+    await userEvent.click(
+      container.querySelector<HTMLElement>('[aria-label="Show agent coordination"]')!,
+    );
+    expect(container.textContent).toContain(second.text);
+    mount({
+      streamItems: upsertUserMessage(
+        upsertUserMessage(rows, createUserMessage(firstInput)),
+        createUserMessage(secondInput),
+      ),
+    });
+    expect(container.querySelectorAll('[aria-label="Hide agent coordination"]')).toHaveLength(2);
+    expect(container.textContent).toContain(first.text);
+    expect(container.textContent).toContain(second.text);
+    act(() => root!.unmount());
+    root = undefined;
+    container.remove();
+    const replay = upsertUserMessage(
+      [createUserMessage(firstInput)],
+      createUserMessage(secondInput),
+    );
+    expect(replay.map((row) => row.id)).toEqual(rows.map((row) => row.id));
+    mount({ streamItems: replay });
+    const remounted = container.querySelectorAll<HTMLElement>(
+      '[aria-label="Show agent coordination"]',
+    );
+    expect(remounted).toHaveLength(2);
+    await userEvent.click(remounted[1]);
+    expect(container.textContent).toContain(second.text);
+    expect(container.textContent).not.toContain(first.text);
+  },
+);
 
 test("reveals a loaded target before the normal viewport scrolls and keeps its stable identity on prepend", async () => {
   const items = Array.from({ length: 60 }, (_, index) => user(`row-${index}`));

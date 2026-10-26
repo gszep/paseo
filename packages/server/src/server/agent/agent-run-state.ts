@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import { getAgentStreamEventTurnId, type AgentStreamEvent } from "./agent-sdk-types.js";
+import {
+  getAgentStreamEventTurnId,
+  type AgentStreamEvent,
+  type AgentTimelineItem,
+} from "./agent-sdk-types.js";
 
 export interface ForegroundTurnWaiter {
   turnId: string;
@@ -11,6 +15,8 @@ export interface ForegroundTurnWaiter {
 }
 
 export interface PendingForegroundRun {
+  /** Runtime-only ingress reservation, before the accepted row is persisted. */
+  submittedPrompt?: Extract<AgentTimelineItem, { type: "user_message" }>;
   token: string;
   kind: "foreground";
   stagedEvents: AgentStreamEvent[];

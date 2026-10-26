@@ -21,6 +21,83 @@ function collectAssistantText(session: {
 }
 
 describe("OpenCode v2 resume configuration", () => {
+  test("coordination origin persists on new prompts and projects identically on live/replay/pinned reads", async () => {
+    const harness = new V2Harness();
+    const prompt = vi.spyOn(harness.api.session, "prompt");
+    const origin = { agentId: "worker", eventId: "server-operation", event: "prompt" as const };
+    const turns = new SessionTurns({
+      client: harness.api,
+      id: "session",
+      cwd: "/fixture",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+      reconcile: async () => ({ info: harness.info, history: [] }),
+      clearPermissions: async () => undefined,
+    });
+    const runOptions = {
+      clientMessageId: "client",
+      agentOrigin: origin,
+      coDriveAdmission: Symbol("runtime-only-capability"),
+    };
+    await turns.startTurn("full peer content", runOptions);
+    await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(1));
+    const submitted = prompt.mock.calls[0]![0];
+    expect(submitted.metadata).toEqual({
+      paseoClientMessageId: "client",
+      paseoAgentOrigin: origin,
+    });
+    const message = {
+      type: "user" as const,
+      id: "native",
+      text: submitted.text,
+      metadata: submitted.metadata,
+      time: { created: 1 },
+    };
+    for (const timeline of [new V2Timeline(), new V2Timeline()]) {
+      expect(timeline.messages([message])[0]).toMatchObject({
+        item: { text: "full peer content", agentOrigin: origin },
+      });
+      expect(timeline.messages([message])).toEqual([]);
+    }
+    expect(V2Timeline.pinnedMessage(message)[0]).toMatchObject({
+      item: { messageId: "native", text: "full peer content", agentOrigin: origin },
+    });
+    const human = {
+      ...message,
+      id: "human",
+      text: "<paseo-system><subagent>human literal</subagent></paseo-system>",
+      metadata: { paseoClientMessageId: "client" },
+    };
+    expect(new V2Timeline().messages([human])[0]).toMatchObject({ item: { text: human.text } });
+    expect(new V2Timeline().messages([human])[0]).not.toHaveProperty("item.agentOrigin");
+  });
+
+  test.each(["completed", "error", "cancelled"])(
+    "native child synthetic %s retains structured origin without interpreting human text",
+    (state) => {
+      const message = {
+        type: "synthetic" as const,
+        id: "notification",
+        text: "full callback body",
+        time: { created: 1 },
+        metadata: { source: "subagent", childID: "child-native", state },
+      };
+      const timeline = new V2Timeline();
+      expect(timeline.messages([message])[0]).toMatchObject({
+        item: {
+          text: message.text,
+          agentOrigin: {
+            agentId: "child-native",
+            eventId: "notification",
+            event: state === "completed" ? "completion" : "error",
+          },
+        },
+      });
+      expect(timeline.messages([message])).toEqual([]);
+      expect(V2Timeline.pinnedMessage(message)).toEqual(new V2Timeline().messages([message]));
+    },
+  );
+
   test("private human reminders never appear in streamed or restored owner timelines", () => {
     const messages = [
       {
