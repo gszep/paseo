@@ -1,4 +1,12 @@
-import React, { useCallback, useMemo, useState, type ComponentProps, type ReactNode } from "react";
+import React, {
+  createContext,
+  useContext,
+  useCallback,
+  useMemo,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { Text, View } from "react-native";
 import { Button } from "@/components/ui/button";
 import { StyleSheet } from "react-native-unistyles";
@@ -19,6 +27,30 @@ import type { StreamLayoutItem } from "./layout";
 
 type RowRenderer = (layout: StreamLayoutItem) => ReactNode;
 type Groups = ReturnType<ReturnType<typeof createStreamPresentation>>["groupsByHostId"];
+
+const CoordinationExpansionContext = createContext<{
+  expandedIds: Set<string>;
+  toggle: (id: string) => void;
+} | null>(null);
+
+/** View-local IDs survive row virtualization; the keyed view owns their lifetime. */
+export function CoordinationExpansionProvider({ children }: { children: ReactNode }) {
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
+  const toggle = useCallback((id: string) => {
+    setExpandedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const value = useMemo(() => ({ expandedIds, toggle }), [expandedIds, toggle]);
+  return (
+    <CoordinationExpansionContext.Provider value={value}>
+      {children}
+    </CoordinationExpansionContext.Provider>
+  );
+}
 
 /** The row body is shared; agent integrations are supplied only by the agent view. */
 export function useStreamRowRenderer({
@@ -224,9 +256,12 @@ function ThoughtSlot({
 }
 
 function AgentCoordinationRow({ item }: { item: Extract<StreamItem, { kind: "user_message" }> }) {
-  const [expanded, setExpanded] = useState(false);
+  const expansion = useContext(CoordinationExpansionContext);
+  if (!expansion) throw new Error("Coordination rows require a view-scoped expansion provider");
+  const { toggle } = expansion;
+  const expanded = expansion.expandedIds.has(item.id);
   const accessibilityState = useMemo(() => ({ expanded }), [expanded]);
-  const toggleExpanded = useCallback(() => setExpanded((value) => !value), []);
+  const toggleExpanded = useCallback(() => toggle(item.id), [toggle, item.id]);
   const origin = item.agentOrigin!;
   const quiet =
     !origin.requiresAttention && (origin.event === "prompt" || origin.event === "completion");

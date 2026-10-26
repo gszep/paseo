@@ -24,7 +24,7 @@ const noOlder = {
   onLoadOlder: () => false,
 };
 
-function user(id: string): StreamItem {
+function user(id: string): Extract<StreamItem, { kind: "user_message" }> {
   return { kind: "user_message", id, text: `User prompt ${id}`, timestamp };
 }
 function assistant(id: string, text = `Assistant response ${id}`): StreamItem {
@@ -129,6 +129,68 @@ test.each(["error", "permission", "prompt"] as const)(
     });
     expect(container.textContent).toContain("Action required payload");
     expect(container.querySelector('[aria-label="Show agent coordination"]')).toBeNull();
+  },
+);
+
+test.each(["prompt", "completion"] as const)(
+  "coordination %s expansion survives mounted-to-virtualized history migration",
+  async (event) => {
+    await page.viewport(1280, 900);
+    const callback: StreamItem = {
+      ...user("stable-callback"),
+      text: "Exact callback payload retained during history paging",
+      agentOrigin: { agentId: "worker", eventId: "stable-delivery", event },
+    };
+    const items = [callback, ...Array.from({ length: 89 }, (_, index) => user(`recent-${index}`))];
+    mount({ streamItems: items, targetItemId: callback.id });
+    const rowSelector = '[data-history-row-id="stable-callback"]';
+    await expect.poll(() => container.querySelector(rowSelector)).not.toBeNull();
+    const mountedRow = container.querySelector(rowSelector)!;
+    expect(mountedRow.hasAttribute("data-index")).toBe(false);
+    await userEvent.click(
+      mountedRow.querySelector<HTMLElement>('[aria-label="Show agent coordination"]')!,
+    );
+    expect(mountedRow.textContent).toContain(callback.text);
+
+    mount({
+      streamItems: [...Array.from({ length: 20 }, (_, index) => user(`older-${index}`)), ...items],
+      targetItemId: callback.id,
+    });
+    act(() => {
+      scrollContainer().scrollTop = 0;
+      scrollContainer().dispatchEvent(new Event("scroll"));
+      scrollContainer().dispatchEvent(new WheelEvent("wheel", { deltaY: -20 }));
+    });
+    await expect.poll(() => container.querySelector(`${rowSelector}[data-index]`)).not.toBeNull();
+    const virtualRow = container.querySelector(rowSelector)!;
+    expect(virtualRow).not.toBe(mountedRow);
+    expect(virtualRow.textContent).toContain(callback.text);
+    const hide = virtualRow.querySelector<HTMLElement>('[aria-label="Hide agent coordination"]');
+    expect(hide).not.toBeNull();
+    await userEvent.click(hide!);
+    expect(container.textContent).not.toContain(callback.text);
+  },
+);
+
+test.each([390, 1280])(
+  "coordination expansion is scoped to the history view at %ipx",
+  async (width) => {
+    await page.viewport(width, 900);
+    const callback: StreamItem = {
+      ...user("same-canonical-id"),
+      text: "Scope-local callback payload",
+      agentOrigin: { agentId: "worker", eventId: "same-delivery", event: "completion" },
+    };
+    mount({ historyId: "first-scope", streamItems: [callback] });
+    await userEvent.click(
+      container.querySelector<HTMLElement>('[aria-label="Show agent coordination"]')!,
+    );
+    expect(container.textContent).toContain(callback.text);
+    mount({ historyId: "second-scope", streamItems: [callback] });
+    expect(container.querySelector('[aria-label="Hide agent coordination"]')).toBeNull();
+    expect(container.textContent).not.toContain(callback.text);
+    mount({ historyId: "first-scope", streamItems: [callback] });
+    expect(container.textContent).not.toContain(callback.text);
   },
 );
 
