@@ -127,15 +127,26 @@ test("parsed job DAG has width exactly two, independent of terminal job outcomes
         );
 });
 
+test("browser-bearing Linux jobs use the supported Playwright runner image", () => {
+  for (const id of [
+    "typecheck",
+    "app-tests",
+    "desktop-tests-ubuntu",
+    ...[1, 2, 3, 4].map((shard) => `playwright-${shard}`),
+  ]) {
+    assert.match(jobs().get(id), /^    runs-on: ubuntu-24\.04$/m, id);
+  }
+});
+
 test("scheduling changes no names, steps, selection, resources, timeouts, triggers or cancellation policy", () => {
-  // Frozen 5679d8e2 workflow, normalized only for the scheduling fields changed
-  // here. A future execution-policy change requires explicit baseline review.
+  // Reviewed execution baseline includes the six browser-job runner pins.
+  // A future execution-policy change requires explicit baseline review.
   const unchanged = source
     .replace(/^    needs: .*\n/gm, "")
     .replaceAll("!cancelled() && needs.changes.result == 'success' &&", "!cancelled() &&");
   assert.equal(
     createHash("sha256").update(unchanged).digest("hex"),
-    "6bcb758595a722ce16848a9d6055509d04174c4b7f2d9d44f6743d22c4d659e0",
+    "efa9db0f70cda485cb38b03c4752301bde827f4c0c29460d784d9ea308842dd4",
   );
 });
 
