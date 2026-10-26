@@ -57,7 +57,7 @@ import { QuestionFormCard } from "@/components/question-form-card";
 import { Button } from "@/components/ui/button";
 import { ToolCallSheetProvider } from "@/components/tool-call-sheet";
 import { createStreamPresentation } from "./presentation";
-import { StreamItemWrapper, useStreamRowRenderer } from "./rows";
+import { CoordinationExpansionProvider, StreamItemWrapper, useStreamRowRenderer } from "./rows";
 import { type AgentStreamRenderModel, buildAgentStreamRenderModel } from "./model";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import { type StreamSegmentRenderers, type StreamViewportHandle } from "./strategy";
@@ -1007,50 +1007,52 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
         revealLoadedItem={revealLoadedHistory}
         visibleItemIds={visibleHistoryItemIds}
       >
-        <ToolCallSheetProvider>
-          <AssistantSelectionCopySurface style={stylesheet.container}>
-            <MessageOuterSpacingProvider disableOuterSpacing>
-              {streamRenderStrategy.render({
-                agentId,
-                segments: renderModel.segments,
-                historyRowRevision,
-                liveHeadRowRevision: expandedToolCallGroupIds,
-                boundary,
-                renderers,
-                listEmptyComponent,
-                viewportRef,
-                routeBottomAnchorRequest,
-                isAuthoritativeHistoryReady,
-                onNearBottomChange: setIsNearBottom,
-                onReadingPositionChange: handleReadingPositionChange,
-                onNearHistoryStart: loadOlder,
-                isLoadingOlderHistory: isLoadingOlder,
-                hasOlderHistory: hasOlder,
-                olderHistoryProgressKey: progressKey,
-                scrollEnabled: streamScrollEnabled,
-                listStyle: stylesheet.list,
-                baseListContentContainerStyle: stylesheet.listContentContainer,
-                forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
-              })}
-            </MessageOuterSpacingProvider>
-            <ChatOutlineRail
-              prompts={chatOutline.prompts}
-              activePrompt={chatOutline.activePrompt}
-              onJumpToPrompt={chatOutline.jumpToPrompt}
-            />
-            {(!isNearBottom || isTimelineDetached) && (
-              <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
-                <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
-                  <StreamTailAction
-                    pendingPermissions={pendingPermissionItems}
-                    readOnly={readOnly}
-                    onPress={scrollToBottom}
-                  />
-                </Animated.View>
-              </View>
-            )}
-          </AssistantSelectionCopySurface>
-        </ToolCallSheetProvider>
+        <CoordinationExpansionProvider key={JSON.stringify([resolvedServerId, agentId])}>
+          <ToolCallSheetProvider>
+            <AssistantSelectionCopySurface style={stylesheet.container}>
+              <MessageOuterSpacingProvider disableOuterSpacing>
+                {streamRenderStrategy.render({
+                  agentId,
+                  segments: renderModel.segments,
+                  historyRowRevision,
+                  liveHeadRowRevision: expandedToolCallGroupIds,
+                  boundary,
+                  renderers,
+                  listEmptyComponent,
+                  viewportRef,
+                  routeBottomAnchorRequest,
+                  isAuthoritativeHistoryReady,
+                  onNearBottomChange: setIsNearBottom,
+                  onReadingPositionChange: handleReadingPositionChange,
+                  onNearHistoryStart: loadOlder,
+                  isLoadingOlderHistory: isLoadingOlder,
+                  hasOlderHistory: hasOlder,
+                  olderHistoryProgressKey: progressKey,
+                  scrollEnabled: streamScrollEnabled,
+                  listStyle: stylesheet.list,
+                  baseListContentContainerStyle: stylesheet.listContentContainer,
+                  forwardListContentContainerStyle: stylesheet.forwardListContentContainer,
+                })}
+              </MessageOuterSpacingProvider>
+              <ChatOutlineRail
+                prompts={chatOutline.prompts}
+                activePrompt={chatOutline.activePrompt}
+                onJumpToPrompt={chatOutline.jumpToPrompt}
+              />
+              {(!isNearBottom || isTimelineDetached) && (
+                <View style={scrollToBottomContainerStyle} pointerEvents="box-none">
+                  <Animated.View entering={scrollIndicatorFadeIn} exiting={scrollIndicatorFadeOut}>
+                    <StreamTailAction
+                      pendingPermissions={pendingPermissionItems}
+                      readOnly={readOnly}
+                      onPress={scrollToBottom}
+                    />
+                  </Animated.View>
+                </View>
+              )}
+            </AssistantSelectionCopySurface>
+          </ToolCallSheetProvider>
+        </CoordinationExpansionProvider>
       </ChatFind>
     );
   },

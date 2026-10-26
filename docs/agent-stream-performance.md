@@ -33,6 +33,12 @@ So arrival sets a _target_ and the reveal rate is derived from the backlog inste
   blocks and parses only the growing last block during append. Splitting in the reducer discards
   paragraph separators and exposes fragments to plugin callbacks, which need the whole source text.
 - **First sight of a text is revealed whole.** Only growth is paced. This is what makes history hydration, timeline replay, a virtualized row remounting on scroll, and an already-finished message all render complete on first paint without a special case for each.
+- **Coordination expansion belongs to the view, not its row DOM.** Desktop history can move an
+  unchanged canonical row from the mounted section into the virtualized section while loading
+  older messages. Keep expanded IDs in the shared, view-scoped provider so that remount does not
+  close content the reader just opened. A different host/agent or pinned-history view, or a full
+  view reload, starts collapsed. The provider retains only IDs, never transcript copies or origin
+  classifications; trusted origin and canonical row identity remain unchanged.
 - **Leaving `phase: "streaming"` snaps the reveal.** A completed turn must never be left holding characters. `layoutStream` sets the phase, so anything outside the live head with an active turn is already complete.
 - **Pending questions must stay discoverable without stealing the reading position.**
   Following the bottom includes the live question card. When the reader has moved

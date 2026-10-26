@@ -9,7 +9,7 @@ import { isWeb } from "@/constants/platform";
 import type { StreamItem } from "@/types/stream";
 import { buildAgentStreamRenderModel } from "./model";
 import { layoutStream, type StreamLayoutItem } from "./layout";
-import { StreamItemWrapper, useStreamRowRenderer } from "./rows";
+import { CoordinationExpansionProvider, StreamItemWrapper, useStreamRowRenderer } from "./rows";
 import { resolveStreamRenderStrategy } from "./strategy-resolver";
 import type { StreamSegmentRenderers, StreamViewportHandle } from "./strategy";
 import { useStreamHistoryWindow } from "./use-stream-history-window";
@@ -42,7 +42,9 @@ const ignoreGroupExpansion = () => {};
 export function ReadOnlyStreamView(props: ReadOnlyStreamViewProps) {
   return (
     <ProtectedPresentationProvider>
-      <ReadOnlyHistory key={props.historyId} {...props} />
+      <CoordinationExpansionProvider key={props.historyId}>
+        <ReadOnlyHistory {...props} />
+      </CoordinationExpansionProvider>
     </ProtectedPresentationProvider>
   );
 }
