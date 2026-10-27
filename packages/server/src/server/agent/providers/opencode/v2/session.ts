@@ -209,6 +209,7 @@ export class OpenCodeV2Session implements AgentSession {
   async *streamHistory() {
     const history = new V2Timeline(false);
     yield* history.messages(await messages(this.client, this.id));
+    yield* this.children.warnings();
   }
   async getRuntimeInfo() {
     await this.reconcile();
@@ -344,7 +345,8 @@ export class OpenCodeV2Session implements AgentSession {
       this.emit({ type: "usage_updated", provider: "opencode", usage });
     }
     for (const event of this.timeline.messages(history)) this.emitTimeline(event);
-    await this.permissions.reconcile(this.id);
+    if (!(await this.permissions.reconcile(this.id)))
+      throw new Error("OpenCode permission reconciliation was superseded");
   }
   private async reconcile() {
     this.dirty = true;

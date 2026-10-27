@@ -117,6 +117,28 @@ Pi RPC extension UI dialog requests (`select`, `input`, `editor`, `confirm`) are
 
 OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than the tested 2.0.10 SDK at runtime selection. Runtime selection uses the configured command and environment and lasts until provider configuration reload. Keep upstream SDK types inside the version-specific adapter. OpenCode owns storage migration; a missing native session must fail resume rather than create a replacement. V2 has no native archive/unarchive operation: archiving affects Paseo only. V1 retains native archiving.
 
+A completed V2 child's removed workspace must not make its parent's history unreadable.
+Permission reads still initialize native location services, so a confirmed missing workspace
+with an exact child permission/form HTTP 500 and bounded, fully parsed UTF-8 JSON is presented as **permissions unknown**, not
+an empty permission snapshot. Parent history includes a warning and the child panel labels
+the uncertainty. Known requests remain pending and cannot be answered until both permission
+and form reads recover. Only the current per-session reconciliation may clear that barrier;
+an older completion cannot undo a newer denial or clear its warning. A JSON media-type label
+alone is not proof, and response bodies are never retained in diagnostics. Active children, authorization failures, other errors and existing
+workspaces retain fail-closed behavior. This read degradation neither recreates a workspace
+nor resumes, approves or cancels child work.
+
+For a permission/form HTTP 500, the authenticated runtime privately records `OpenCode permission
+response classified` with its helper PID, operation, status and `errorResponse` metadata:
+an allowlisted media type, observed byte count, EOF and JSON-parse booleans, and an allowlisted
+native error name. No body, body digest, arbitrary
+header value or credential is logged. The byte count is not a complete-body measurement
+unless EOF is true. This observation happens before discarding the response; old error
+strings cannot reconstruct it. Empty or non-JSON responses still fail closed rather than
+extending historical-child recovery.
+Operation identifiers remain private. The helper PID identifies the emitter, not a permanently
+valid generation; bracket a postflight observation with fresh worker/helper identity checks.
+
 V2 shell environments are per native session and process-local, not per directory.
 Rebind the full inherited environment with that agent's identity on each event-stream
 connection, including reconnects. The bridge's tool binding is a separate session map.

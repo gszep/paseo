@@ -1,5 +1,15 @@
 import { V2Timeline } from "./timeline.js";
-import type { FormInfo, ModelInfo, SessionMessageAssistant } from "@opencode/client";
+import {
+  OpenCode,
+  type FormInfo,
+  type ModelInfo,
+  type SessionMessageAssistant,
+} from "@opencode/client";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { checkResponse, OpenCodeHttpError } from "../http-error.js";
+import { SessionChildren } from "./children.js";
 import { describe, expect, test, vi } from "vitest";
 import { applyResumeOverrides } from "./configuration.js";
 import { OpenCodeV2AgentClient } from "./agent.js";
@@ -20,7 +30,539 @@ function collectAssistantText(session: {
   return chunks;
 }
 
+async function childPermissionFixture() {
+  const root = await mkdtemp(join(tmpdir(), "missing-child-workspace-"));
+  const harness = new V2Harness();
+  const child = {
+    ...harness.info,
+    id: "missing-child",
+    parentID: harness.info.id,
+    location: { directory: join(root, "absent-child") },
+  };
+  harness.history.push({
+    type: "user",
+    id: "parent-message",
+    text: "Parent history remains exact",
+    time: { created: 1 },
+  });
+  harness.api.session.list = async (input) => ({
+    data: input?.parentID === harness.info.id ? [child] : [],
+    cursor: {},
+  });
+  const replies: string[] = [];
+  const mode = {
+    status: 500,
+    resource: "permission",
+    parent: false,
+    html: false,
+    pending: false,
+    generic: false,
+    contentType: "application/json",
+    errorBody: JSON.stringify({ error: "diagnostic must not become history" }),
+  };
+  harness.api.session.get = async (input) => (input.sessionID === child.id ? child : harness.info);
+  harness.api.message.list = async (input) => ({
+    data: input.sessionID === harness.info.id ? harness.history : [],
+    cursor: {},
+  });
+  const native = OpenCode.make({
+    baseUrl: "http://fixture.invalid",
+    fetch: async (request) => {
+      const path = new URL(request instanceof Request ? request.url : String(request)).pathname;
+      if (path.endsWith("/reply")) replies.push(path);
+      const failed =
+        path === `/api/session/${mode.parent ? harness.info.id : child.id}/${mode.resource}` &&
+        mode.status !== 200;
+      if (failed && mode.generic) throw new Error("unclassified failure");
+      const pending = mode.pending && path.includes(`/${child.id}/`);
+      const body = path.endsWith("/permission")
+        ? {
+            data: pending
+              ? [
+                  {
+                    id: "child-permission",
+                    sessionID: child.id,
+                    action: "bash",
+                    resources: ["fixture"],
+                  },
+                ]
+              : [],
+          }
+        : {
+            data: pending
+              ? [
+                  {
+                    id: "child-form",
+                    sessionID: child.id,
+                    title: "Fixture question",
+                    fields: [{ key: "answer", type: "string" }],
+                  },
+                ]
+              : [],
+          };
+      let response: Response;
+      if (failed)
+        response = new Response(mode.errorBody, {
+          status: mode.status,
+          headers: { "content-type": mode.html ? "text/html" : mode.contentType },
+        });
+      else if (path.endsWith("/reply")) response = new Response(null, { status: 204 });
+      else response = Response.json(body);
+      await checkResponse(response, path);
+      return response;
+    },
+  });
+  harness.api.permission = native.permission;
+  harness.api.session.form = native.session.form;
+  const client = new OpenCodeV2AgentClient({
+    logger: createTestLogger(),
+    runtime: harness.runtime,
+  });
+  const start = (autoAccept = false) =>
+    client.resumeSession({
+      provider: "opencode",
+      sessionId: harness.info.id,
+      metadata: { cwd: root, featureValues: { auto_accept: autoAccept } },
+    });
+  return { root, harness, child, replies, mode, client, start };
+}
+
 describe("OpenCode v2 resume configuration", () => {
+  test.each([
+    ["permission", "application/json"],
+    ["form", "application/json"],
+    ["permission", "APPLICATION/JSON; charset=UTF-8"],
+  ])(
+    "parent history remains readable with explicit unknown child %s state for %s when its completed workspace disappeared",
+    async (resource, contentType) => {
+      const { root, harness, replies, mode, client, start } = await childPermissionFixture();
+      mode.resource = resource;
+      mode.contentType = contentType;
+      // Even auto-accept must not consume the successful half of a failed snapshot.
+      mode.pending = true;
+      let session: Awaited<ReturnType<typeof client.resumeSession>> | undefined;
+      try {
+        session = await start(true);
+        const events: AgentStreamEvent[] = [];
+        for await (const event of session.streamHistory()) events.push(event);
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            item: {
+              type: "user_message",
+              messageId: "parent-message",
+              text: "Parent history remains exact",
+            },
+          }),
+        );
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            item: expect.objectContaining({
+              type: "notification",
+              level: "warning",
+              message: expect.stringContaining("permissions unknown"),
+            }),
+          }),
+        );
+        expect(JSON.stringify(events)).not.toContain("diagnostic must not become history");
+        expect(session.getPendingPermissions()).toEqual([]);
+        expect(client["connections"].has("missing-child")).toBe(false);
+        expect(replies).toEqual([]);
+        expect(harness.prompts).toEqual([]);
+        expect(harness.creates).toEqual([]);
+      } finally {
+        await session?.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+  test("JSON-labelled error classification rejects invalid UTF-8 without exposing diagnostics", async () => {
+    const response = new Response(new Uint8Array([0xff]), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+    await expect(checkResponse(response, "/api/session/child/permission")).rejects.toMatchObject({
+      status: 500,
+      json: false,
+    });
+  });
+  test.each([
+    {
+      name: "empty",
+      media: "",
+      expectedMedia: "missing",
+      body: "",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "plain",
+      media: "text/plain",
+      expectedMedia: "text/plain",
+      body: "private-body-canary",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "HTML",
+      media: "TEXT/HTML; charset=UTF-8",
+      expectedMedia: "text/html",
+      body: "<p>private-body-canary</p>",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "unknown media",
+      media: "application/private-header-canary",
+      expectedMedia: "other",
+      body: '{"private":"private-body-canary"}',
+      parsedJson: true,
+      eligible: false,
+    },
+    {
+      name: "JSON",
+      media: "APPLICATION/JSON; charset=UTF-8",
+      expectedMedia: "application/json",
+      body: '{"private":"private-body-canary 日本語"}',
+      parsedJson: true,
+      eligible: true,
+    },
+  ])(
+    "permission error metadata is allowlisted without bodies or digests for $name",
+    async (sample) => {
+      const response = new Response(sample.body, {
+        status: 500,
+        headers: { "content-type": sample.media },
+      });
+      const error = await checkResponse(response, "/api/session/child/permission").catch(
+        (failure) => failure,
+      );
+      expect(error).toBeInstanceOf(OpenCodeHttpError);
+      expect(error.json).toBe(sample.eligible);
+      expect(error.responseMetadata).toEqual({
+        mediaType: sample.expectedMedia,
+        bytes: new TextEncoder().encode(sample.body).length,
+        eof: true,
+        parsedJson: sample.parsedJson,
+        errorCode: null,
+      });
+      expect(JSON.stringify(error)).not.toContain("private-body-canary");
+      expect(JSON.stringify(error)).not.toContain("private-header-canary");
+      expect(error.responseMetadata).not.toHaveProperty("sha256");
+    },
+  );
+  test("diagnostics allowlist native error names without retaining arbitrary values", async () => {
+    const body = JSON.stringify({ name: "UnknownError", data: { message: "private-body-canary" } });
+    const error = await checkResponse(
+      Response.json(JSON.parse(body), { status: 500 }),
+      "/api/session/child/form",
+    ).catch((failure) => failure);
+    expect(error.responseMetadata.errorCode).toBe("UnknownError");
+    expect(JSON.stringify(error)).not.toContain("private-body-canary");
+    const unknown = await checkResponse(
+      Response.json({ name: "private-code-canary" }, { status: 500 }),
+      "/api/session/child/form",
+    ).catch((failure) => failure);
+    expect(unknown.responseMetadata.errorCode).toBeNull();
+    expect(JSON.stringify(unknown)).not.toContain("private-code-canary");
+  });
+  test("JSON error classification has a body deadline and requires EOF", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cancelled = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"private":"diagnostic-canary"}'));
+        },
+        cancel: cancelled,
+      }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+    const failure = checkResponse(response, "/api/session/child/permission").catch(
+      (error) => error,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      const error = await failure;
+      expect(error).toBeInstanceOf(OpenCodeHttpError);
+      expect(error.json).toBe(false);
+      expect(error.responseMetadata.eof).toBe(false);
+      expect(error.responseMetadata.parsedJson).toBe(false);
+      expect(error.responseMetadata).not.toHaveProperty("sha256");
+      expect(cancelled).toHaveBeenCalledOnce();
+      expect(String(error)).not.toContain("diagnostic-canary");
+      expect(JSON.stringify(error)).not.toContain("diagnostic-canary");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  test.each([
+    "401",
+    "403",
+    "404",
+    "503",
+    "html",
+    "uppercase-html",
+    "plain-text",
+    "malformed-json",
+    "oversized-json",
+    "empty-native-500",
+    "active",
+    "newly-active",
+    "no-outcome",
+    "workspace-present",
+    "parent",
+    "generic",
+  ])("child permission recovery stays fail-closed for %s", async (kind) => {
+    const f = await childPermissionFixture();
+    if (/^\d+$/.test(kind)) f.mode.status = Number(kind);
+    if (kind === "html") f.mode.html = true;
+    if (kind === "uppercase-html") f.mode.contentType = "TEXT/HTML; charset=UTF-8";
+    if (kind === "plain-text") f.mode.contentType = "text/plain";
+    if (kind === "malformed-json") f.mode.errorBody = "diagnostic must not become history";
+    if (kind === "oversized-json") f.mode.errorBody = JSON.stringify({ error: "x".repeat(65536) });
+    if (kind === "empty-native-500") {
+      f.mode.contentType = "";
+      f.mode.errorBody = "";
+    }
+    if (kind === "parent") f.mode.parent = true;
+    if (kind === "generic") f.mode.generic = true;
+    if (kind === "workspace-present") f.child.location.directory = f.root;
+    if (kind === "no-outcome") delete f.child.outcome;
+    if (kind === "active")
+      f.harness.api.session.active = async () => ({ [f.child.id]: { type: "running" } });
+    if (kind === "newly-active") {
+      let reads = 0;
+      f.harness.api.session.active = async () =>
+        ++reads > 1 ? { [f.child.id]: { type: "running" } } : {};
+    }
+    let session: Awaited<ReturnType<typeof f.start>> | undefined;
+    try {
+      await expect(
+        f.start(true).then((value) => {
+          session = value;
+          return value;
+        }),
+      ).rejects.toThrow();
+      expect(f.replies).toEqual([]);
+      expect(f.harness.prompts).toEqual([]);
+    } finally {
+      await session?.close();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test("an older successful snapshot cannot reopen responses after a newer denial", async () => {
+    const f = await childPermissionFixture();
+    f.mode.status = 200;
+    f.mode.pending = true;
+    const permissions = new SessionPermissions(
+      f.harness.api,
+      f.harness.info.id,
+      { provider: "opencode", cwd: f.root },
+      () => undefined,
+    );
+    const original = f.harness.api.permission.list;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let hold = true;
+    let older: Promise<unknown> | undefined;
+    try {
+      await permissions.reconcile(f.child.id);
+      f.harness.api.permission.list = async (...args) => {
+        const snapshot = await original(...args);
+        if (hold) {
+          hold = false;
+          entered();
+          await held;
+        }
+        return snapshot;
+      };
+      older = permissions.reconcile(f.child.id);
+      await started;
+      f.mode.status = 403;
+      await expect(permissions.reconcile(f.child.id)).rejects.toThrow();
+      await expect(
+        permissions.respondToPermission("child-permission", { behavior: "allow" }),
+      ).rejects.toThrow("unavailable");
+      release();
+      await older;
+      expect(permissions.list()).toHaveLength(2);
+      await expect(
+        permissions.respondToPermission("child-permission", { behavior: "allow" }),
+      ).rejects.toThrow("unavailable");
+      await expect(
+        permissions.respondToPermission("child-form", { behavior: "deny" }),
+      ).rejects.toThrow("unavailable");
+      expect(f.replies).toEqual([]);
+      f.mode.status = 200;
+      await permissions.reconcile(f.child.id);
+      await permissions.respondToPermission("child-permission", { behavior: "allow" });
+      expect(f.replies).toHaveLength(1);
+    } finally {
+      release();
+      await older;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test("a stale child reconciliation cannot clear its visible unknown-state warning after denial", async () => {
+    const f = await childPermissionFixture();
+    const permissions = new SessionPermissions(
+      f.harness.api,
+      f.harness.info.id,
+      { provider: "opencode", cwd: f.root },
+      () => undefined,
+    );
+    const children = new SessionChildren({
+      client: f.harness.api,
+      id: f.harness.info.id,
+      emit: () => undefined,
+      reconcilePermissions: (id) => permissions.reconcile(id),
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let older: Promise<void> | undefined;
+    try {
+      await children.reconcile(f.harness.info.id);
+      expect([...children.warnings()]).toHaveLength(1);
+      const original = f.harness.api.permission.list;
+      let hold = true;
+      f.harness.api.permission.list = async (...args) => {
+        const result = await original(...args);
+        if (hold) {
+          hold = false;
+          entered();
+          await gate;
+        }
+        return result;
+      };
+      f.mode.status = 200;
+      older = children.reconcile(f.harness.info.id);
+      await started;
+      f.mode.status = 403;
+      await expect(children.reconcile(f.harness.info.id)).rejects.toThrow();
+      release();
+      await expect(older).rejects.toThrow("superseded");
+      expect([...children.warnings()]).toHaveLength(1);
+      f.mode.status = 200;
+      await children.reconcile(f.harness.info.id);
+      expect([...children.warnings()]).toEqual([]);
+    } finally {
+      release();
+      await older?.catch(() => undefined);
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test.each([401, 403])(
+    "authorization failure %i blocks stale child permission and form responses without erasing requests",
+    async (status) => {
+      const f = await childPermissionFixture();
+      f.mode.status = 200;
+      f.mode.pending = true;
+      const permissions = new SessionPermissions(
+        f.harness.api,
+        f.harness.info.id,
+        { provider: "opencode", cwd: f.root },
+        () => undefined,
+      );
+      try {
+        await permissions.reconcile(f.child.id);
+        expect(permissions.list()).toHaveLength(2);
+        f.mode.status = status;
+        await expect(permissions.reconcile(f.child.id)).rejects.toThrow();
+        expect(permissions.list()).toHaveLength(2);
+        await expect(
+          permissions.respondToPermission("child-permission", { behavior: "allow" }),
+        ).rejects.toThrow("unavailable");
+        await expect(
+          permissions.respondToPermission("child-form", { behavior: "deny" }),
+        ).rejects.toThrow("unavailable");
+        expect(f.replies).toEqual([]);
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    },
+  );
+  test("known child requests survive unavailability, cannot be answered until a fresh snapshot, and recover visibly", async () => {
+    const f = await childPermissionFixture();
+    f.mode.status = 200;
+    f.mode.pending = true;
+    const session = await f.start();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    try {
+      expect(
+        session
+          .getPendingPermissions()
+          .map((p) => p.id)
+          .sort(),
+      ).toEqual(["child-form", "child-permission"]);
+      f.mode.status = 500;
+      f.harness.push({ id: "unavailable", created: 2, type: "server.connected", data: {} });
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "timeline",
+            item: expect.objectContaining({ type: "notification", level: "warning" }),
+          }),
+        ),
+      );
+      expect(session.getPendingPermissions()).toHaveLength(2);
+      await expect(
+        session.respondToPermission("child-permission", { behavior: "allow" }),
+      ).rejects.toThrow("unavailable");
+      await expect(
+        session.respondToPermission("child-form", {
+          behavior: "allow",
+          updatedInput: { answers: { answer: "fixture answer" } },
+        }),
+      ).rejects.toThrow("unavailable");
+      expect(f.replies).toEqual([]);
+      expect(events.filter((e) => e.type === "permission_resolved")).toEqual([]);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "provider_subagent",
+          event: expect.objectContaining({
+            type: "upsert",
+            id: f.child.id,
+            subtitle: expect.stringContaining("Permissions unknown"),
+          }),
+        }),
+      );
+      f.mode.status = 200;
+      f.harness.push({ id: "recovered", created: 3, type: "server.connected", data: {} });
+      await vi.waitFor(() =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "timeline",
+            item: expect.objectContaining({ type: "notification", level: "info" }),
+          }),
+        ),
+      );
+      const history: AgentStreamEvent[] = [];
+      for await (const event of session.streamHistory()) history.push(event);
+      expect(
+        history.filter((e) => e.type === "timeline" && e.item.type === "notification"),
+      ).toEqual([]);
+      await session.respondToPermission("child-permission", { behavior: "allow" });
+      expect(f.replies).toEqual([`/api/session/${f.child.id}/permission/child-permission/reply`]);
+      expect(session.getPendingPermissions().map((p) => p.id)).toEqual(["child-form"]);
+      expect(f.harness.prompts).toEqual([]);
+    } finally {
+      await session.close();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
   test("coordination origin persists on new prompts and projects identically on live/replay/pinned reads", async () => {
     const harness = new V2Harness();
     const prompt = vi.spyOn(harness.api.session, "prompt");
