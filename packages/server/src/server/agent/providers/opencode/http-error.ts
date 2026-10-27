@@ -1,11 +1,8 @@
-import { createHash } from "node:crypto";
-
 interface ErrorResponseMetadata {
   mediaType: "application/json" | "text/html" | "text/plain" | "other" | "missing";
   bytes: number;
   eof: boolean;
   parsedJson: boolean;
-  sha256: string | null;
   errorCode:
     | "UnknownError"
     | "ServiceUnavailableError"
@@ -72,12 +69,10 @@ async function boundedErrorMetadata(
     bytes: 0,
     eof: false,
     parsedJson: false,
-    sha256: null,
     errorCode: null,
   };
-  const hash = createHash("sha256");
   const reader = response.body?.getReader();
-  if (!reader) return { ...result, eof: true, sha256: hash.digest("hex") };
+  if (!reader) return { ...result, eof: true };
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   let text = "",
     expired = false;
@@ -92,12 +87,10 @@ async function boundedErrorMetadata(
       if (expired) return result;
       if (next.done) {
         result.eof = true;
-        result.sha256 = hash.digest("hex");
         break;
       }
       result.bytes += next.value.byteLength;
       if (result.bytes > 65536) return result;
-      hash.update(next.value);
       text += decoder.decode(next.value, { stream: true });
     }
     const parsed: unknown = JSON.parse(text + decoder.decode());

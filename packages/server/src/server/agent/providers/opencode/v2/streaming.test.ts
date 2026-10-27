@@ -8,7 +8,6 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { checkResponse, OpenCodeHttpError } from "../http-error.js";
 import { SessionChildren } from "./children.js";
 import { describe, expect, test, vi } from "vitest";
@@ -227,27 +226,30 @@ describe("OpenCode v2 resume configuration", () => {
       parsedJson: true,
       eligible: true,
     },
-  ])("permission error metadata is bounded and content-free for $name", async (sample) => {
-    const response = new Response(sample.body, {
-      status: 500,
-      headers: { "content-type": sample.media },
-    });
-    const error = await checkResponse(response, "/api/session/child/permission").catch(
-      (failure) => failure,
-    );
-    expect(error).toBeInstanceOf(OpenCodeHttpError);
-    expect(error.json).toBe(sample.eligible);
-    expect(error.responseMetadata).toEqual({
-      mediaType: sample.expectedMedia,
-      bytes: new TextEncoder().encode(sample.body).length,
-      eof: true,
-      parsedJson: sample.parsedJson,
-      sha256: createHash("sha256").update(sample.body).digest("hex"),
-      errorCode: null,
-    });
-    expect(JSON.stringify(error)).not.toContain("private-body-canary");
-    expect(JSON.stringify(error)).not.toContain("private-header-canary");
-  });
+  ])(
+    "permission error metadata is allowlisted without bodies or digests for $name",
+    async (sample) => {
+      const response = new Response(sample.body, {
+        status: 500,
+        headers: { "content-type": sample.media },
+      });
+      const error = await checkResponse(response, "/api/session/child/permission").catch(
+        (failure) => failure,
+      );
+      expect(error).toBeInstanceOf(OpenCodeHttpError);
+      expect(error.json).toBe(sample.eligible);
+      expect(error.responseMetadata).toEqual({
+        mediaType: sample.expectedMedia,
+        bytes: new TextEncoder().encode(sample.body).length,
+        eof: true,
+        parsedJson: sample.parsedJson,
+        errorCode: null,
+      });
+      expect(JSON.stringify(error)).not.toContain("private-body-canary");
+      expect(JSON.stringify(error)).not.toContain("private-header-canary");
+      expect(error.responseMetadata).not.toHaveProperty("sha256");
+    },
+  );
   test("diagnostics allowlist native error names without retaining arbitrary values", async () => {
     const body = JSON.stringify({ name: "UnknownError", data: { message: "private-body-canary" } });
     const error = await checkResponse(
@@ -285,7 +287,7 @@ describe("OpenCode v2 resume configuration", () => {
       expect(error.json).toBe(false);
       expect(error.responseMetadata.eof).toBe(false);
       expect(error.responseMetadata.parsedJson).toBe(false);
-      expect(error.responseMetadata.sha256).toBeNull();
+      expect(error.responseMetadata).not.toHaveProperty("sha256");
       expect(cancelled).toHaveBeenCalledOnce();
       expect(String(error)).not.toContain("diagnostic-canary");
       expect(JSON.stringify(error)).not.toContain("diagnostic-canary");
