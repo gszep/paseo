@@ -8,7 +8,8 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { checkResponse } from "../http-error.js";
+import { checkResponse, OpenCodeHttpError } from "../http-error.js";
+import { SessionChildren } from "./children.js";
 import { describe, expect, test, vi } from "vitest";
 import { applyResumeOverrides } from "./configuration.js";
 import { OpenCodeV2AgentClient } from "./agent.js";
@@ -56,6 +57,8 @@ async function childPermissionFixture() {
     html: false,
     pending: false,
     generic: false,
+    contentType: "application/json",
+    errorBody: JSON.stringify({ error: "diagnostic must not become history" }),
   };
   harness.api.session.get = async (input) => (input.sessionID === child.id ? child : harness.info);
   harness.api.message.list = async (input) => ({
@@ -99,9 +102,9 @@ async function childPermissionFixture() {
           };
       let response: Response;
       if (failed)
-        response = new Response("diagnostic must not become history", {
+        response = new Response(mode.errorBody, {
           status: mode.status,
-          headers: { "content-type": mode.html ? "text/html" : "application/json" },
+          headers: { "content-type": mode.html ? "text/html" : mode.contentType },
         });
       else if (path.endsWith("/reply")) response = new Response(null, { status: 204 });
       else response = Response.json(body);
@@ -125,11 +128,16 @@ async function childPermissionFixture() {
 }
 
 describe("OpenCode v2 resume configuration", () => {
-  test.each(["permission", "form"])(
-    "parent history remains readable with explicit unknown child %s state when its completed workspace disappeared",
-    async (resource) => {
+  test.each([
+    ["permission", "application/json"],
+    ["form", "application/json"],
+    ["permission", "APPLICATION/JSON; charset=UTF-8"],
+  ])(
+    "parent history remains readable with explicit unknown child %s state for %s when its completed workspace disappeared",
+    async (resource, contentType) => {
       const { root, harness, replies, mode, client, start } = await childPermissionFixture();
       mode.resource = resource;
+      mode.contentType = contentType;
       // Even auto-accept must not consume the successful half of a failed snapshot.
       mode.pending = true;
       let session: Awaited<ReturnType<typeof client.resumeSession>> | undefined;
@@ -167,12 +175,53 @@ describe("OpenCode v2 resume configuration", () => {
       }
     },
   );
+  test("JSON-labelled error classification rejects invalid UTF-8 without exposing diagnostics", async () => {
+    const response = new Response(new Uint8Array([0xff]), {
+      status: 500,
+      headers: { "content-type": "application/json" },
+    });
+    await expect(checkResponse(response, "/api/session/child/permission")).rejects.toMatchObject({
+      status: 500,
+      json: false,
+    });
+  });
+  test("JSON error classification has a body deadline and requires EOF", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cancelled = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"private":"diagnostic-canary"}'));
+        },
+        cancel: cancelled,
+      }),
+      { status: 500, headers: { "content-type": "application/json" } },
+    );
+    const failure = checkResponse(response, "/api/session/child/permission").catch(
+      (error) => error,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      const error = await failure;
+      expect(error).toBeInstanceOf(OpenCodeHttpError);
+      expect(error.json).toBe(false);
+      expect(cancelled).toHaveBeenCalledOnce();
+      expect(String(error)).not.toContain("diagnostic-canary");
+      expect(JSON.stringify(error)).not.toContain("diagnostic-canary");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   test.each([
     "401",
     "403",
     "404",
     "503",
     "html",
+    "uppercase-html",
+    "plain-text",
+    "malformed-json",
+    "oversized-json",
     "active",
     "newly-active",
     "no-outcome",
@@ -183,6 +232,10 @@ describe("OpenCode v2 resume configuration", () => {
     const f = await childPermissionFixture();
     if (/^\d+$/.test(kind)) f.mode.status = Number(kind);
     if (kind === "html") f.mode.html = true;
+    if (kind === "uppercase-html") f.mode.contentType = "TEXT/HTML; charset=UTF-8";
+    if (kind === "plain-text") f.mode.contentType = "text/plain";
+    if (kind === "malformed-json") f.mode.errorBody = "diagnostic must not become history";
+    if (kind === "oversized-json") f.mode.errorBody = JSON.stringify({ error: "x".repeat(65536) });
     if (kind === "parent") f.mode.parent = true;
     if (kind === "generic") f.mode.generic = true;
     if (kind === "workspace-present") f.child.location.directory = f.root;
@@ -206,6 +259,119 @@ describe("OpenCode v2 resume configuration", () => {
       expect(f.harness.prompts).toEqual([]);
     } finally {
       await session?.close();
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test("an older successful snapshot cannot reopen responses after a newer denial", async () => {
+    const f = await childPermissionFixture();
+    f.mode.status = 200;
+    f.mode.pending = true;
+    const permissions = new SessionPermissions(
+      f.harness.api,
+      f.harness.info.id,
+      { provider: "opencode", cwd: f.root },
+      () => undefined,
+    );
+    const original = f.harness.api.permission.list;
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let hold = true;
+    let older: Promise<unknown> | undefined;
+    try {
+      await permissions.reconcile(f.child.id);
+      f.harness.api.permission.list = async (...args) => {
+        const snapshot = await original(...args);
+        if (hold) {
+          hold = false;
+          entered();
+          await held;
+        }
+        return snapshot;
+      };
+      older = permissions.reconcile(f.child.id);
+      await started;
+      f.mode.status = 403;
+      await expect(permissions.reconcile(f.child.id)).rejects.toThrow();
+      await expect(
+        permissions.respondToPermission("child-permission", { behavior: "allow" }),
+      ).rejects.toThrow("unavailable");
+      release();
+      await older;
+      expect(permissions.list()).toHaveLength(2);
+      await expect(
+        permissions.respondToPermission("child-permission", { behavior: "allow" }),
+      ).rejects.toThrow("unavailable");
+      await expect(
+        permissions.respondToPermission("child-form", { behavior: "deny" }),
+      ).rejects.toThrow("unavailable");
+      expect(f.replies).toEqual([]);
+      f.mode.status = 200;
+      await permissions.reconcile(f.child.id);
+      await permissions.respondToPermission("child-permission", { behavior: "allow" });
+      expect(f.replies).toHaveLength(1);
+    } finally {
+      release();
+      await older;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+  test("a stale child reconciliation cannot clear its visible unknown-state warning after denial", async () => {
+    const f = await childPermissionFixture();
+    const permissions = new SessionPermissions(
+      f.harness.api,
+      f.harness.info.id,
+      { provider: "opencode", cwd: f.root },
+      () => undefined,
+    );
+    const children = new SessionChildren({
+      client: f.harness.api,
+      id: f.harness.info.id,
+      emit: () => undefined,
+      reconcilePermissions: (id) => permissions.reconcile(id),
+    });
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let older: Promise<void> | undefined;
+    try {
+      await children.reconcile(f.harness.info.id);
+      expect([...children.warnings()]).toHaveLength(1);
+      const original = f.harness.api.permission.list;
+      let hold = true;
+      f.harness.api.permission.list = async (...args) => {
+        const result = await original(...args);
+        if (hold) {
+          hold = false;
+          entered();
+          await gate;
+        }
+        return result;
+      };
+      f.mode.status = 200;
+      older = children.reconcile(f.harness.info.id);
+      await started;
+      f.mode.status = 403;
+      await expect(children.reconcile(f.harness.info.id)).rejects.toThrow();
+      release();
+      await expect(older).rejects.toThrow("superseded");
+      expect([...children.warnings()]).toHaveLength(1);
+      f.mode.status = 200;
+      await children.reconcile(f.harness.info.id);
+      expect([...children.warnings()]).toEqual([]);
+    } finally {
+      release();
+      await older?.catch(() => undefined);
       await rm(f.root, { recursive: true, force: true });
     }
   });

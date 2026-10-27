@@ -15,7 +15,7 @@ interface ChildrenOptions {
   client: V2Api;
   id: string;
   emit(event: AgentStreamEvent): void;
-  reconcilePermissions(id: string): Promise<void>;
+  reconcilePermissions(id: string): Promise<boolean>;
   bindChild?: (id: string) => void;
 }
 export class SessionChildren {
@@ -68,7 +68,8 @@ export class SessionChildren {
     const active = await this.options.client.session.active();
     let unavailable = false;
     try {
-      await this.options.reconcilePermissions(info.id);
+      if (!(await this.options.reconcilePermissions(info.id)))
+        throw new Error("OpenCode permission reconciliation was superseded");
     } catch (error) {
       if (!(await missingHistoricalWorkspace(info, error, Boolean(active[info.id])))) throw error;
       if ((await this.options.client.session.active())[info.id]) throw error;
@@ -139,7 +140,7 @@ async function missingHistoricalWorkspace(
   // that still exists must retain the ordinary fail-closed behavior.
   if (active || !info.outcome) return false;
   const cause = error instanceof ClientError && error.reason === "Transport" ? error.cause : error;
-  if (!(cause instanceof OpenCodeHttpError) || cause.status !== 500 || cause.html) return false;
+  if (!(cause instanceof OpenCodeHttpError) || cause.status !== 500 || !cause.json) return false;
   const prefix = `/api/session/${encodeURIComponent(info.id)}`;
   if (cause.operation !== `${prefix}/permission` && cause.operation !== `${prefix}/form`)
     return false;

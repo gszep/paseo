@@ -13,6 +13,7 @@ export class SessionPermissions {
   private readonly permissionOwners = new Map<string, string>();
   private readonly forms = new Map<string, FormInfo>();
   private readonly unavailable = new Set<string>();
+  private readonly reconciliation = new Map<string, symbol>();
   constructor(
     private readonly client: V2Api,
     private readonly id: string,
@@ -70,15 +71,22 @@ export class SessionPermissions {
     this.resolvePending(requestId, response);
   }
   async reconcile(sessionID: string) {
-    const [permissions, forms] = await Promise.all([
+    const generation = Symbol();
+    this.reconciliation.set(sessionID, generation);
+    const current = () => this.reconciliation.get(sessionID) === generation;
+    const snapshot = await Promise.all([
       this.client.permission.list({ sessionID }),
       this.client.session.form.list({ sessionID }),
     ]).catch((error: unknown) => {
+      if (!current()) return null;
       this.unavailable.add(sessionID);
       throw error;
     });
+    if (!snapshot || !current()) return false;
+    const [permissions, forms] = snapshot;
     this.unavailable.delete(sessionID);
     for (const request of permissions) {
+      if (!current()) return false;
       if (this.pending.has(request.id)) continue;
       const pending: AgentPermissionRequest = {
         id: request.id,
@@ -99,6 +107,7 @@ export class SessionPermissions {
       else this.emit({ type: "permission_requested", provider: "opencode", request: pending });
     }
     for (const form of forms) {
+      if (!current()) return false;
       if (this.pending.has(form.id)) continue;
       const pending: AgentPermissionRequest = {
         id: form.id,
@@ -128,6 +137,7 @@ export class SessionPermissions {
       this.pending.set(form.id, pending);
       this.emit({ type: "permission_requested", provider: "opencode", request: pending });
     }
+    return current();
   }
   resolvePending(requestId: string, resolution: AgentPermissionResponse) {
     if (!this.pending.delete(requestId)) return;

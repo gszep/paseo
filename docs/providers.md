@@ -119,10 +119,12 @@ OpenCode adapters target v1.14.46 and v2.0.10. V2 rejects binaries older than th
 
 A completed V2 child's removed workspace must not make its parent's history unreadable.
 Permission reads still initialize native location services, so a confirmed missing workspace
-with an exact child permission/form HTTP 500 is presented as **permissions unknown**, not
+with an exact child permission/form HTTP 500 and bounded, fully parsed UTF-8 JSON is presented as **permissions unknown**, not
 an empty permission snapshot. Parent history includes a warning and the child panel labels
 the uncertainty. Known requests remain pending and cannot be answered until both permission
-and form reads recover. Active children, authorization failures, other errors and existing
+and form reads recover. Only the current per-session reconciliation may clear that barrier;
+an older completion cannot undo a newer denial or clear its warning. A JSON media-type label
+alone is not proof, and response bodies are never retained in diagnostics. Active children, authorization failures, other errors and existing
 workspaces retain fail-closed behavior. This read degradation neither recreates a workspace
 nor resumes, approves or cancels child work.
 
