@@ -2,11 +2,12 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import pino from "pino";
 
-import type {
-  SpeechToTextProvider,
-  StreamingTranscriptionCommittedEvent,
-  StreamingTranscriptionEvent,
-  StreamingTranscriptionSession,
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type StreamingTranscriptionCommittedEvent,
+  type StreamingTranscriptionEvent,
+  type StreamingTranscriptionSession,
 } from "../../speech/speech-provider.js";
 import type {
   TurnDetectionProvider,
@@ -154,6 +155,64 @@ function createControllerHarness(options?: { sttLanguage?: string }) {
 }
 
 describe("voice turn controller", () => {
+  it("a delayed speech-start callback cannot revive a rejected recognition turn", async () => {
+    vi.useFakeTimers();
+    const h = createControllerHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.onSpeechStarted.mockImplementation(async () => gate);
+    try {
+      await h.controller.start();
+      h.detector.emit("speech_started");
+      await settleSerialQueue();
+      expect(h.onSpeechStarted).toHaveBeenCalledOnce();
+      h.sttSessions[0].emitError(new TranscriptionRejectedError());
+      release();
+      await settleSerialQueue();
+      h.detector.emit("speech_stopped");
+      await vi.advanceTimersByTimeAsync(11000);
+      await settleSerialQueue();
+      expect(h.onSpeechStopped).not.toHaveBeenCalled();
+      expect(h.onFinalTranscript).not.toHaveBeenCalled();
+      expect(h.sttSessions).toHaveLength(1);
+    } finally {
+      release();
+      await h.controller.stop();
+      vi.useRealTimers();
+    }
+  });
+  it("a rejected transcript is explicit and terminal without reconnect or a delayed partial final", async () => {
+    vi.useFakeTimers();
+    const h = createControllerHarness({ sttLanguage: "multi" });
+    try {
+      await h.controller.start();
+      h.detector.emit("speech_started");
+      await settleSerialQueue();
+      h.detector.emit("speech_stopped");
+      await settleSerialQueue();
+      h.sttSessions[0].emitCommitted({ segmentId: "rejected", previousSegmentId: null });
+      const error = new TranscriptionRejectedError();
+      h.sttSessions[0].emitError(error);
+      h.sttSessions[0].emitTranscript({
+        segmentId: "rejected",
+        transcript: "late text",
+        isFinal: true,
+      });
+      h.detector.emit("speech_started");
+      await vi.advanceTimersByTimeAsync(11000);
+      await settleSerialQueue();
+      expect(h.onError).toHaveBeenCalledWith(error);
+      expect(h.onFinalTranscript).not.toHaveBeenCalled();
+      expect(h.onSpeechStarted).toHaveBeenCalledTimes(1);
+      expect(h.sttSessions).toHaveLength(1);
+      expect(h.sttSessions[0].closeCount).toBeGreaterThan(0);
+    } finally {
+      await h.controller.stop();
+      vi.useRealTimers();
+    }
+  });
   it("passes configured language to streaming STT", async () => {
     const harness = createControllerHarness({ sttLanguage: "pt" });
 

@@ -4,10 +4,11 @@ import { v4 as uuidv4 } from "uuid";
 
 import { Pcm16MonoResampler } from "../../agent/pcm16-resampler.js";
 import { parsePcmRateFromFormat } from "../../speech/audio.js";
-import type {
-  SpeechToTextProvider,
-  StreamingTranscriptionEvent,
-  StreamingTranscriptionSession,
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type StreamingTranscriptionEvent,
+  type StreamingTranscriptionSession,
 } from "../../speech/speech-provider.js";
 import type { TurnDetectionProvider } from "../../speech/turn-detection-provider.js";
 
@@ -111,6 +112,7 @@ export function createVoiceTurnController(params: {
   let activeTranscriptSegmentId: string | null = null;
   let partialTranscriptFired = false;
   let reconnectAttemptedForTurn = false;
+  let recognitionRejected = false;
   const sealedTranscriptSegmentIds = new Set<string>();
   let currentFinalizingTurn: FinalizingVoiceTurn | null = null;
 
@@ -235,6 +237,7 @@ export function createVoiceTurnController(params: {
   }
 
   async function reconnectSttSession(): Promise<void> {
+    if (recognitionRejected) return;
     const previousSession = sttSession;
     sttSession = null;
     sttResampler = null;
@@ -244,6 +247,10 @@ export function createVoiceTurnController(params: {
     try {
       const nextSession = createSttSession();
       await nextSession.connect();
+      if (recognitionRejected) {
+        nextSession.close();
+        return;
+      }
       sttSession = nextSession;
       params.logger.info("voice_turn.stt_reconnected");
     } catch (error) {
@@ -255,6 +262,16 @@ export function createVoiceTurnController(params: {
   function handleSttError(error: unknown): void {
     fail(error);
     params.logger.warn({ err: error }, "voice_turn.stt_error");
+    if (error instanceof TranscriptionRejectedError) {
+      recognitionRejected = true;
+      clearFinalizingTurnTimeout();
+      currentFinalizingTurn = null;
+      state = { status: "idle" };
+      detector.close();
+      sttSession?.close();
+      sttSession = null;
+      return;
+    }
     if (reconnectAttemptedForTurn) {
       sttSession?.close();
       sttSession = null;
@@ -309,6 +326,7 @@ export function createVoiceTurnController(params: {
   }
 
   function handleSttTranscript(event: StreamingTranscriptionEvent): void {
+    if (recognitionRejected) return;
     if (event.isFinal) {
       handleFinalSttTranscript(event);
       return;
@@ -399,11 +417,13 @@ export function createVoiceTurnController(params: {
   }
 
   async function handleSpeechStarted(): Promise<void> {
+    if (recognitionRejected) return;
     if (state.status === "capturing") {
       return;
     }
 
     await params.callbacks.onSpeechStarted();
+    if (recognitionRejected) return;
 
     const startedAt = Date.now();
     activeTranscriptSegmentId = null;
@@ -456,6 +476,7 @@ export function createVoiceTurnController(params: {
       handleSttError(error);
     }
 
+    if (recognitionRejected) return;
     await params.callbacks.onSpeechStopped();
 
     params.logger.info(
@@ -476,6 +497,7 @@ export function createVoiceTurnController(params: {
 
   return {
     async start(): Promise<void> {
+      recognitionRejected = false;
       sttSession = createSttSession();
       await sttSession.connect();
       await detector.connect();

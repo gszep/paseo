@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import pino from "pino";
+import { EventEmitter } from "node:events";
+import { resolveSpeechConfig } from "./speech-config-resolver.js";
+import { PersistedConfigSchema } from "../persisted-config.js";
 
 import type { PaseoSpeechConfig } from "../bootstrap.js";
 import type { InitializedLocalSpeech } from "./providers/local/runtime.js";
@@ -7,10 +10,13 @@ import type { SpeechToTextProvider, TextToSpeechProvider } from "./speech-provid
 import type { TurnDetectionProvider } from "./turn-detection-provider.js";
 import { createSpeechService } from "./speech-runtime.js";
 
-const { ensureLocalSpeechModelsMock, initializeLocalSpeechServicesMock } = vi.hoisted(() => ({
-  ensureLocalSpeechModelsMock: vi.fn(async () => ({})),
-  initializeLocalSpeechServicesMock: vi.fn<(args: unknown) => Promise<InitializedLocalSpeech>>(),
-}));
+const { ensureLocalSpeechModelsMock, initializeLocalSpeechServicesMock, webSocketMock } =
+  vi.hoisted(() => ({
+    ensureLocalSpeechModelsMock: vi.fn(async () => ({})),
+    initializeLocalSpeechServicesMock: vi.fn<(args: unknown) => Promise<InitializedLocalSpeech>>(),
+    webSocketMock: vi.fn(),
+  }));
+vi.mock("ws", () => ({ WebSocket: webSocketMock }));
 
 vi.mock("./providers/local/runtime.js", () => ({
   initializeLocalSpeechServices: initializeLocalSpeechServicesMock,
@@ -34,7 +40,8 @@ vi.mock("./providers/openai/runtime.js", () => ({
   validateOpenAiCredentialRequirements: () => {},
 }));
 
-vi.mock("./providers/local/models.js", () => ({
+vi.mock("./providers/local/models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./providers/local/models.js")>()),
   ensureLocalSpeechModels: ensureLocalSpeechModelsMock,
   getLocalSpeechModelDir: vi.fn(() => ""),
   listLocalSpeechModels: vi.fn(() => []),
@@ -88,6 +95,79 @@ describe("createSpeechService readiness", () => {
     ensureLocalSpeechModelsMock.mockReset();
     ensureLocalSpeechModelsMock.mockResolvedValue({});
     initializeLocalSpeechServicesMock.mockReset();
+    webSocketMock.mockReset();
+    Object.assign(webSocketMock, { OPEN: 1 });
+  });
+
+  it("both resolved EN/JA routes construct the actual Nova-3 multi request with repeated hints and preserve TTS", async () => {
+    const tts = createStubTts("local");
+    const detector = createStubTurnDetection("local");
+    initializeLocalSpeechServicesMock.mockResolvedValue({
+      turnDetectionService: detector,
+      sttService: null,
+      ttsService: tts,
+      dictationSttService: null,
+      localVoiceTtsProvider: tts,
+      localModelConfig: null,
+      availability: { configured: false, modelsDir: null, missingModelIds: [] },
+      cleanup: () => undefined,
+    });
+    webSocketMock.mockImplementation(function () {
+      const socket = Object.assign(new EventEmitter(), {
+        readyState: 1,
+        bufferedAmount: 0,
+        send: vi.fn(),
+        terminate: vi.fn(),
+      });
+      queueMicrotask(socket.emit.bind(socket, "open"));
+      return socket;
+    });
+    const stt = {
+      provider: "deepgram",
+      model: "nova-3",
+      language: "multi",
+      languageHints: ["en", "ja"],
+    };
+    const config = resolveSpeechConfig({
+      paseoHome: "/fixture",
+      env: {},
+      persisted: PersistedConfigSchema.parse({
+        providers: { deepgram: { apiKey: "fixture-key" } },
+        features: { dictation: { enabled: true, stt }, voiceMode: { enabled: true, stt } },
+      }),
+    });
+    const service = createSpeechService({
+      logger: pino({ level: "silent" }),
+      speechConfig: config.speech,
+    });
+    service.start();
+    await service.ready;
+    try {
+      for (const [provider, language] of [
+        [service.resolveDictationStt(), service.resolveDictationSttLanguage()],
+        [service.resolveStt(), service.resolveSttLanguage()],
+      ] as const) {
+        expect(provider?.id).toBe("deepgram");
+        const session = provider!.createSession({ logger: pino({ level: "silent" }), language });
+        try {
+          await session.connect();
+        } finally {
+          session.close();
+        }
+      }
+      expect(webSocketMock).toHaveBeenCalledTimes(2);
+      for (const [url] of webSocketMock.mock.calls) {
+        expect(url.origin + url.pathname).toBe("wss://api.deepgram.com/v1/listen");
+        expect(url.searchParams.get("model")).toBe("nova-3");
+        expect(url.searchParams.get("language")).toBe("multi");
+        expect(url.searchParams.getAll("language_hint")).toEqual(["en", "ja"]);
+        expect(url.searchParams.has("prompt")).toBe(false);
+      }
+      expect(service.resolveTts()).toBe(tts);
+      expect(service.resolveTurnDetection()).toBe(detector);
+    } finally {
+      await service.stop();
+    }
   });
 
   it.each([true, false])(

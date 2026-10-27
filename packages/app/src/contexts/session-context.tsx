@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { useClientActivity } from "@/hooks/use-client-activity";
 import { useAppVisible } from "@/hooks/use-app-visible";
+import { voiceActivityError } from "@/voice/voice-runtime";
 import { startPushNotifications } from "@/push-notifications";
 import {
   createSetAgentInitializing,
@@ -171,15 +172,6 @@ type WorkspaceSetupProgressPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace_setup_progress" }
 >["payload"];
-
-function notifyVoiceAbortFailure(
-  data: Extract<SessionOutboundMessage, { type: "activity_log" }>["payload"],
-  notifyError: (message: string) => void,
-): void {
-  if (data.type === "error" && data.metadata?.voiceAbortFailed === true) {
-    notifyError(data.content);
-  }
-}
 
 interface SessionProviderSharedProps {
   children: ReactNode;
@@ -688,7 +680,8 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
 
     const unsubActivity = client.on("activity_log", (message) => {
       if (message.type !== "activity_log") return;
-      notifyVoiceAbortFailure(message.payload, toast.error);
+      const error = voiceActivityError(message.payload);
+      if (error) toast.error(error);
     });
 
     const unsubTranscription = client.on("transcription_result", (message) => {

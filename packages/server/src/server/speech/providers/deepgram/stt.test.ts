@@ -2,8 +2,15 @@ import { EventEmitter, once } from "node:events";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import pino from "pino";
 import { DeepgramSTT } from "./stt.js";
-import type { StreamingTranscriptionEvent } from "../../speech-provider.js";
+import {
+  TranscriptionRejectedError,
+  type StreamingTranscriptionEvent,
+} from "../../speech-provider.js";
 import { STTManager } from "../../../agent/stt-manager.js";
+import {
+  DictationStreamManager,
+  type DictationStreamOutboundMessage,
+} from "../../../dictation/dictation-stream-manager.js";
 
 const { constructor } = vi.hoisted(() => ({ constructor: vi.fn() }));
 vi.mock("ws", () => ({ WebSocket: constructor }));
@@ -35,12 +42,12 @@ afterEach(() => {
   for (const session of sessions.splice(0)) session.close();
   vi.useRealTimers();
 });
-function setup() {
+function setup(options?: { language?: string; hints?: string[] }) {
   const session = new DeepgramSTT({
     apiKey: "fixture-key",
     model: "nova-3",
-    languageHints: ["en", "ja"],
-  }).createSession({ logger, language: "multi" });
+    languageHints: options?.hints ?? ["en", "ja"],
+  }).createSession({ logger, language: options?.language ?? "multi" });
   sessions.push(session);
   const transcripts: StreamingTranscriptionEvent[] = [];
   const errors: Error[] = [];
@@ -75,6 +82,130 @@ function finish(socket: Socket) {
   socket.readyState = 3;
   socket.emit("close", 1000);
 }
+
+test.each([false, true])(
+  "EN/JA rejects an unexpected-script result before emitting text (final=%s)",
+  async (final) => {
+    const { session, transcripts, errors } = setup();
+    const connected = session.connect();
+    open(sockets[0]);
+    await connected;
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    result(sockets[0], "کنی چیا", 0, final);
+    finish(sockets[0]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(TranscriptionRejectedError);
+    expect(errors[0].message).toMatch(/English.*Japanese.*unexpected script/i);
+    expect(errors[0].message).not.toContain("کنی چیا");
+    expect(transcripts).toEqual([]);
+    expect(sockets[0].terminate).toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+  },
+);
+
+test.each([
+  "Hello 日本語 カタカナ ひらがな",
+  "ｶﾀｶﾅ ー か\u3099 42 😀",
+  "English 日本語 foo_bar() + 3.14",
+  "𠮷 café coöperate",
+])("EN/JA retains supported scripts without normalization: %s", async (text) => {
+  const { session, transcripts, errors } = setup();
+  const connected = session.connect();
+  open(sockets[0]);
+  await connected;
+  session.appendPcm16(Buffer.from([1, 0]));
+  session.commit();
+  result(sockets[0], text);
+  finish(sockets[0]);
+  expect(transcripts.at(-1)).toMatchObject({ transcript: text, isFinal: true });
+  expect(errors).toEqual([]);
+});
+
+test.each(["English کنی چیا 日本語", "Привет", "한국어", "γειά", "\u064e"])(
+  "EN/JA rejects the whole result rather than filtering or translating %s",
+  async (text) => {
+    const { session, transcripts, errors } = setup();
+    const connected = session.connect();
+    open(sockets[0]);
+    await connected;
+    session.appendPcm16(Buffer.from([1, 0]));
+    session.commit();
+    result(sockets[0], text);
+    result(sockets[0], "late English");
+    finish(sockets[0]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(TranscriptionRejectedError);
+    expect(transcripts).toEqual([]);
+    expect(sockets).toHaveLength(1);
+  },
+);
+
+test("other explicitly configured hint sets retain their existing output behavior", async () => {
+  const { session, transcripts, errors } = setup({ hints: ["en", "ar"] });
+  const connected = session.connect();
+  open(sockets[0]);
+  await connected;
+  session.appendPcm16(Buffer.from([1, 0]));
+  session.commit();
+  result(sockets[0], "مرحبا");
+  finish(sockets[0]);
+  expect(transcripts.at(-1)).toMatchObject({ transcript: "مرحبا", isFinal: true });
+  expect(errors).toEqual([]);
+});
+
+test("the actual dictation manager reports a non-retryable recognition error, never a rejected transcript", async () => {
+  const create = constructor.getMockImplementation()!;
+  constructor.mockImplementation(function () {
+    const socket = create() as Socket;
+    const complete = () => {
+      result(socket, "کنی چیا");
+      finish(socket);
+    };
+    socket.send.mockImplementation((data, callback) => {
+      callback?.();
+      if (data === '{"type":"CloseStream"}') queueMicrotask(complete);
+    });
+    queueMicrotask(() => open(socket));
+    return socket;
+  });
+  const emitted: DictationStreamOutboundMessage[] = [];
+  const manager = new DictationStreamManager({
+    logger,
+    sessionId: "fixture",
+    emit: (message) => emitted.push(message),
+    stt: new DeepgramSTT({ apiKey: "fixture-key", model: "nova-3", languageHints: ["en", "ja"] }),
+    language: "multi",
+  });
+  try {
+    await manager.handleStart("scope", "audio/pcm;rate=24000;bits=16");
+    const pcm = Buffer.alloc(4800);
+    for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(2000, offset);
+    await manager.handleChunk({
+      dictationId: "scope",
+      seq: 0,
+      audioBase64: pcm.toString("base64"),
+      format: "audio/pcm;rate=24000;bits=16",
+    });
+    await manager.handleFinish("scope", 0);
+    await vi.waitFor(() =>
+      expect(emitted).toContainEqual(
+        expect.objectContaining({
+          type: "dictation_stream_error",
+          payload: expect.objectContaining({
+            retryable: false,
+            error: expect.stringContaining("unexpected script"),
+          }),
+        }),
+      ),
+    );
+    expect(emitted.some((message) => message.type === "dictation_stream_final")).toBe(false);
+    expect(JSON.stringify(emitted)).not.toContain("کنی چیا");
+    expect(sockets).toHaveLength(1);
+  } finally {
+    manager.cleanupAll();
+  }
+});
 
 test("uses Nova V1 raw PCM and repeated user hints; commit waits for trailing results and close metadata", async () => {
   const { session, transcripts, committed, errors } = setup();

@@ -16,6 +16,15 @@ const DISPLAY_VOLUME_CHANGE_EPSILON = 0.02;
 const DISPLAY_VOLUME_ATTACK = 0.35;
 const DISPLAY_VOLUME_RELEASE = 0.18;
 
+export function voiceActivityError(
+  data: Extract<SessionOutboundMessage, { type: "activity_log" }>["payload"],
+): string | null {
+  return data.type === "error" &&
+    (data.metadata?.voiceAbortFailed === true || data.metadata?.voiceTranscriptionRejected === true)
+    ? data.content
+    : null;
+}
+
 type TurnEventType = Extract<
   AgentStreamEventPayload["type"],
   "turn_started" | "turn_completed" | "turn_failed" | "turn_canceled"

@@ -392,6 +392,17 @@ translate, romanize, apply text replacements or send the generic transcription
 prompt as instructions. Provider transcript fragments are kept in audio order;
 future learning corrections must not overwrite them.
 
+Hints bias recognition; they do not enforce an output-language whitelist. With
+`multi` and the exact hint set `en`/`ja`, the adapter rejects unexpected scripts
+before emitting partial or final text. Latin, Han, Hiragana, Katakana and shared
+punctuation/marks remain unchanged; it never removes just the offending characters
+or translates them. A rejected result produces an explicit recognition error,
+not an empty successful transcript or an automatic provider retry. Stop and restart
+recording to try again. Dictation exposes the error as non-retryable; voice mode
+surfaces a structured error notification and stops that recognition session.
+This script check cannot distinguish languages sharing Latin or Han, detect all
+phonetic mistranscriptions, or establish English/Japanese recognition quality.
+
 The adapter uses mono PCM16LE at 24 kHz; existing audio managers resample input.
 Each explicit commit finishes its V1 socket with `CloseStream` and waits for final
 results, metadata and normal closure. Later segments are queued and use fresh

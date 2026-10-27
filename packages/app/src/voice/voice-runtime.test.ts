@@ -1,8 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DaemonServerInfo } from "@/stores/session-store";
 import type { AudioEngine } from "@/voice/audio-engine-types";
-import { createVoiceRuntime, type VoiceSessionAdapter } from "@/voice/voice-runtime";
+import {
+  createVoiceRuntime,
+  voiceActivityError,
+  type VoiceSessionAdapter,
+} from "@/voice/voice-runtime";
 import { REALTIME_VOICE_VAD_CONFIG } from "@/voice/realtime-voice-config";
+
+it.each(["voiceAbortFailed", "voiceTranscriptionRejected"])(
+  "surfaces a structured %s error without interpreting transcript text",
+  (flag) => {
+    const event = {
+      id: "fixture",
+      timestamp: new Date(0),
+      type: "error" as const,
+      content: "Explicit speech failure",
+    };
+    expect(voiceActivityError({ ...event, metadata: { [flag]: true } })).toBe(event.content);
+    expect(voiceActivityError({ ...event, metadata: { [flag]: "true" } })).toBeNull();
+    expect(voiceActivityError(event)).toBeNull();
+    expect(voiceActivityError({ ...event, type: "system", metadata: { [flag]: true } })).toBeNull();
+  },
+);
 
 function createAudioEngineMock(): AudioEngine {
   return {

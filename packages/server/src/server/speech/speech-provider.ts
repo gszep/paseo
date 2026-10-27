@@ -1,6 +1,16 @@
 import type pino from "pino";
 import type { Readable } from "node:stream";
 
+/** A recognition failure, not a transient connection failure to replay automatically. */
+export class TranscriptionRejectedError extends Error {
+  readonly name = "TranscriptionRejectedError";
+  constructor() {
+    super(
+      "English/Japanese speech recognition failed: unexpected script. Stop and restart recording to try again.",
+    );
+  }
+}
+
 export interface LogprobToken {
   token: string;
   logprob: number;
