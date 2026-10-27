@@ -209,6 +209,7 @@ export class OpenCodeV2Session implements AgentSession {
   async *streamHistory() {
     const history = new V2Timeline(false);
     yield* history.messages(await messages(this.client, this.id));
+    yield* this.children.warnings();
   }
   async getRuntimeInfo() {
     await this.reconcile();

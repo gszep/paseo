@@ -12,6 +12,7 @@ export class SessionPermissions {
   private readonly pending = new Map<string, AgentPermissionRequest>();
   private readonly permissionOwners = new Map<string, string>();
   private readonly forms = new Map<string, FormInfo>();
+  private readonly unavailable = new Set<string>();
   constructor(
     private readonly client: V2Api,
     private readonly id: string,
@@ -35,6 +36,9 @@ export class SessionPermissions {
   }
   async respondToPermission(requestId: string, response: AgentPermissionResponse) {
     const form = this.forms.get(requestId);
+    const owner = form?.sessionID ?? this.permissionOwners.get(requestId) ?? this.id;
+    if (this.unavailable.has(owner))
+      throw new Error("OpenCode permission state is unavailable; refresh before responding");
     if (form) {
       if (response.behavior === "deny")
         await this.client.session.form.cancel({ sessionID: form.sessionID, formID: form.id });
@@ -69,7 +73,11 @@ export class SessionPermissions {
     const [permissions, forms] = await Promise.all([
       this.client.permission.list({ sessionID }),
       this.client.session.form.list({ sessionID }),
-    ]);
+    ]).catch((error: unknown) => {
+      this.unavailable.add(sessionID);
+      throw error;
+    });
+    this.unavailable.delete(sessionID);
     for (const request of permissions) {
       if (this.pending.has(request.id)) continue;
       const pending: AgentPermissionRequest = {

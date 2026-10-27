@@ -14,7 +14,7 @@ import {
 } from "../../../provider-launch-config.js";
 import type { ManagedProcessRegistry } from "../../../../managed-processes/managed-processes.js";
 import { resolveOpenCodeHomeDir } from "../paths.js";
-import { OpenCodeHttpError } from "../http-error.js";
+import { checkResponse } from "../http-error.js";
 import { raceProviderRefreshAbort } from "../../../provider-refresh-deadline.js";
 import { httpRuntime } from "@henkaku-center/chi-native/runtime-http";
 import { boundedText } from "@henkaku-center/chi-native/http";
@@ -251,11 +251,7 @@ export class V2Runtime {
             signal: nativeTransfer ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : signal,
             ...(nativeTransfer ? { redirect: "error" as const } : {}),
           });
-          const html = response.headers.get("content-type")?.includes("text/html") ?? false;
-          if (!response.ok || html) {
-            await response.body?.cancel();
-            throw new OpenCodeHttpError(new URL(requestUrl).pathname, response.status, html);
-          }
+          await checkResponse(response, new URL(requestUrl).pathname);
           if (nativeTransfer)
             return new Response(await boundedText(response, 16 * 1024 * 1024), {
               status: response.status,

@@ -14,3 +14,11 @@ export class OpenCodeHttpError extends Error {
     );
   }
 }
+
+export async function checkResponse(response: Response, operation: string): Promise<void> {
+  const html = response.headers.get("content-type")?.includes("text/html") ?? false;
+  if (!response.ok || html) {
+    await response.body?.cancel();
+    throw new OpenCodeHttpError(operation, response.status, html);
+  }
+}
