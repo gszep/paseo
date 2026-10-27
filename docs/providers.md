@@ -128,6 +128,15 @@ alone is not proof, and response bodies are never retained in diagnostics. Activ
 workspaces retain fail-closed behavior. This read degradation neither recreates a workspace
 nor resumes, approves or cancels child work.
 
+For a permission/form HTTP 500, the authenticated runtime records `OpenCode permission
+response classified` with its helper PID, operation, status and `errorResponse` metadata:
+an allowlisted media type, observed byte count, EOF and JSON-parse booleans, a complete-body
+SHA-256 and an allowlisted native error name. Partial reads receive no digest. No body, arbitrary
+header value or credential is logged. The byte count is not a complete-body measurement
+unless EOF is true. This observation happens before discarding the response; old error
+strings cannot reconstruct it. Empty or non-JSON responses still fail closed rather than
+extending historical-child recovery.
+
 V2 shell environments are per native session and process-local, not per directory.
 Rebind the full inherited environment with that agent's identity on each event-stream
 connection, including reconnects. The bridge's tool binding is a separate session map.

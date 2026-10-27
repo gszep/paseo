@@ -8,6 +8,7 @@ import {
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { checkResponse, OpenCodeHttpError } from "../http-error.js";
 import { SessionChildren } from "./children.js";
 import { describe, expect, test, vi } from "vitest";
@@ -185,6 +186,83 @@ describe("OpenCode v2 resume configuration", () => {
       json: false,
     });
   });
+  test.each([
+    {
+      name: "empty",
+      media: "",
+      expectedMedia: "missing",
+      body: "",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "plain",
+      media: "text/plain",
+      expectedMedia: "text/plain",
+      body: "private-body-canary",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "HTML",
+      media: "TEXT/HTML; charset=UTF-8",
+      expectedMedia: "text/html",
+      body: "<p>private-body-canary</p>",
+      parsedJson: false,
+      eligible: false,
+    },
+    {
+      name: "unknown media",
+      media: "application/private-header-canary",
+      expectedMedia: "other",
+      body: '{"private":"private-body-canary"}',
+      parsedJson: true,
+      eligible: false,
+    },
+    {
+      name: "JSON",
+      media: "APPLICATION/JSON; charset=UTF-8",
+      expectedMedia: "application/json",
+      body: '{"private":"private-body-canary 日本語"}',
+      parsedJson: true,
+      eligible: true,
+    },
+  ])("permission error metadata is bounded and content-free for $name", async (sample) => {
+    const response = new Response(sample.body, {
+      status: 500,
+      headers: { "content-type": sample.media },
+    });
+    const error = await checkResponse(response, "/api/session/child/permission").catch(
+      (failure) => failure,
+    );
+    expect(error).toBeInstanceOf(OpenCodeHttpError);
+    expect(error.json).toBe(sample.eligible);
+    expect(error.responseMetadata).toEqual({
+      mediaType: sample.expectedMedia,
+      bytes: new TextEncoder().encode(sample.body).length,
+      eof: true,
+      parsedJson: sample.parsedJson,
+      sha256: createHash("sha256").update(sample.body).digest("hex"),
+      errorCode: null,
+    });
+    expect(JSON.stringify(error)).not.toContain("private-body-canary");
+    expect(JSON.stringify(error)).not.toContain("private-header-canary");
+  });
+  test("diagnostics allowlist native error names without retaining arbitrary values", async () => {
+    const body = JSON.stringify({ name: "UnknownError", data: { message: "private-body-canary" } });
+    const error = await checkResponse(
+      Response.json(JSON.parse(body), { status: 500 }),
+      "/api/session/child/form",
+    ).catch((failure) => failure);
+    expect(error.responseMetadata.errorCode).toBe("UnknownError");
+    expect(JSON.stringify(error)).not.toContain("private-body-canary");
+    const unknown = await checkResponse(
+      Response.json({ name: "private-code-canary" }, { status: 500 }),
+      "/api/session/child/form",
+    ).catch((failure) => failure);
+    expect(unknown.responseMetadata.errorCode).toBeNull();
+    expect(JSON.stringify(unknown)).not.toContain("private-code-canary");
+  });
   test("JSON error classification has a body deadline and requires EOF", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const cancelled = vi.fn();
@@ -205,6 +283,9 @@ describe("OpenCode v2 resume configuration", () => {
       const error = await failure;
       expect(error).toBeInstanceOf(OpenCodeHttpError);
       expect(error.json).toBe(false);
+      expect(error.responseMetadata.eof).toBe(false);
+      expect(error.responseMetadata.parsedJson).toBe(false);
+      expect(error.responseMetadata.sha256).toBeNull();
       expect(cancelled).toHaveBeenCalledOnce();
       expect(String(error)).not.toContain("diagnostic-canary");
       expect(JSON.stringify(error)).not.toContain("diagnostic-canary");
@@ -222,6 +303,7 @@ describe("OpenCode v2 resume configuration", () => {
     "plain-text",
     "malformed-json",
     "oversized-json",
+    "empty-native-500",
     "active",
     "newly-active",
     "no-outcome",
@@ -236,6 +318,10 @@ describe("OpenCode v2 resume configuration", () => {
     if (kind === "plain-text") f.mode.contentType = "text/plain";
     if (kind === "malformed-json") f.mode.errorBody = "diagnostic must not become history";
     if (kind === "oversized-json") f.mode.errorBody = JSON.stringify({ error: "x".repeat(65536) });
+    if (kind === "empty-native-500") {
+      f.mode.contentType = "";
+      f.mode.errorBody = "";
+    }
     if (kind === "parent") f.mode.parent = true;
     if (kind === "generic") f.mode.generic = true;
     if (kind === "workspace-present") f.child.location.directory = f.root;
