@@ -7,12 +7,13 @@ import { describe, expect, test, vi } from "vitest";
 import { VoiceSession, type VoiceSessionHost } from "./voice-session.js";
 import type { ManagedAgent } from "../../agent/agent-manager.js";
 import type { SessionOutboundMessage } from "../../messages.js";
-import type {
-  SpeechToTextProvider,
-  TextToSpeechProvider,
-  StreamingTranscriptionCommittedEvent,
-  StreamingTranscriptionEvent,
-  StreamingTranscriptionSession,
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type TextToSpeechProvider,
+  type StreamingTranscriptionCommittedEvent,
+  type StreamingTranscriptionEvent,
+  type StreamingTranscriptionSession,
 } from "../../speech/speech-provider.js";
 import type {
   TurnDetectionProvider,
@@ -136,6 +137,38 @@ async function settle(): Promise<void> {
 }
 
 describe("VoiceSession streaming transcription", () => {
+  test("recognition rejection produces an explicit client error without model input or agent reload", async () => {
+    const { voiceSession, sttSession, detector, host } = createVoiceSession();
+    const reload = vi.spyOn(host, "reloadAgentSession");
+    const interrupt = vi.spyOn(host, "interruptAgentIfRunning");
+    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
+    const priorReloads = reload.mock.calls.length;
+    try {
+      sttSession.emit("error", new TranscriptionRejectedError());
+      sttSession.emitTranscript({ segmentId: "late", transcript: "late text", isFinal: true });
+      detector.emit("speech_started");
+      await settle();
+      expect(host.emitted).toContainEqual(
+        expect.objectContaining({
+          type: "activity_log",
+          payload: expect.objectContaining({
+            type: "error",
+            content: expect.stringContaining("unexpected script"),
+            metadata: { voiceTranscriptionRejected: true },
+          }),
+        }),
+      );
+      expect(host.emitted).toContainEqual({
+        type: "voice_input_state",
+        payload: { isSpeaking: false },
+      });
+      expect(host.spokenInput).toEqual([]);
+      expect(reload).toHaveBeenCalledTimes(priorReloads);
+      expect(interrupt).not.toHaveBeenCalled();
+    } finally {
+      await voiceSession.cleanup();
+    }
+  });
   test("interrupts playback and the agent on speech detection without partial transcripts", async () => {
     const tts: TextToSpeechProvider = {
       async synthesizeSpeech() {

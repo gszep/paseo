@@ -5,7 +5,11 @@ import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import { TTSManager } from "../../agent/tts-manager.js";
 import { STTManager } from "../../agent/stt-manager.js";
-import type { SpeechToTextProvider, TextToSpeechProvider } from "../../speech/speech-provider.js";
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type TextToSpeechProvider,
+} from "../../speech/speech-provider.js";
 import type { TurnDetectionProvider } from "../../speech/turn-detection-provider.js";
 import { maybePersistTtsDebugAudio } from "../../agent/tts-debug.js";
 import { isPaseoDictationDebugEnabled } from "../../agent/recordings-debug.js";
@@ -652,6 +656,21 @@ export class VoiceSession {
         },
         onError: (error) => {
           this.sessionLogger.error({ err: error }, "Voice turn controller failed");
+          if (error instanceof TranscriptionRejectedError) {
+            this.setPhase("idle");
+            this.clearSpeechInProgress("transcription rejected");
+            this.emit({ type: "voice_input_state", payload: { isSpeaking: false } });
+            this.emit({
+              type: "activity_log",
+              payload: {
+                id: uuidv4(),
+                timestamp: new Date(),
+                type: "error",
+                content: error.message,
+                metadata: { voiceTranscriptionRejected: true },
+              },
+            });
+          }
         },
       },
     });
@@ -955,6 +974,9 @@ export class VoiceSession {
           timestamp: new Date(),
           type: "error",
           content: `Transcription error: ${getErrorMessage(error)}`,
+          ...(error instanceof TranscriptionRejectedError
+            ? { metadata: { voiceTranscriptionRejected: true } }
+            : {}),
         },
       });
       throw error;

@@ -2,7 +2,11 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import type { SpeechToTextProvider, StreamingTranscriptionSession } from "../../speech-provider.js";
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type StreamingTranscriptionSession,
+} from "../../speech-provider.js";
 import type { DeepgramSttOptions } from "./config.js";
 
 const Results = z.object({
@@ -14,6 +18,8 @@ const Results = z.object({
 });
 const MAX_QUEUED_BYTES = 16 * 1024 * 1024;
 const TIMEOUT_MS = 10_000;
+const OUTSIDE_EN_JA_SCRIPTS =
+  /[^\p{Script_Extensions=Latin}\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Common}\p{Script_Extensions=Inherited}]/u;
 interface Piece {
   start: number;
   duration: number;
@@ -78,6 +84,7 @@ class DeepgramSession extends EventEmitter implements StreamingTranscriptionSess
   private connecting?: Promise<void>;
   private resolveConnect?: () => void;
   private rejectConnect?: (error: Error) => void;
+  private readonly enJaOnly: boolean;
 
   constructor(
     private readonly url: URL,
@@ -85,6 +92,8 @@ class DeepgramSession extends EventEmitter implements StreamingTranscriptionSess
     private readonly language: string,
   ) {
     super();
+    const hints = new Set(url.searchParams.getAll("language_hint"));
+    this.enJaOnly = language === "multi" && hints.size === 2 && hints.has("en") && hints.has("ja");
   }
 
   connect(): Promise<void> {
@@ -270,10 +279,17 @@ class DeepgramSession extends EventEmitter implements StreamingTranscriptionSess
   }
 
   private recordResult(segment: Segment, result: z.infer<typeof Results>): void {
+    const text = result.channel.alternatives[0]!.transcript;
+    // Hints bias recognition; they are not an output-language guarantee. Reject
+    // the whole affected stream before caching/emitting any unsupported script.
+    if (this.enJaOnly && OUTSIDE_EN_JA_SCRIPTS.test(text)) {
+      this.fail(new TranscriptionRejectedError());
+      return;
+    }
     const piece = {
       start: result.start,
       duration: result.duration,
-      text: result.channel.alternatives[0]!.transcript,
+      text,
     };
     if (result.is_final) {
       const key = JSON.stringify([piece.start, piece.duration]);
@@ -374,10 +390,10 @@ class DeepgramSession extends EventEmitter implements StreamingTranscriptionSess
     segment.socket?.terminate();
   }
 
-  private fail(message: string): void {
+  private fail(message: string | TranscriptionRejectedError): void {
     if (this.state === "failed" || this.state === "closed") return;
     this.state = "failed";
-    const error = new Error(message); // Never forward provider bodies, URLs or credential-bearing errors.
+    const error = typeof message === "string" ? new Error(message) : message; // Fixed local errors only, never provider bodies or credentials.
     this.rejectConnect?.(error);
     this.rejectConnect = undefined;
     this.resolveConnect = undefined;

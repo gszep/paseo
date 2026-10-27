@@ -7,9 +7,10 @@ import {
 } from "../agent/dictation-debug.js";
 import { isPaseoDictationDebugEnabled } from "../agent/recordings-debug.js";
 import { Pcm16MonoResampler } from "../agent/pcm16-resampler.js";
-import type {
-  SpeechToTextProvider,
-  StreamingTranscriptionSession,
+import {
+  TranscriptionRejectedError,
+  type SpeechToTextProvider,
+  type StreamingTranscriptionSession,
 } from "../speech/speech-provider.js";
 import { toResolver, type Resolvable } from "../speech/provider-resolver.js";
 import { parsePcmRateFromFormat, pcm16lePeakAbs } from "../speech/audio.js";
@@ -320,7 +321,11 @@ export class DictationStreamManager {
         this.maybeFinalizeDictationStream(dictationId);
         return;
       }
-      void this.failAndCleanupDictationStream(dictationId, message, true);
+      void this.failAndCleanupDictationStream(
+        dictationId,
+        message,
+        !(err instanceof TranscriptionRejectedError),
+      );
     });
 
     try {
@@ -328,7 +333,11 @@ export class DictationStreamManager {
     } catch (error) {
       if (this.streams.get(dictationId)?.stt !== stt) return;
       const message = error instanceof Error ? error.message : String(error);
-      this.failDictationStream(dictationId, message, true);
+      this.failDictationStream(
+        dictationId,
+        message,
+        !(error instanceof TranscriptionRejectedError),
+      );
       this.cleanupDictationStream(dictationId);
       return;
     }
