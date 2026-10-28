@@ -23,6 +23,7 @@ import { formatVersionWithPrefix } from "@/desktop/updates/desktop-updates";
 import { buildOpenProjectRoute } from "@/utils/host-routes";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
 import { openExternalUrl } from "@/utils/open-external-url";
+import { isHostedWebExport } from "@/utils/hosted-web";
 import { isFdroidBuild } from "@/constants/build-profile";
 import { isWeb, isNative } from "@/constants/platform";
 import { isElectronRuntime } from "@/desktop/host";
@@ -272,6 +273,15 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
     });
   }
 
+  // A hosted export's CSP permits its configured relay, not arbitrary direct hosts.
+  const hostedWeb = isHostedWebExport();
+  const visibleActions = hostedWeb
+    ? actions.filter((action) => action.key !== "direct-connection")
+    : actions;
+  if (hostedWeb) {
+    for (const action of visibleActions) action.primary = true;
+  }
+
   const scrollContentContainerStyle = useMemo(
     () => [styles.container, { paddingBottom: theme.spacing[6] + insets.bottom }],
     [theme.spacing, insets.bottom],
@@ -299,7 +309,7 @@ export function WelcomeScreen({ onHostAdded }: WelcomeScreenProps) {
           </View>
 
           <View style={styles.actions}>
-            {actions.map((action) => (
+            {visibleActions.map((action) => (
               <WelcomeActionButton key={action.key} action={action} />
             ))}
           </View>

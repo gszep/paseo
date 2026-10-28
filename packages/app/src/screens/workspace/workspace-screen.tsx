@@ -1,3 +1,4 @@
+import { useBrandWindowTitle } from "@/branding/use-brand-window-title";
 import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
 import { useHostFeature } from "@/runtime/host-features";
 import {
@@ -322,22 +323,13 @@ function useSyncWorkspaceActiveBrowser(input: {
 function WorkspaceDocumentTitleEffect({
   label,
   titleState,
+  isRunning,
 }: {
   label: string;
   titleState: "ready" | "loading";
+  isRunning: boolean;
 }) {
-  const { t } = useTranslation();
-  useEffect(() => {
-    if (isNative || typeof document === "undefined") {
-      return;
-    }
-    const resolvedLabel = label.trim();
-    document.title =
-      titleState === "loading"
-        ? t("workspace.tabs.loading")
-        : resolvedLabel || t("workspace.tabs.fallback.workspace");
-  }, [label, titleState, t]);
-
+  useBrandWindowTitle({ label, titleState, isRunning });
   return null;
 }
 
@@ -854,6 +846,7 @@ function WorkspaceDocumentTitleEffectSlot({
         <WorkspaceDocumentTitleEffect
           label={presentation.label}
           titleState={presentation.titleState}
+          isRunning={presentation.statusBucket === "running"}
         />
       )}
     </WorkspaceTabPresentationResolver>

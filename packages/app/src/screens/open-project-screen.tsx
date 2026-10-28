@@ -6,7 +6,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useRouter } from "expo-router";
 import { FolderOpen, Inbox, Plug, Smartphone } from "lucide-react-native";
 import { PaseoLogo } from "@/components/icons/paseo-logo";
-import { CommunityLinks } from "@/components/community-links";
+import { BrandFooter } from "@/branding/brand-footer";
 import { MenuHeader } from "@/components/headers/menu-header";
 import { useOpenAddProject } from "@/hooks/use-open-add-project";
 import { useImportSession } from "@/hooks/use-import-session";
@@ -109,7 +109,7 @@ export function OpenProjectScreen() {
           </View>
         </View>
         <View style={styles.communityRow}>
-          <CommunityLinks />
+          <BrandFooter />
         </View>
       </ScrollView>
       <PairDeviceModal
